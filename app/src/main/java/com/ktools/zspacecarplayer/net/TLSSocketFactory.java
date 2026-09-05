@@ -6,6 +6,12 @@ import java.net.InetAddress;
 import java.net.Socket;
 import java.security.KeyManagementException;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
@@ -13,7 +19,12 @@ import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 
 /**
- * 针对 Android 4.3 (API 18) 的 TLS 1.2 / 1.1 强制开启及 SNI (Server Name Indication) 补丁
+ * 针对 Android 4.3 (API 18) 的 TLS 1.2 / 1.1 强制开启、SNI (Server Name Indication) 补丁，
+ * 并解决 Android 4.3 与 Cloudflare 等现代服务器的 cipher 兼容问题。
+ *
+ * Android 4.3 默认只启用 CBC 类 cipher，而 Cloudflare 仅提供 ECDSA 的 GCM/CHACHA20 cipher，
+ * 两者无交集会导致 TLS 握手失败（典型的 "SSL handshake aborted ... Failure in SSL library,
+ * usually a protocol error"）。这里显式启用系统支持 ECDSA GCM cipher 以完成握手。
  */
 public class TLSSocketFactory extends SSLSocketFactory {
 
@@ -77,7 +88,10 @@ public class TLSSocketFactory extends SSLSocketFactory {
                 sslSocket.setEnabledProtocols(sslSocket.getSupportedProtocols());
             }
 
-            // 2. 针对 Android 4.3 反射注入 SNI (Server Name Indication)，防止多域名 Caddy 握手拒绝
+            // 2. 显式启用 ECDSA GCM cipher（Android 4.3 默认未启用 GCM；Cloudflare 只提供 ECDSA GCM/CHACHA20）
+            enableModernCiphers(sslSocket);
+
+            // 3. 针对 Android 4.3 反射注入 SNI (Server Name Indication)，防止多域名 Caddy 握手拒绝
             if (host != null && !host.isEmpty()) {
                 try {
                     Method setHostnameMethod = sslSocket.getClass().getMethod("setHostname", String.class);
@@ -87,5 +101,36 @@ public class TLSSocketFactory extends SSLSocketFactory {
             }
         }
         return socket;
+    }
+
+    /**
+     * 追加启用服务器(Cloudflare)所要求、且该系统 SSL 引擎实际支持(cipher 实现存在)的 ECDSA GCM 套件。
+     * Android 4.3 的 Conscrypt/OpenSSL 1.0.1 支持这些 cipher 实现，只是默认 enabled 列表不包含它们。
+     */
+    private void enableModernCiphers(SSLSocket sslSocket) {
+        try {
+            Set<String> supportedSet = new HashSet<String>(Arrays.asList(sslSocket.getSupportedCipherSuites()));
+            String[] wanted = new String[]{
+                    "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+                    "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+                    "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
+                    "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA"
+            };
+            List<String> addList = new ArrayList<String>();
+            for (String c : wanted) {
+                if (supportedSet.contains(c)) {
+                    addList.add(c);
+                }
+            }
+            if (addList.isEmpty()) {
+                return;
+            }
+
+            Set<String> enabledSet = new LinkedHashSet<String>(Arrays.asList(sslSocket.getEnabledCipherSuites()));
+            enabledSet.addAll(addList);
+            sslSocket.setEnabledCipherSuites(enabledSet.toArray(new String[0]));
+        } catch (Exception e) {
+            // 任一 cipher 不受支持则回退到系统默认，避免崩溃
+        }
     }
 }

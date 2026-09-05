@@ -1,0 +1,117 @@
+
+Audio Focus stack entries (last is top of stack):
+  source:android.os.BinderProxy@42a8a788 -- pack: com.ktools.zspacecarplayer -- client: android.media.AudioManager@4266a5f8com.ktools.zspacecarplayer.service.AudioPlayerService$14@42736600 -- duration: 1 -- uid: 10064 -- stream: 3 -- FocusOwner: true
+
+Remote Control stack entries (last is top of stack):
+  pi: PendingIntent{426c3c28: PendingIntentRecord{42885f30 android broadcastIntent}} -- pack: null  -- ercvr: ComponentInfo{com.ktools.zspacecarplayer/com.ktools.zspacecarplayer.service.MediaButtonReceiver}  -- client: null  -- uid: -1  -- type: 0  state: PLAYSTATE_STOPPED, PLAYBACK_POSITION_INVALID ,ms ,1.0X
+  pi: PendingIntent{42a8b608: PendingIntentRecord{42a0f268 com.ktools.zspacecarplayer broadcastIntent}} -- pack: null  -- ercvr: ComponentInfo{com.ktools.zspacecarplayer/com.ktools.zspacecarplayer.service.MediaButtonReceiver}  -- client: null  -- uid: -1  -- type: 0  state: PLAYSTATE_STOPPED, PLAYBACK_POSITION_INVALID ,ms ,1.0X
+  pi: PendingIntent{42a501f0: PendingIntentRecord{42895e40 com.tencent.qqmusiccar broadcastIntent}} -- pack: com.tencent.qqmusiccar  -- ercvr: ComponentInfo{com.tencent.qqmusiccar/com.tencent.qqmusicsdk.player.listener.MediaButtonReceiver}  -- client: android.media.IRemoteControlClient$Stub$Proxy@4297a7a0  -- uid: 10021  -- type: 0  state: PLAYSTATE_PAUSED, 0ms ,1.0X
+
+Remote Control Client stack entries (last is top of stack):
+  uid: -1  -- id: 1  -- type: 0  -- state: PLAYSTATE_STOPPED, PLAYBACK_POSITION_INVALID ,ms ,1.0X  -- vol handling: 1  -- vol: 15  -- volMax: 15  -- volObs: null
+  uid: -1  -- id: 2  -- type: 0  -- state: PLAYSTATE_STOPPED, PLAYBACK_POSITION_INVALID ,ms ,1.0X  -- vol handling: 1  -- vol: 15  -- volMax: 15  -- volObs: null
+  uid: 10021  -- id: 3  -- type: 0  -- state: PLAYSTATE_PAUSED, 0ms ,1.0X  -- vol handling: 1  -- vol: 15  -- volMax: 15  -- volObs: null
+
+Current remote control generation ID = 10
+
+Remote Volume State:
+  has remote: false
+  is remote active: false
+  rccId: -1
+  volume handling: PLAYBACK_VOLUME_VARIABLE(1)
+  volume: 39
+  volume steps: 39
+
+Remote Control Display list entries:
+  IRCD: com.android.internal.policy.impl.keyguard.KeyguardUpdateMonitor$2@42792150  -- w:-1  -- h:-1  -- wantsPosSync:false
+
+Stream volumes (device: index)
+- STREAM_VOICE_CALL:
+   Mute count: 0
+   Current: 2: 11, 40000000: 16, 
+- STREAM_SYSTEM:
+   Mute count: 0
+   Current: 20000: 16, 40000000: 16, 
+- STREAM_RING:
+   Mute count: 0
+   Current: 2: 6, 40000000: 16, 
+- STREAM_MUSIC:
+   Mute count: 0
+   Current: 2: 14, 40000000: 16, 
+- STREAM_ALARM:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_NOTIFICATION:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_BLUETOOTH_SCO:
+   Mute count: 0
+   Current: 2: 11, 40000000: 16, 
+- STREAM_SYSTEM_ENFORCED:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_DTMF:
+   Mute count: 0
+   Current: 20000: 16, 40000000: 16, 
+- STREAM_TTS:
+   Mute count: 0
+   Current: 10000: 2, 40000000: 16, 
+- STREAM_TUNER:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_NAVI_TTS:
+   Mute count: 0
+   Current: 10000: 10, 40000000: 16, 
+- STREAM_NEUSOFT_MUSIC:
+   Mute count: 0
+   Current: 2: 10, 40000000: 16, 
+- STREAM_AUX:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_MIC:
+   Mute count: 0
+   Current: 10000: 2, 40000000: 16, 
+- STREAM_SPDIF:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_ICALL:
+   Mute count: 0
+   Current: 800000: 16, 40000000: 16, 
+- STREAM_ECALL:
+   Mute count: 0
+   Current: 800000: 16, 40000000: 16, 
+- STREAM_AM:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_FM:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_RVC:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_SCREENOFF:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_BTAUDIO:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_CARPLAYAUDIO:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_COMING_HINT:
+   Mute count: 0
+   Current: 40000000: 16, 
+- STREAM_NAVI_ALERT:
+   Mute count: 0
+   Current: 20000: 10, 40000000: 16, 
+
+- mute affected streams = 0xb408
+
+Ringer mode: 
+- mode: NORMAL
+- ringer mode affected streams = 0xae
+- ringer mode muted streams = 0x0
+
+Audio routes:
+  mMainType=0x0
+  mBluetoothName=null

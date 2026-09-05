@@ -4,7 +4,7 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:gravity="center"
-    android:paddingTop="8dp"
-    android:paddingBottom="8dp"
-    android:textColor="#80FFFFFF"
-    android:textSize="16sp" />
+    android:paddingTop="6dp"
+    android:paddingBottom="6dp"
+    android:textColor="@color/ink_mute"
+    android:textSize="@dimen/lyr_label" />

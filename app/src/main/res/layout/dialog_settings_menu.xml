@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="@dimen/dialog_w"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_panel"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="设置"
+        android:textColor="@color/ink"
+        android:textSize="@dimen/dialog_title"
+        android:textStyle="bold" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="16dp"
+        android:layout_marginBottom="16dp"
+        android:background="@color/line" />
+
+    <!-- 选项 1: EQ 音效 -->
+    <LinearLayout
+        android:id="@+id/btnMenuEq"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/bg_card_grid"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="16dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🎛️"
+            android:textSize="@dimen/dialog_title" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="EQ 音效均衡器"
+                android:textColor="@color/ink"
+                android:textSize="@dimen/card_title_size"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="全景声场 · 空间混响 · 低音增强"
+                android:textColor="@color/ink_dim"
+                android:textSize="@dimen/card_sub_size" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="›"
+            android:textColor="@color/ink_mute"
+            android:textSize="@dimen/card_title_size" />
+    </LinearLayout>
+
+    <!-- 选项 2: 服务器配置 -->
+    <LinearLayout
+        android:id="@+id/btnMenuServer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/bg_card_grid"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="16dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🌐"
+            android:textSize="@dimen/dialog_title" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="服务器与账户配置"
+                android:textColor="@color/ink"
+                android:textSize="@dimen/card_title_size"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Jellyfin 服务器地址 · 登录账号密码"
+                android:textColor="@color/ink_dim"
+                android:textSize="@dimen/card_sub_size" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="›"
+            android:textColor="@color/ink_mute"
+            android:textSize="@dimen/card_title_size" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/btnMenuClose"
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/dialog_btn_h"
+        android:layout_marginTop="20dp"
+        android:background="@drawable/bg_soft_pill"
+        android:text="关闭"
+        android:textColor="@color/ink_dim"
+        android:textSize="@dimen/card_title_size" />
+
+</LinearLayout>

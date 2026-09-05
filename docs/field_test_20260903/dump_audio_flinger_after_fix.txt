@@ -1,0 +1,541 @@
+Clients:
+  pid: 2328
+  pid: 3073
+  pid: 3566
+  pid: 17710
+Global session refs:
+ session pid count
+      12 3357   1
+      13 3465   1
+      14 3566   1
+      15 3465   1
+      16 3566   1
+      17 3566   1
+      18 3566   1
+      19 3566   1
+      25 3566   1
+      26 3566   1
+      27 3566   1
+      28 3566   1
+      29 3566   1
+      30 3566   1
+      32 3073   1
+      36 3566   1
+      45 17710   1
+      45 2328   1
+Hardware status: 0
+Standby Time mSec: 3000
+
+Output thread 0x41b4c008 internals
+last write occurred (msecs): 9
+total writes: 77600
+delayed writes: 0
+blocked in write: 1
+suspend count: 0
+mix buffer : 0x40040008
+Fast track availMask=0xfe
+io handle: 2
+TID: 3097
+standby: 0
+Sample rate: 48000
+HAL frame count: 384
+Normal frame count: 768
+Channel Count: 2
+Channel Mask: 0x00000003
+Format: 1
+Frame size: 4
+
+Pending setParameters commands: 
+ Index Command
+
+Pending config events: 
+
+AudioMixer tracks: 00000001
+FastMixer command=MIX_WRITE writeSequence=310561 framesWritten=59627520
+          numTracks=1 writeErrors=0 underruns=8 overruns=24
+          sampleRate=48000 frameCount=384 measuredWarmup=3.06 ms, warmupCycles=10
+          mixPeriod=8.00 ms
+Simple moving statistics over last 11.0 seconds:
+  wall clock time in ms per mix cycle:
+    mean=7.98 min=0.01 max=15.71 stddev=0.49
+  raw CPU load in us per mix cycle:
+    mean=130 min=0 max=353 stddev=32
+Distribution of mix cycle times in ms for the tails (> ~3 stddev outliers):
+  left tail: mean=0.01 min=0.01 max=0.01 stddev=NaN
+  right tail: mean=15.71 min=15.71 max=15.71 stddev=NaN
+Fast tracks: kMaxFastTracks=8 activeMask=0x1
+Index Active Full Partial Empty  Recent Ready
+    0    yes  575       0     2    full  1536
+    1     no    0       0     0    full     0
+    2     no    0       0     0    full     0
+    3     no    0       0     0    full     0
+    4     no    0       0     0    full     0
+    5     no    0       0     0    full     0
+    6     no    0       0     0    full     0
+    7     no    0       0     0    full     0
+State queue observer: stateChanges=18
+State queue mutator: pushDirty=18 pushAck=8 blockedSequence=8
+Output thread 0x41b4c008 stream volumes in dB:
+    0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0, 8:0, 9:0, 10:0, 11:0, 12:0, 13:0, 14:0, 15:0, 16:0, 17:0, 18:0, 19:0, 20:0, 21:0, 22:0, 23:0, 24:0, 25:0
+Output thread 0x41b4c008 tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+      0   2328    3   1 0x00000003      45    705   7056 A 3 44100     0     0  0x00076848 0x000783d8 0x41e90f50 0x00000000     0         0 
+Output thread 0x41b4c008 active tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+      0   2328    3   1 0x00000003      45    705   7056 A 3 44100     0     0  0x00076848 0x000783d8 0x41e90f50 0x00000000     0         0 
+Normal mixer raw underrun counters: partial=0 empty=2
+
+- 1 Effect Chains:
+Effects for session 45:
+	Num fx In buffer   Out buffer   Active tracks:
+	02     0x41e90f50  0x40040008   1
+	Effect ID 46:
+		Session Status State Engine:
+		00045   000    003   0x41d01270
+		Descriptor:
+		- UUID: 9457A380-1207-11E4-8FB9-0002A5D5C51B
+		- TYPE: 0BED4300-DDD6-11DB-8F34-0002A5D5C51B
+		- apiVersion: 00020000
+		- flags: 00000048
+		- name: Equalizer
+		- implementor: Neusoft Co., Ltd
+		- Input configuration:
+			Buffer     Frames  Smp rate Channels Format
+			0x41e90f50 00768   48000    00000003 1
+		- Output configuration:
+			Buffer     Frames  Smp rate Channels Format
+			0x41e90f50 00768   48000    00000003 1
+		1 Clients:
+			Pid   Priority Ctrl Locked client server
+			17710 00000    1    0      00000  00000
+
+	Effect ID 47:
+		Session Status State Engine:
+		00045   000    003   0x41d07808
+		Descriptor:
+		- UUID: 973BB0A0-1207-11E4-B739-0002A5D5C51B
+		- TYPE: 0634F220-DDD4-11DB-A0FC-0002A5D5C51B
+		- apiVersion: 00020000
+		- flags: 00000248
+		- name: Dynamic Bass Boost
+		- implementor: Neusoft Co., Ltd
+		- Input configuration:
+			Buffer     Frames  Smp rate Channels Format
+			0x41e90f50 00768   48000    00000003 1
+		- Output configuration:
+			Buffer     Frames  Smp rate Channels Format
+			0x40040008 00768   48000    00000003 1
+		1 Clients:
+			Pid   Priority Ctrl Locked client server
+			17710 00000    1    0      00000  00000
+
+
+Output thread 0x400c3c68 internals
+last write occurred (msecs): 1503623
+total writes: 0
+delayed writes: 0
+blocked in write: 0
+suspend count: 0
+mix buffer : 0x400c3ef8
+Fast track availMask=0xfe
+io handle: 3
+TID: 3098
+standby: 1
+Sample rate: 48000
+HAL frame count: 384
+Normal frame count: 384
+Channel Count: 2
+Channel Mask: 0x00000003
+Format: 1
+Frame size: 4
+
+Pending setParameters commands: 
+ Index Command
+
+Pending config events: 
+
+Output thread 0x400c3c68 stream volumes in dB:
+    0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0, 8:0, 9:0, 10:0, 11:0, 12:0, 13:0, 14:0, 15:0, 16:0, 17:0, 18:0, 19:0, 20:0, 21:0, 22:0, 23:0, 24:0, 25:0
+Output thread 0x400c3c68 tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Output thread 0x400c3c68 active tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Normal mixer raw underrun counters: partial=0 empty=0
+
+- 0 Effect Chains:
+
+Output thread 0x41ba5008 internals
+last write occurred (msecs): 1503625
+total writes: 0
+delayed writes: 0
+blocked in write: 0
+suspend count: 0
+mix buffer : 0x400fe4f0
+Fast track availMask=0xfe
+io handle: 4
+TID: 3100
+standby: 1
+Sample rate: 16000
+HAL frame count: 256
+Normal frame count: 384
+Channel Count: 2
+Channel Mask: 0x00000003
+Format: 1
+Frame size: 4
+
+Pending setParameters commands: 
+ Index Command
+
+Pending config events: 
+
+AudioMixer tracks: 000001ff
+FastMixer command=COLD_IDLE writeSequence=0 framesWritten=0
+          numTracks=0 writeErrors=0 underruns=0 overruns=0
+          sampleRate=0 frameCount=0 measuredWarmup=0 ms, warmupCycles=0
+          mixPeriod=NaN ms
+Simple moving statistics over last NaN seconds:
+  wall clock time in ms per mix cycle:
+    mean=NaN min=Inf max=-Inf stddev=NaN
+  raw CPU load in us per mix cycle:
+    mean=NaN min=Inf max=-Inf stddev=NaN
+Fast tracks: kMaxFastTracks=8 activeMask=0
+Index Active Full Partial Empty  Recent Ready
+    0     no    0       0     0    full     0
+    1     no    0       0     0    full     0
+    2     no    0       0     0    full     0
+    3     no    0       0     0    full     0
+    4     no    0       0     0    full     0
+    5     no    0       0     0    full     0
+    6     no    0       0     0    full     0
+    7     no    0       0     0    full     0
+State queue observer: stateChanges=1
+State queue mutator: pushDirty=1 pushAck=0 blockedSequence=0
+Output thread 0x41ba5008 stream volumes in dB:
+    0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0, 8:0, 9:-3, 10:0, 11:0, 12:0, 13:0, 14:-3, 15:0, 16:0, 17:0, 18:0, 19:0, 20:0, 21:0, 22:0, 23:0, 24:0, 25:0
+Output thread 0x41ba5008 tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+      0   3566    9   1 0x00000001      16      0   7680 I 0 16000     0     0  0x00000000 0x00000000 0x400fe4f0 0x00000000   0x1         0 
+      1   3566   14   1 0x00000001      18      0   7680 I 0 16000  -Inf  -Inf  0x00000000 0x00000000 0x400fe4f0 0x00000000   0x1         0 
+      2   3566   14   1 0x00000001      19      0   7680 I 0 16000     0     0  0x00000000 0x00000000 0x400fe4f0 0x00000000   0x1         0 
+      8   3566   14   1 0x00000001      30      0   7680 I 0 16000     0     0  0x00000000 0x00000000 0x400fe4f0 0x00000000   0x1         0 
+      3   3566   14   1 0x00000001      25      0   7680 I 0 16000     0     0  0x00000000 0x00000000 0x400fe4f0 0x00000000   0x1         0 
+      4   3566   14   1 0x00000001      26      0   7680 I 0 16000     0     0  0x00000000 0x00000000 0x400fe4f0 0x00000000   0x1         0 
+      5   3566   14   1 0x00000001      27      0   7680 I 0 16000     0     0  0x00000000 0x00000000 0x400fe4f0 0x00000000   0x1         0 
+      6   3566   14   1 0x00000001      28      0   7680 I 0 16000     0     0  0x00000000 0x00000000 0x400fe4f0 0x00000000   0x1         0 
+      7   3566   14   1 0x00000001      29      0   7680 I 0 16000     0     0  0x00000000 0x00000000 0x400fe4f0 0x00000000   0x1         0 
+Output thread 0x41ba5008 active tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Normal mixer raw underrun counters: partial=0 empty=0
+
+- 0 Effect Chains:
+
+Output thread 0x41c54008 internals
+last write occurred (msecs): 1503630
+total writes: 0
+delayed writes: 0
+blocked in write: 0
+suspend count: 0
+mix buffer : 0x40098008
+Fast track availMask=0xfe
+io handle: 5
+TID: 3102
+standby: 1
+Sample rate: 16000
+HAL frame count: 256
+Normal frame count: 384
+Channel Count: 2
+Channel Mask: 0x00000003
+Format: 1
+Frame size: 4
+
+Pending setParameters commands: 
+ Index Command
+
+Pending config events: 
+
+AudioMixer tracks: 00000000
+FastMixer command=COLD_IDLE writeSequence=0 framesWritten=0
+          numTracks=0 writeErrors=0 underruns=0 overruns=0
+          sampleRate=0 frameCount=0 measuredWarmup=0 ms, warmupCycles=0
+          mixPeriod=NaN ms
+Simple moving statistics over last NaN seconds:
+  wall clock time in ms per mix cycle:
+    mean=NaN min=Inf max=-Inf stddev=NaN
+  raw CPU load in us per mix cycle:
+    mean=NaN min=Inf max=-Inf stddev=NaN
+Fast tracks: kMaxFastTracks=8 activeMask=0
+Index Active Full Partial Empty  Recent Ready
+    0     no    0       0     0    full     0
+    1     no    0       0     0    full     0
+    2     no    0       0     0    full     0
+    3     no    0       0     0    full     0
+    4     no    0       0     0    full     0
+    5     no    0       0     0    full     0
+    6     no    0       0     0    full     0
+    7     no    0       0     0    full     0
+State queue observer: stateChanges=1
+State queue mutator: pushDirty=1 pushAck=0 blockedSequence=0
+Output thread 0x41c54008 stream volumes in dB:
+    0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0, 8:0, 9:0, 10:0, 11:0, 12:0, 13:0, 14:0, 15:0, 16:0, 17:0, 18:0, 19:0, 20:0, 21:0, 22:0, 23:0, 24:0, 25:0
+Output thread 0x41c54008 tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Output thread 0x41c54008 active tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Normal mixer raw underrun counters: partial=0 empty=0
+
+- 0 Effect Chains:
+
+Output thread 0x41cbb008 internals
+last write occurred (msecs): 1378581
+total writes: 8
+delayed writes: 0
+blocked in write: 0
+suspend count: 0
+mix buffer : 0x40099008
+Fast track availMask=0xfe
+io handle: 6
+TID: 3104
+standby: 1
+Sample rate: 48000
+HAL frame count: 192
+Normal frame count: 1152
+Channel Count: 2
+Channel Mask: 0x00000003
+Format: 1
+Frame size: 4
+
+Pending setParameters commands: 
+ Index Command
+
+Pending config events: 
+
+AudioMixer tracks: 00000001
+FastMixer command=COLD_IDLE writeSequence=110 framesWritten=10560
+          numTracks=1 writeErrors=0 underruns=0 overruns=1
+          sampleRate=48000 frameCount=192 measuredWarmup=6.42 ms, warmupCycles=9
+          mixPeriod=4.00 ms
+Simple moving statistics over last 0.2 seconds:
+  wall clock time in ms per mix cycle:
+    mean=4.00 min=1.13 max=6.84 stddev=0.60
+  raw CPU load in us per mix cycle:
+    mean=126 min=0 max=223 stddev=38
+Fast tracks: kMaxFastTracks=8 activeMask=0x1
+Index Active Full Partial Empty  Recent Ready
+    0    yes   44       0     2    full   960
+    1     no    0       0     0    full     0
+    2     no    0       0     0    full     0
+    3     no    0       0     0    full     0
+    4     no    0       0     0    full     0
+    5     no    0       0     0    full     0
+    6     no    0       0     0    full     0
+    7     no    0       0     0    full     0
+State queue observer: stateChanges=3
+State queue mutator: pushDirty=3 pushAck=1 blockedSequence=0
+Output thread 0x41cbb008 stream volumes in dB:
+    0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0, 8:-23, 9:0, 10:0, 11:0, 12:0, 13:0, 14:0, 15:0, 16:0, 17:0, 18:0, 19:0, 20:0, 21:0, 22:0, 23:0, 24:0, 25:0
+Output thread 0x41cbb008 tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+      0   3073    1   1 0x00000003      32      1   4233 S 1 44100  -Inf  -Inf  0x00000000 0x00000000 0x40099008 0x00000000   0x1         2 
+Output thread 0x41cbb008 active tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Normal mixer raw underrun counters: partial=0 empty=2
+
+- 0 Effect Chains:
+
+Output thread 0x41bf1910 internals
+last write occurred (msecs): 1503640
+total writes: 0
+delayed writes: 0
+blocked in write: 0
+suspend count: 0
+mix buffer : 0x41bf1ba0
+Fast track availMask=0xfe
+io handle: 7
+TID: 3105
+standby: 1
+Sample rate: 32000
+HAL frame count: 192
+Normal frame count: 192
+Channel Count: 2
+Channel Mask: 0x00000003
+Format: 1
+Frame size: 4
+
+Pending setParameters commands: 
+ Index Command
+
+Pending config events: 
+
+Output thread 0x41bf1910 stream volumes in dB:
+    0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0, 8:0, 9:0, 10:0, 11:0, 12:0, 13:0, 14:0, 15:0, 16:0, 17:0, 18:0, 19:0, 20:0, 21:0, 22:0, 23:0, 24:0, 25:0
+Output thread 0x41bf1910 tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Output thread 0x41bf1910 active tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Normal mixer raw underrun counters: partial=0 empty=0
+
+- 0 Effect Chains:
+
+Output thread 0x40056cb0 internals
+last write occurred (msecs): 1503642
+total writes: 0
+delayed writes: 0
+blocked in write: 0
+suspend count: 0
+mix buffer : 0x41bf2008
+Fast track availMask=0xfe
+io handle: 8
+TID: 3106
+standby: 1
+Sample rate: 32000
+HAL frame count: 192
+Normal frame count: 192
+Channel Count: 2
+Channel Mask: 0x00000003
+Format: 1
+Frame size: 4
+
+Pending setParameters commands: 
+ Index Command
+
+Pending config events: 
+
+Output thread 0x40056cb0 stream volumes in dB:
+    0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0, 8:0, 9:0, 10:0, 11:0, 12:0, 13:0, 14:0, 15:0, 16:0, 17:0, 18:0, 19:0, 20:0, 21:0, 22:0, 23:0, 24:0, 25:0
+Output thread 0x40056cb0 tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Output thread 0x40056cb0 active tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Normal mixer raw underrun counters: partial=0 empty=0
+
+- 0 Effect Chains:
+
+Output thread 0x41bf3078 internals
+last write occurred (msecs): 1503644
+total writes: 0
+delayed writes: 0
+blocked in write: 0
+suspend count: 0
+mix buffer : 0x41bf3308
+Fast track availMask=0xfe
+io handle: 9
+TID: 3107
+standby: 1
+Sample rate: 32000
+HAL frame count: 192
+Normal frame count: 192
+Channel Count: 2
+Channel Mask: 0x00000003
+Format: 1
+Frame size: 4
+
+Pending setParameters commands: 
+ Index Command
+
+Pending config events: 
+
+Output thread 0x41bf3078 stream volumes in dB:
+    0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0, 8:0, 9:0, 10:0, 11:0, 12:0, 13:0, 14:0, 15:0, 16:0, 17:0, 18:0, 19:0, 20:0, 21:0, 22:0, 23:0, 24:0, 25:0
+Output thread 0x41bf3078 tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Output thread 0x41bf3078 active tracks
+   Name Client Type Fmt Chn mask   Session StpCnt fCount S F SRate  L dB  R dB    Server      User     Main buf    Aux Buf  Flags Underruns
+Normal mixer raw underrun counters: partial=0 empty=0
+
+- 0 Effect Chains:
+
+Input thread 0x41cac228 internals
+In index: 64
+In size: 256
+Resampling: 0
+Out channel count: 2
+Out sample rate: 16000
+io handle: 37
+TID: 17452
+standby: 0
+Sample rate: 16000
+HAL frame count: 64
+Normal frame count: 64
+Channel Count: 2
+Channel Mask: 0x0000000c
+Format: 1
+Frame size: 4
+
+Pending setParameters commands: 
+ Index Command
+
+Pending config events: 
+
+Input thread 0x41cac228 tracks
+   Clien Fmt Chn mask   Session Step S Serv     User   FrameCount
+   03566 001 0x0000000c 00036   0064 7 00ffde80 00ffde80 06400
+
+Input thread 0x41cac228 active tracks
+   Clien Fmt Chn mask   Session Step S Serv     User   FrameCount
+   03566 001 0x0000000c 00036   0064 7 00ffde80 00ffde80 06400
+
+- 1 Effect Chains:
+Effects for session 36:
+	Could not lock mutex:
+	Num fx In buffer   Out buffer   Active tracks:
+	03     0x00000000  0x00000000   0
+	Effect ID 38:
+		Session Status State Engine:
+		00036   000    003   0x41d01ec8
+		Descriptor:
+		- UUID: C06C8400-8E06-11E0-9CB6-0002A5D5C51B
+		- TYPE: 58B4B260-8E06-11E0-AA8E-0002A5D5C51B
+		- apiVersion: 00020000
+		- flags: 00000203
+		- name: Noise Suppression
+		- implementor: The Android Open Source Project
+		- Input configuration:
+			Buffer     Frames  Smp rate Channels Format
+			0x00000000 00064   16000    0000000c 1
+		- Output configuration:
+			Buffer     Frames  Smp rate Channels Format
+			0x00000000 00064   16000    0000000c 1
+		1 Clients:
+			Pid   Priority Ctrl Locked client server
+			03566 -0001    1    0      00000  00000
+
+	Effect ID 39:
+		Session Status State Engine:
+		00036   000    003   0x41eb37d8
+		Descriptor:
+		- UUID: AA8130E0-66FC-11E0-BAD0-0002A5D5C51B
+		- TYPE: 0A8ABFE0-654C-11E0-BA26-0002A5D5C51B
+		- apiVersion: 00020000
+		- flags: 00000203
+		- name: Automatic Gain Control
+		- implementor: The Android Open Source Project
+		- Input configuration:
+			Buffer     Frames  Smp rate Channels Format
+			0x00000000 00064   16000    0000000c 1
+		- Output configuration:
+			Buffer     Frames  Smp rate Channels Format
+			0x00000000 00064   16000    0000000c 1
+		1 Clients:
+			Pid   Priority Ctrl Locked client server
+			03566 -0001    1    0      00000  00000
+
+	Effect ID 40:
+		Session Status State Engine:
+		00036   000    003   0x41eb3b00
+		Descriptor:
+		- UUID: BB392EC0-8D4D-11E0-A896-0002A5D5C51B
+		- TYPE: 7B491460-8D4D-11E0-BD61-0002A5D5C51B
+		- apiVersion: 00020000
+		- flags: 00000203
+		- name: Acoustic Echo Canceler
+		- implementor: The Android Open Source Project
+		- Input configuration:
+			Buffer     Frames  Smp rate Channels Format
+			0x00000000 00064   16000    0000000c 1
+		- Output configuration:
+			Buffer     Frames  Smp rate Channels Format
+			0x00000000 00064   16000    0000000c 1
+		1 Clients:
+			Pid   Priority Ctrl Locked client server
+			03566 -0001    1    0      00000  00000
+

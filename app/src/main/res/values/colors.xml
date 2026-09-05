@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ZSpace Player 2.3 redesign tokens (Night-Drive Teal) -->
+    <color name="app_bg">#080C12</color>
+    <color name="topbar_bg">#0B1017</color>
+    <color name="panel">#101722</color>
+    <color name="panel_2">#151D2A</color>
+    <color name="panel_3">#1B2431</color>
+    <color name="line">#1ABDD3E9</color>
+    <color name="line_2">#33BDD3E9</color>
+    <color name="ink">#F1F6FB</color>
+    <color name="ink_dim">#A8B5C6</color>
+    <color name="ink_mute">#738195</color>
+    <color name="accent">#30DDC2</color>
+    <color name="accent_2">#1DBDA7</color>
+    <color name="accent_soft">#2130DDC2</color>
+    <color name="accent_border">#5730DDC2</color>
+    <color name="accent_row_bg">#1330DDC2</color>
+    <color name="on_accent">#062D29</color>
+    <color name="play_border">#85F5E5</color>
+    <color name="play_icon">#062822</color>
+    <color name="hl">#F3B34C</color>
+</resources>

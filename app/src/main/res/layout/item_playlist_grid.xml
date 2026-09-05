@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="@dimen/card_grid_h"
+    android:layout_margin="6dp"
+    android:background="@drawable/bg_card_grid"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="14dp"
+    android:paddingTop="8dp"
+    android:paddingEnd="14dp"
+    android:paddingBottom="8dp">
+
+    <!-- 类别徽标底块 -->
+    <TextView
+        android:id="@+id/tvCardIcon"
+        android:layout_width="@dimen/card_icon_size"
+        android:layout_height="@dimen/card_icon_size"
+        android:background="@drawable/bg_thumb_1"
+        android:gravity="center"
+        android:text="📁"
+        android:textColor="@color/ink"
+        android:textSize="@dimen/card_title_size" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="14dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/tvCardTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="歌单名称"
+            android:textColor="@color/ink"
+            android:textSize="@dimen/card_title_size"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvCardSub"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="0 首歌曲"
+            android:textColor="@color/ink_dim"
+            android:textSize="@dimen/card_sub_size" />
+    </LinearLayout>
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="›"
+        android:textColor="@color/ink_mute"
+        android:textSize="@dimen/card_title_size" />
+
+</LinearLayout>

@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 车机可视区仅 ~640px 高, 内容(标题+预设+3组滑条+说明+关闭按钮)固定超出,
+     必须可滚动否则底部内容(含关闭按钮)在车机上完全不可达 (2026-09-05 实车发现)。 -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="@dimen/dialog_w"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_panel"
+    android:fadingEdge="vertical"
+    android:fadingEdgeLength="24dp"
+    android:requiresFadingEdge="vertical"
+    android:scrollbars="vertical">
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="20dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="车载 EQ 均衡器与音效设置"
+        android:textColor="#00E5FF"
+        android:textSize="@dimen/dialog_title"
+        android:textStyle="bold" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="12dp"
+        android:layout_marginBottom="16dp"
+        android:background="#20FFFFFF" />
+
+    <!-- 均衡器预设模式选择 -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="音乐预设模式 (Equalizer Presets)"
+        android:textColor="#FFFFFF"
+        android:textSize="@dimen/dialog_text"
+        android:textStyle="bold" />
+
+    <Spinner
+        android:id="@+id/spEqPresets"
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/dialog_input_h"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_button" />
+
+    <!-- 重低音增强 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="重低音增强 (Bass Boost)"
+            android:textColor="#FFFFFF"
+            android:textSize="@dimen/dialog_text"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvBassValue"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:text="0%"
+            android:textColor="#00E5FF"
+            android:textSize="@dimen/dialog_text" />
+    </LinearLayout>
+
+    <SeekBar
+        android:id="@+id/sbBassBoost"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:max="100"
+        android:progress="0"
+        android:progressDrawable="@drawable/eq_seekbar_track"
+        android:thumb="@drawable/seekbar_thumb"
+        android:thumbOffset="@dimen/seek_thumb_off" />
+
+    <!-- 全景声场展宽 (Virtualizer) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="全景声场展宽 (Panorama)"
+            android:textColor="#FFFFFF"
+            android:textSize="@dimen/dialog_text"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvPanoValue"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:text="0%"
+            android:textColor="#00E5FF"
+            android:textSize="@dimen/dialog_text" />
+    </LinearLayout>
+
+    <SeekBar
+        android:id="@+id/sbPanorama"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:max="100"
+        android:progress="0"
+        android:progressDrawable="@drawable/eq_seekbar_track"
+        android:thumb="@drawable/seekbar_thumb"
+        android:thumbOffset="@dimen/seek_thumb_off" />
+
+    <!-- 空间混响 (EnvironmentalReverb aux) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="环绕空间混响 (Surround)"
+            android:textColor="#FFFFFF"
+            android:textSize="@dimen/dialog_text"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvSpaceValue"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:text="关"
+            android:textColor="#00E5FF"
+            android:textSize="@dimen/dialog_text" />
+    </LinearLayout>
+
+    <SeekBar
+        android:id="@+id/sbSpaceReverb"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:max="3"
+        android:progress="0"
+        android:progressDrawable="@drawable/eq_seekbar_track"
+        android:thumb="@drawable/seekbar_thumb"
+        android:thumbOffset="@dimen/seek_thumb_off" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="档位：关 / 房间 / 音乐厅 / 影院"
+        android:textColor="#80FFFFFF"
+        android:textSize="@dimen/dialog_text" />
+
+    <Button
+        android:id="@+id/btnCloseEq"
+        android:layout_width="match_parent"
+        android:layout_height="@dimen/dialog_btn_h"
+        android:layout_marginTop="24dp"
+        android:background="@drawable/bg_button"
+        android:text="关闭"
+        android:textColor="#FFFFFF"
+        android:textSize="@dimen/dialog_text" />
+</LinearLayout>
+</ScrollView>

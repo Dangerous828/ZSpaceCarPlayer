@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- EQ 弹窗滑条: 深色细轨道 + teal 进度条 (替换系统 holo 满宽样式), thumb 用 seekbar_thumb -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@android:id/background">
+        <shape android:shape="rectangle">
+            <size android:height="@dimen/seek_track_h" />
+            <corners android:radius="@dimen/seek_track_h" />
+            <solid android:color="#26FFFFFF" />
+        </shape>
+    </item>
+    <item android:id="@android:id/progress">
+        <clip>
+            <shape android:shape="rectangle">
+                <size android:height="@dimen/seek_track_h" />
+                <corners android:radius="@dimen/seek_track_h" />
+                <solid android:color="#00E5FF" />
+            </shape>
+        </clip>
+    </item>
+</layer-list>
