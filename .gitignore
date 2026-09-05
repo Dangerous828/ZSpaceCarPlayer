@@ -23,6 +23,7 @@ Thumbs.db
 
 # Agent / Temp
 .kiro/
+.pi/
 .v2c/
 .video_agent/
 out/

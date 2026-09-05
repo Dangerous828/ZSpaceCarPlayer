@@ -1137,6 +1137,7 @@ public class AudioPlayerService extends Service {
 
     public void setEqPreset(short presetIndex) {
         this.currentPresetIndex = presetIndex;
+        com.ktools.zspacecarplayer.dsp.NativeDsp.setEqualizerPreset(presetIndex);
         if (equalizer != null) {
             try {
                 if (presetIndex >= 0 && presetIndex < equalizer.getNumberOfPresets()) {
@@ -1150,6 +1151,7 @@ public class AudioPlayerService extends Service {
 
     public void setBassBoostPercent(int percent) {
         this.currentBassPercent = percent;
+        com.ktools.zspacecarplayer.dsp.NativeDsp.setBassBoost(percent);
         if (bassBoost != null) {
             try {
                 if (bassBoost.getStrengthSupported()) {
@@ -1168,6 +1170,7 @@ public class AudioPlayerService extends Service {
 
     public void setVirtualizerPercent(int percent) {
         this.currentVirtualizerPercent = Math.max(0, Math.min(100, percent));
+        com.ktools.zspacecarplayer.dsp.NativeDsp.setVirtualizer(this.currentVirtualizerPercent);
         if (!ENABLE_PANORAMA_REVERB) return;
         if (this.currentVirtualizerPercent <= 0) {
             if (virtualizer != null) {
@@ -1197,6 +1200,7 @@ public class AudioPlayerService extends Service {
 
     public void setReverbMode(int mode) {
         this.currentReverbMode = Math.max(0, Math.min(REVERB_PARAMS.length - 1, mode));
+        com.ktools.zspacecarplayer.dsp.NativeDsp.setReverb(this.currentReverbMode);
         if (!ENABLE_PANORAMA_REVERB) return;
         if (this.currentReverbMode > 0) {
             ensureReverb();

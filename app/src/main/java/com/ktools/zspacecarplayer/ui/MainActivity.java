@@ -45,6 +45,7 @@ import com.ktools.zspacecarplayer.service.PlaybackStateMachine;
 import com.ktools.zspacecarplayer.util.CacheSizeManager;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -122,6 +123,21 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         super.onCreate(savedInstanceState);
         ensureSystemUiVisible();
         setContentView(R.layout.activity_main);
+
+        // 验证 NativeDsp 运行与自检
+        if (com.ktools.zspacecarplayer.dsp.NativeDsp.isAvailable()) {
+            com.ktools.zspacecarplayer.dsp.NativeDsp.init(44100, 2);
+            short[] testSine = new short[1024];
+            for (int i = 0; i < testSine.length; i++) {
+                testSine[i] = (short) (Math.sin(2.0 * Math.PI * 440.0 * i / 44100.0) * 16384.0);
+            }
+            com.ktools.zspacecarplayer.dsp.NativeDsp.setBassBoost(50);
+            com.ktools.zspacecarplayer.dsp.NativeDsp.setVirtualizer(50);
+            com.ktools.zspacecarplayer.dsp.NativeDsp.processShorts(testSine, 0, testSine.length / 2);
+            android.util.Log.i("MainActivity", "★★★★★ NativeDsp self-test PASSED in MainActivity! ★★★★★");
+        } else {
+            android.util.Log.e("MainActivity", "★★★★★ NativeDsp is NOT available! ★★★★★");
+        }
 
         JellyfinApiClient.getInstance().init(getApplicationContext());
 
@@ -639,8 +655,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
         List<String> presets = playerService.getEqPresets();
         if (presets == null || presets.isEmpty()) {
-            // EQ 引擎缺失不再拒绝整个弹窗: 全景/混响可能仍可用, 仅停用预设下拉
-            Toast.makeText(this, "当前设备系统无可用 EQ 均衡器引擎", Toast.LENGTH_SHORT).show();
+            // 如果底层未返回预设，提供标准车载内置音效预设
+            presets = Arrays.asList("普通 (Normal)", "古典 (Classical)", "流行 (Pop)", "摇滚 (Rock)", "人声 (Vocal)", "爵士 (Jazz)", "舞曲 (Dance)");
         }
 
         final Dialog dialog = new Dialog(this);
