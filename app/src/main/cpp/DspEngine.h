@@ -62,6 +62,11 @@ public:
         return reverb.getMode();
     }
 
+    int getChannels() {
+        std::lock_guard<std::recursive_mutex> lock(dspMutex);
+        return channels;
+    }
+
     // 处理交错 16-bit PCM (Interleaved Stereo)
     void process(int16_t *buffer, int numFrames) {
         std::lock_guard<std::recursive_mutex> lock(dspMutex);

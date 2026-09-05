@@ -1,7 +1,7 @@
 #pragma once
 #include <cmath>
 
-// Mid-Side 空间展宽器 + 交叉馈送防听觉疲劳
+// Mid-Side 立体声展宽器: side 增益放大拉开声场 (纯 M/S, 无交叉馈送)
 class StereoWidener {
 public:
     StereoWidener() : width(1.0f) {}

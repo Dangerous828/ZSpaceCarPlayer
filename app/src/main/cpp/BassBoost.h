@@ -28,8 +28,6 @@ public:
     void reset() {
         filterL.reset();
         filterR.reset();
-        subFilterL.reset();
-        subFilterR.reset();
     }
 
     inline void process(float &left, float &right) {
@@ -55,6 +53,4 @@ private:
     int strengthPercent;
     BiquadFilter filterL;
     BiquadFilter filterR;
-    BiquadFilter subFilterL;
-    BiquadFilter subFilterR;
 };

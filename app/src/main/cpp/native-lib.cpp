@@ -78,8 +78,9 @@ Java_com_ktools_zspacecarplayer_dsp_NativeDsp_nativeProcessBytes(JNIEnv *env, jc
 
     jbyte *bufPtr = env->GetByteArrayElements(buffer, nullptr);
     if (bufPtr) {
-        // 16-bit PCM = 2 bytes per sample, 2 channels = 4 bytes per frame
-        int numFrames = numBytes / 4;
+        // 16-bit PCM: 每样本 2 字节; 帧数按实际声道数换算 (单声道 /2, 立体声 /4)
+        int bytesPerFrame = 2 * (gDspEngine->getChannels() > 0 ? gDspEngine->getChannels() : 2);
+        int numFrames = numBytes / bytesPerFrame;
         int16_t *pcm16 = reinterpret_cast<int16_t*>(bufPtr + byteOffset);
         gDspEngine->process(pcm16, numFrames);
         env->ReleaseByteArrayElements(buffer, bufPtr, 0);
