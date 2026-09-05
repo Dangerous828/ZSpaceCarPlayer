@@ -63,6 +63,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     private RecyclerView rvCategoriesGrid;
     private RecyclerView rvSongList;
     private RecyclerView rvLyrics;
+    /** 用户正在手动拖动歌词列表 (暂停自动居中) */
+    private boolean lyricUserDragging = false;
+    /** 双击返回确认的完全退出: onDestroy 时结束进程, 不留后台残留 */
+    private boolean exitCompletely = false;
     private View layoutSettingsPage;
 
     private CategoryAdapter categoryAdapter;
@@ -222,6 +226,13 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         rvLyrics.setHasFixedSize(true);
         rvLyrics.setLayoutManager(new LinearLayoutManager(this));
         rvLyrics.setAdapter(lyricAdapter);
+        // 用户手动拖动歌词时暂停自动居中, 松手恢复 (避免抢滚动)
+        rvLyrics.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrollStateChanged(RecyclerView recyclerView, int newState) {
+                lyricUserDragging = (newState == RecyclerView.SCROLL_STATE_DRAGGING);
+            }
+        });
 
         categoryAdapter.setOnCategoryClickListener(new CategoryAdapter.OnCategoryClickListener() {
             @Override
@@ -1279,8 +1290,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         }
 
         int highlightIdx = lyricAdapter.updateHighlight(currentMs);
-        if (highlightIdx >= 0) {
-            rvLyrics.smoothScrollToPosition(highlightIdx);
+        if (highlightIdx >= 0 && !lyricUserDragging) {
+            centerLyricHighlight(highlightIdx);
         }
 
         // 5秒节流异步写入进度
@@ -1299,6 +1310,36 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     @Override
     public void onError(String message) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+    }
+
+    /** 歌词高亮行视口居中: 高亮行上下都保留歌词。
+     *  目标行在屏内 → 计算到视口中心的增量平滑滚动 (逐行跟进);
+     *  不在屏内 (换歌/手动 seek 的远距离跳转) → 先跳转, 布局后一次性居中。 */
+    private void centerLyricHighlight(final int position) {
+        final RecyclerView.LayoutManager lm = rvLyrics.getLayoutManager();
+        if (!(lm instanceof LinearLayoutManager)) return;
+        final LinearLayoutManager llm = (LinearLayoutManager) lm;
+        final int rvHeight = rvLyrics.getHeight();
+        if (rvHeight <= 0) return;
+        View target = llm.findViewByPosition(position);
+        if (target != null) {
+            int targetCenter = (llm.getDecoratedTop(target) + llm.getDecoratedBottom(target)) / 2;
+            int dy = targetCenter - rvHeight / 2;
+            if (dy != 0) {
+                rvLyrics.smoothScrollBy(0, dy);
+            }
+        } else {
+            rvLyrics.scrollToPosition(position);
+            rvLyrics.post(new Runnable() {
+                @Override
+                public void run() {
+                    View v = llm.findViewByPosition(position);
+                    if (v != null) {
+                        llm.scrollToPositionWithOffset(position, rvHeight / 2 - v.getHeight() / 2);
+                    }
+                }
+            });
+        }
     }
 
     /** 细进度填充条: 直接读 SeekBar 自身 progress/max, 与原生滑块共用同一比例尺, 永不分叉。
@@ -1367,12 +1408,28 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     public void onBackPressed() {
         long now = System.currentTimeMillis();
         if (now - lastBackPressTime < 2000) {
-            super.onBackPressed();
-            finish();
+            exitPlayerCompletely();
         } else {
             lastBackPressTime = now;
             Toast.makeText(this, "再按一次退出 ZSpaceCarPlayer", Toast.LENGTH_SHORT).show();
         }
+    }
+
+    /** 完全退出: 停止播放并释放全部音频资源 (播放器/音效/缓冲源/焦点/媒体键),
+     *  移除前台通知并停止服务; onDestroy 里再结束进程, 不留任何后台残留。
+     *  车机场景「退出=停」: 与 Home 键后台听歌是两条路径, 互不影响。 */
+    private void exitPlayerCompletely() {
+        exitCompletely = true;
+        if (isBound && playerService != null) {
+            try {
+                playerService.stopAndReleaseAllAudioResources();
+            } catch (Exception ignored) {}
+        } else {
+            Intent stopIntent = new Intent(this, AudioPlayerService.class);
+            stopIntent.setAction(AudioPlayerService.ACTION_STOP_AND_RELEASE);
+            try { startService(stopIntent); } catch (Exception ignored) {}
+        }
+        finish();
     }
 
     @Override
@@ -1401,5 +1458,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             isBound = false;
         }
         super.onDestroy();
+        if (exitCompletely) {
+            // 音频资源已在 exitPlayerCompletely 释放; 这里结束进程, 确保代理 accept 线程、
+            // 原生库与一切后台线程零残留 (进度状态已在 onPause 落库)
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }
     }
 }
