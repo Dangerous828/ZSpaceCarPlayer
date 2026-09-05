@@ -27,6 +27,7 @@ import androidx.core.app.NotificationCompat;
 import com.ktools.zspacecarplayer.R;
 import com.ktools.zspacecarplayer.db.SongDao;
 import com.ktools.zspacecarplayer.net.JellyfinApiClient;
+import com.ktools.zspacecarplayer.player.stream.HttpProxyServer;
 import com.ktools.zspacecarplayer.model.SongItem;
 import com.ktools.zspacecarplayer.ui.MainActivity;
 
@@ -449,7 +450,8 @@ public class AudioPlayerService extends Service {
                     mediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
                     bindMediaPlayerCallbacks(generation);
                     gainEnvelope.setImmediate(0.0f);
-                    mediaPlayer.setDataSource(urlToPlay);
+                    // v3: 本地回环代理 + 大环形缓冲，抵御公网串流抖动（消除“播 2s 停 1s”式 underrun）
+                    mediaPlayer.setDataSource(HttpProxyServer.getInstance().getProxyUrl(urlToPlay));
                     playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.PREPARING);
                     mediaPlayer.prepareAsync();
                     startForegroundServiceNotification("正在播放", song.getName() + " - " + song.getArtist());
@@ -1387,6 +1389,8 @@ public class AudioPlayerService extends Service {
             try { mediaPlayer.release(); } catch (Exception ignored) {}
             mediaPlayer = null;
         }
+        // v3: 释放流式缓冲数据源（本地代理的环形缓冲下载线程）
+        try { HttpProxyServer.getInstance().clearSources(); } catch (Exception ignored) {}
         try { stopForeground(true); } catch (Exception ignored) {}
         stopSelf();
     }

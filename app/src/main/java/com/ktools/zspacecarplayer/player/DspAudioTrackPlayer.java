@@ -13,6 +13,7 @@ import android.os.Message;
 import android.util.Log;
 
 import com.ktools.zspacecarplayer.dsp.NativeDsp;
+import com.ktools.zspacecarplayer.player.stream.HttpProxyServer;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -112,7 +113,8 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
 
             extractor = new MediaExtractor();
             if (dataSourcePath.startsWith("http://") || dataSourcePath.startsWith("https://")) {
-                extractor.setDataSource(dataSourcePath);
+                // v3: 网络源经本地回环代理，前置大环形缓冲抗抖动
+                extractor.setDataSource(HttpProxyServer.getInstance().getProxyUrl(dataSourcePath));
             } else {
                 File file = new File(dataSourcePath);
                 FileInputStream fis = new FileInputStream(file);
