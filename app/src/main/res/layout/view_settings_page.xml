@@ -213,6 +213,61 @@
                     android:textSize="@dimen/card_title_size" />
             </LinearLayout>
 
+            <LinearLayout
+                android:id="@+id/btnSettingEngineToggle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_card_grid"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="16dp"
+                android:paddingTop="14dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="14dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="⚡"
+                    android:textSize="@dimen/dialog_title" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="14dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="播放引擎 (v3 实验特性)"
+                        android:textColor="@color/ink"
+                        android:textSize="@dimen/card_title_size"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="v3=自研软解+C++音效, 系统=车机原生兼容"
+                        android:textColor="@color/ink_dim"
+                        android:textSize="@dimen/card_sub_size" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnSettingEngineValue"
+                    android:layout_width="@dimen/font_w"
+                    android:layout_height="@dimen/mini_h"
+                    android:background="@drawable/bg_soft_pill"
+                    android:text="系统"
+                    android:textColor="@color/ink_dim"
+                    android:textSize="@dimen/mini_text" />
+            </LinearLayout>
+
         </LinearLayout>
     </ScrollView>
 </LinearLayout>

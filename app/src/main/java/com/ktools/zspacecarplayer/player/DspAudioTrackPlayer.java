@@ -58,6 +58,38 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
 
     private volatile Thread renderThread;
     private final AtomicBoolean isRendering = new AtomicBoolean(false);
+    private volatile boolean sawInputEOS = false;
+    private volatile boolean sawOutputEOS = false;
+
+    /** 渲染线程内执行 seek：重定位 extractor、flush 解码器与 AudioTrack，回调 onSeekComplete */
+    private void doSeekInternal(int seekTargetMs) {
+        MediaExtractor ex = extractor;
+        MediaCodec dec = codec;
+        if (ex == null || dec == null) {
+            return;
+        }
+        try {
+            ex.seekTo(seekTargetMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+            dec.flush();
+            sawInputEOS = false;
+            sawOutputEOS = false;
+            if (audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                audioTrack.pause();
+                audioTrack.flush();
+                audioTrack.play();
+            }
+            mainHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (eventListener != null) {
+                        eventListener.onSeekComplete();
+                    }
+                }
+            });
+        } catch (Exception e) {
+            Log.w(TAG, "Seek error in render loop", e);
+        }
+    }
 
     public DspAudioTrackPlayer() {
         startDecodeThread();
@@ -113,8 +145,13 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
 
             extractor = new MediaExtractor();
             if (dataSourcePath.startsWith("http://") || dataSourcePath.startsWith("https://")) {
-                // v3: 网络源经本地回环代理，前置大环形缓冲抗抖动
-                extractor.setDataSource(HttpProxyServer.getInstance().getProxyUrl(dataSourcePath));
+                if (dataSourcePath.contains("127.0.0.1") && dataSourcePath.contains("/stream?u=")) {
+                    // 服务层已包过一次本地代理, 不能二次嵌套 (否则嵌套两层 BufferedHttpSource 双份下载)
+                    extractor.setDataSource(dataSourcePath);
+                } else {
+                    // v3: 网络源经本地回环代理，前置大环形缓冲抗抖动
+                    extractor.setDataSource(HttpProxyServer.getInstance().getProxyUrl(dataSourcePath));
+                }
             } else {
                 File file = new File(dataSourcePath);
                 FileInputStream fis = new FileInputStream(file);
@@ -208,6 +245,8 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
 
     private void startRenderingLoop() {
         stopRenderingThread();
+        sawInputEOS = false;
+        sawOutputEOS = false;
         isRendering.set(true);
         renderThread = new Thread(new Runnable() {
             @Override
@@ -220,10 +259,16 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
 
     private void stopRenderingThread() {
         isRendering.set(false);
+        // 先暂停 AudioTrack：让阻塞在 write() 里的渲染线程尽快返回，避免 join 超时后
+        // 释放解码器/轨道与仍存活的写操作竞态（旧 Android 上直接 SIGSEGV）
+        AudioTrack at = audioTrack;
+        if (at != null) {
+            try { at.pause(); } catch (Exception ignored) {}
+        }
         if (renderThread != null) {
             renderThread.interrupt();
             try {
-                renderThread.join(500);
+                renderThread.join(3000);
             } catch (InterruptedException ignored) {}
             renderThread = null;
         }
@@ -234,12 +279,18 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         ByteBuffer[] outputBuffers = codec.getOutputBuffers();
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
 
-        boolean sawInputEOS = false;
-        boolean sawOutputEOS = false;
         byte[] pcmTempBuf = new byte[8192];
 
         try {
             while (isRendering.get() && !sawOutputEOS) {
+                // 处理 Seek 请求——必须先于 isPlaying 判断：
+                // 失焦恢复/看门狗重建都是「先 seek 再 start」，暂停态 seek 不处理会死等回调
+                int seekTarget = pendingSeekMs;
+                if (seekTarget >= 0) {
+                    pendingSeekMs = -1;
+                    doSeekInternal(seekTarget);
+                }
+
                 if (!isPlaying) {
                     try {
                         Thread.sleep(20);
@@ -247,37 +298,6 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                         break;
                     }
                     continue;
-                }
-
-                // 处理 Seek 请求
-                int seekTarget = pendingSeekMs;
-                if (seekTarget >= 0) {
-                    pendingSeekMs = -1;
-                    if (extractor != null && codec != null) {
-                        try {
-                            extractor.seekTo(seekTarget * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
-                            codec.flush();
-                            sawInputEOS = false;
-                            sawOutputEOS = false;
-                            inputBuffers = codec.getInputBuffers();
-                            outputBuffers = codec.getOutputBuffers();
-                            if (audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
-                                audioTrack.pause();
-                                audioTrack.flush();
-                                audioTrack.play();
-                            }
-                            mainHandler.post(new Runnable() {
-                                @Override
-                                public void run() {
-                                    if (eventListener != null) {
-                                        eventListener.onSeekComplete();
-                                    }
-                                }
-                            });
-                        } catch (Exception e) {
-                            Log.w(TAG, "Seek error in render loop", e);
-                        }
-                    }
                 }
 
                 // 1. 送数据到解码器
@@ -355,8 +375,28 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         } catch (Exception e) {
             if (isRendering.get()) {
                 Log.e(TAG, "Exception in renderLoop", e);
+                // 渲染循环死亡必须上报，否则服务看门狗只能靠进度冻结兜底，UI 无感知
+                synchronized (stateLock) {
+                    isPrepared = false;
+                    isPlaying = false;
+                }
+                mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (eventListener != null) {
+                            eventListener.onError(MediaPlayerError.DECODE_FAILED,
+                                    "render loop died: " + e.getMessage());
+                        }
+                    }
+                });
             }
         }
+    }
+
+    /** 错误码约定：负值与系统 MediaPlayer 错误码空间区分开 */
+    public static final class MediaPlayerError {
+        public static final int DECODE_FAILED = -10001;
+        private MediaPlayerError() {}
     }
 
     @Override
@@ -497,5 +537,20 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     @Override
     public void setOnEventListener(OnEventListener listener) {
         this.eventListener = listener;
+    }
+
+    @Override
+    public int getAudioSessionId() {
+        return 0; // 裸 PCM 直写 AudioFlinger，不经过系统 audiofx 会话
+    }
+
+    @Override
+    public void attachAuxEffect(int effectId) {
+        // 自研软件混响在 NativeDsp 内部完成，系统 aux 总线不再使用
+    }
+
+    @Override
+    public void setAuxEffectSendLevel(float level) {
+        // 同上，no-op
     }
 }

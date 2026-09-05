@@ -628,6 +628,34 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 }
             });
         }
+
+        setupEngineToggle();
+    }
+
+    /** v3 自研 DSP 引擎开关: 写偏好即可, 引擎在下一首歌起播时惰性重建 (不打断当前播放) */
+    private void setupEngineToggle() {
+        if (layoutSettingsPage == null) return;
+        final View row = layoutSettingsPage.findViewById(R.id.btnSettingEngineToggle);
+        final Button valueBtn = layoutSettingsPage.findViewById(R.id.btnSettingEngineValue);
+        if (row == null || valueBtn == null) return;
+
+        SharedPreferences sp = getSharedPreferences(AudioPlayerService.PREF_NAME, MODE_PRIVATE);
+        valueBtn.setText(sp.getBoolean(AudioPlayerService.PREF_KEY_ENGINE_V3, false) ? "v3 DSP" : "系统");
+
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                SharedPreferences sp = getSharedPreferences(
+                        AudioPlayerService.PREF_NAME, MODE_PRIVATE);
+                boolean next = !sp.getBoolean(AudioPlayerService.PREF_KEY_ENGINE_V3, false);
+                sp.edit().putBoolean(AudioPlayerService.PREF_KEY_ENGINE_V3, next).apply();
+                valueBtn.setText(next ? "v3 DSP" : "系统");
+                Toast.makeText(MainActivity.this,
+                        next ? "已切换 v3 自研 DSP 引擎, 下一首歌起生效"
+                             : "已切换回系统 MediaPlayer, 下一首歌起生效",
+                        Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     private String getPlayModeText(int mode) {

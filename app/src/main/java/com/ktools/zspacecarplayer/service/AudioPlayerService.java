@@ -27,6 +27,9 @@ import androidx.core.app.NotificationCompat;
 import com.ktools.zspacecarplayer.R;
 import com.ktools.zspacecarplayer.db.SongDao;
 import com.ktools.zspacecarplayer.net.JellyfinApiClient;
+import com.ktools.zspacecarplayer.player.DspAudioTrackPlayer;
+import com.ktools.zspacecarplayer.player.AndroidMediaPlayerWrapper;
+import com.ktools.zspacecarplayer.player.IAudioPlayer;
 import com.ktools.zspacecarplayer.player.stream.HttpProxyServer;
 import com.ktools.zspacecarplayer.model.SongItem;
 import com.ktools.zspacecarplayer.ui.MainActivity;
@@ -50,7 +53,15 @@ public class AudioPlayerService extends Service {
     public static final int MODE_SINGLE_REPEAT = 1;
     public static final int MODE_RANDOM = 2;
 
-    private MediaPlayer mediaPlayer;
+    /** 播放引擎偏好: v3 自研 DSP 引擎 (软解 + NativeDsp + 裸 AudioTrack) */
+    public static final String PREF_NAME = "zspace_car_player";
+    public static final String PREF_KEY_ENGINE_V3 = "play_engine_v3";
+    private static final boolean DEFAULT_ENGINE_V3 = false; // 默认系统引擎, 车机一次只变一个变量
+
+    /** 播放器引擎抽象: 系统 MediaPlayer (兼容模式) / v3 自研 DSP 管线 */
+    private IAudioPlayer player;
+    /** 当前 player 是否为 v3 引擎 (与偏好可能短暂不一致, 切歌时惰性对齐) */
+    private boolean playerIsV3 = false;
     private List<SongItem> playlist = new ArrayList<>();
     private int currentIndex = -1;
     private int currentPlayMode = MODE_SEQUENCE;
@@ -210,20 +221,41 @@ public class AudioPlayerService extends Service {
         }
     }
 
-    private void initMediaPlayer() {
-        if (mediaPlayer == null) {
-            mediaPlayer = new MediaPlayer();
-            mediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
+    /** 是否启用 v3 自研 DSP 引擎 (设置页可切换) */
+    public boolean isV3EngineEnabled() {
+        return getSharedPreferences(PREF_NAME, MODE_PRIVATE)
+                .getBoolean(PREF_KEY_ENGINE_V3, DEFAULT_ENGINE_V3);
+    }
+
+    /** 确保当前引擎与偏好一致; 不一致 (或未创建) 时重建。在每次起播前调用。 */
+    private void ensureEngine(final long generation) {
+        boolean wantV3 = isV3EngineEnabled();
+        if (player != null && playerIsV3 == wantV3) {
+            return;
         }
+        if (player != null) {
+            try { player.stop(); } catch (Exception ignored) {}
+            try { player.release(); } catch (Exception ignored) {}
+            player = null;
+            playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.IDLE);
+            Log.i(TAG, "Switched engine, old player released (v3=" + playerIsV3 + ")");
+        }
+        player = wantV3 ? new DspAudioTrackPlayer() : new AndroidMediaPlayerWrapper();
+        playerIsV3 = wantV3;
+        Log.i(TAG, "Player engine: " + (wantV3 ? "v3 native DSP (AudioTrack)" : "system MediaPlayer"));
+    }
+
+    private void initMediaPlayer() {
+        ensureEngine(playbackState.getGenerationId());
     }
 
     private void initDspSafetyComponents() {
         gainEnvelope = new GainEnvelope(new GainEnvelope.VolumeTarget() {
             @Override
             public void setVolume(float gain) {
-                if (mediaPlayer == null) return;
+                if (player == null) return;
                 try {
-                    mediaPlayer.setVolume(gain, gain);
+                    player.setVolume(gain, gain);
                 } catch (IllegalStateException ignored) {
                 }
             }
@@ -237,9 +269,9 @@ public class AudioPlayerService extends Service {
         progressRunnable = new Runnable() {
             @Override
             public void run() {
-                if (mediaPlayer != null && playbackState.isPrepared() && isPlaying()) {
-                    int currentMs = mediaPlayer.getCurrentPosition();
-                    int totalMs = mediaPlayer.getDuration();
+                if (player != null && playbackState.isPrepared() && isPlaying()) {
+                    int currentMs = player.getCurrentPosition();
+                    int totalMs = player.getDuration();
 
                     // 卡死检测: 进度零位移累计 10 秒 (公网断流时 NuPlayer 保持 playing
                     // 状态但无数据, AudioFlinger standby 无声), 从断点重启当前曲目
@@ -441,19 +473,20 @@ public class AudioPlayerService extends Service {
         final Runnable prepareTransition = new Runnable() {
             @Override
             public void run() {
-                if (!playbackState.isCurrentGeneration(generation) || mediaPlayer == null) return;
+                if (!playbackState.isCurrentGeneration(generation)) return;
                 try {
+                    ensureEngine(generation); // 引擎偏好有变化时在此惰性重建
+                    if (player == null) return;
                     if (isPlaying()) {
-                        mediaPlayer.pause();
+                        player.pause();
                     }
-                    mediaPlayer.reset();
-                    mediaPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
-                    bindMediaPlayerCallbacks(generation);
+                    player.reset();
+                    bindPlayerCallbacks(generation);
                     gainEnvelope.setImmediate(0.0f);
                     // v3: 本地回环代理 + 大环形缓冲，抵御公网串流抖动（消除“播 2s 停 1s”式 underrun）
-                    mediaPlayer.setDataSource(HttpProxyServer.getInstance().getProxyUrl(urlToPlay));
+                    player.setDataSource(HttpProxyServer.getInstance().getProxyUrl(urlToPlay));
                     playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.PREPARING);
-                    mediaPlayer.prepareAsync();
+                    player.prepareAsync();
                     startForegroundServiceNotification("正在播放", song.getName() + " - " + song.getArtist());
                     if (remoteControlClient != null) {
                         remoteControlClient.setMetadata(song.getName(), song.getArtist(),
@@ -482,16 +515,16 @@ public class AudioPlayerService extends Service {
         }
     }
 
-    private void bindMediaPlayerCallbacks(final long generation) {
-        mediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
+    private void bindPlayerCallbacks(final long generation) {
+        if (player == null) return;
+        player.setOnEventListener(new IAudioPlayer.OnEventListener() {
             @Override
-            public void onPrepared(MediaPlayer mp) {
-                handlePrepared(mp, generation);
+            public void onPrepared(int durationMs) {
+                handlePrepared(durationMs, generation);
             }
-        });
-        mediaPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
+
             @Override
-            public void onCompletion(MediaPlayer mp) {
+            public void onCompletion() {
                 if (!playbackState.isCurrentGeneration(generation)) return;
                 playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.READY);
                 if (currentPlayMode == MODE_SINGLE_REPEAT) {
@@ -501,17 +534,15 @@ public class AudioPlayerService extends Service {
                     playNext(PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
                 }
             }
-        });
-        mediaPlayer.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+
             @Override
-            public boolean onError(MediaPlayer mp, int what, int extra) {
-                return handleMediaPlayerError(mp, what, extra, generation);
+            public void onError(int what, String extra) {
+                handlePlayerError(what, extra, generation);
             }
-        });
-        mediaPlayer.setOnSeekCompleteListener(new MediaPlayer.OnSeekCompleteListener() {
+
             @Override
-            public void onSeekComplete(MediaPlayer mp) {
-                handleSeekComplete(mp, generation);
+            public void onSeekComplete() {
+                handleSeekComplete(generation);
             }
         });
     }
@@ -569,7 +600,7 @@ public class AudioPlayerService extends Service {
                 && (playbackState.isPreparing() || isPlaying())) {
             return;
         }
-        if (mediaPlayer != null && playbackState.isPrepared()) {
+        if (player != null && playbackState.isPrepared()) {
             requestAudioFocus();
             resumeAfterInterruption(playbackState.getGenerationId(), origin);
             return;
@@ -593,7 +624,7 @@ public class AudioPlayerService extends Service {
 
     private void fadeOutAndPause(final long generation, final boolean notify,
                                  final PlaybackStateMachine.PauseReason reason) {
-        if (mediaPlayer == null || !playbackState.isPrepared()) {
+        if (player == null || !playbackState.isPrepared()) {
             if (notify && PlaybackStateMachine.shouldCompletePause(reason,
                     playbackState.getDesiredPlayback(), playbackState.getFocusState())
                     && stateChangeListener != null) {
@@ -605,11 +636,11 @@ public class AudioPlayerService extends Service {
         gainEnvelope.fadeTo(0.0f, FADE_OUT_MS, new Runnable() {
             @Override
             public void run() {
-                if (!playbackState.isCurrentGeneration(generation) || mediaPlayer == null) return;
+                if (!playbackState.isCurrentGeneration(generation) || player == null) return;
                 if (!PlaybackStateMachine.shouldCompletePause(reason,
                         playbackState.getDesiredPlayback(), playbackState.getFocusState())) return;
                 try {
-                    if (mediaPlayer.isPlaying()) mediaPlayer.pause();
+                    if (player.isPlaying()) player.pause();
                     playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.PAUSED);
                     // 本次连续出声结束: 恢复时允许功放再唤醒一次 (长暂停后 DSP 可能已 standby)
                     playbackState.notePlaybackInterrupted();
@@ -628,9 +659,9 @@ public class AudioPlayerService extends Service {
 
     private boolean startPreparedPlayback(long generation,
                                           PlaybackStateMachine.PlaybackOrigin origin) {
-        if (mediaPlayer == null || !playbackState.canStart(generation, origin)) return false;
+        if (player == null || !playbackState.canStart(generation, origin)) return false;
         try {
-            if (!mediaPlayer.isPlaying()) mediaPlayer.start();
+            if (!player.isPlaying()) player.start();
             playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.PLAYING);
             nudgeAmpChannel();
             if (remoteControlClient != null) remoteControlClient.setPlaying();
@@ -685,7 +716,7 @@ public class AudioPlayerService extends Service {
     private void retryAudioFocusForAutomaticPlayback() {
         requestAudioFocus();
         if (playbackState.getFocusState() == PlaybackStateMachine.FocusState.DENIED) return;
-        if (mediaPlayer != null && playbackState.isPrepared()) {
+        if (player != null && playbackState.isPrepared()) {
             startPreparedPlayback(playbackState.getGenerationId(),
                     PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
         }
@@ -721,13 +752,13 @@ public class AudioPlayerService extends Service {
         if (pausedAtMs >= 0
                 && PlaybackStateMachine.shouldRefreshOnTransientResume(
                         SystemClock.elapsedRealtime() - pausedAtMs)
-                && mediaPlayer != null
+                && player != null
                 && playbackState.isPrepared()) {
             int resumeMs = getCurrentPositionMs();
             long seekOperation = playbackState.beginSeekOperation();
             Log.i(TAG, "Refreshing render path after transient focus loss, resume at "
                     + resumeMs + "ms");
-            performSeek(mediaPlayer, resumeMs, generation, seekOperation);
+            performSeek(resumeMs, generation, seekOperation);
             return;
         }
         startPreparedPlayback(generation, origin);
@@ -821,7 +852,7 @@ public class AudioPlayerService extends Service {
     }
 
     public void seekTo(final int ms) {
-        if (mediaPlayer != null && playbackState.isPrepared()) {
+        if (player != null && playbackState.isPrepared()) {
             final long generation = playbackState.getGenerationId();
             final long seekOperation = playbackState.beginSeekOperation();
             playbackState.setPlaybackOrigin(PlaybackStateMachine.PlaybackOrigin.USER_UI);
@@ -830,10 +861,10 @@ public class AudioPlayerService extends Service {
                 public void run() {
                     if (!playbackState.isCurrentGeneration(generation)
                             || !playbackState.isCurrentSeekOperation(seekOperation)
-                            || mediaPlayer == null) return;
+                            || player == null) return;
                     try {
-                        if (mediaPlayer.isPlaying()) mediaPlayer.pause();
-                        performSeek(mediaPlayer, ms, generation, seekOperation);
+                        if (player.isPlaying()) player.pause();
+                        performSeek(ms, generation, seekOperation);
                     } catch (IllegalStateException e) {
                         playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.ERROR);
                         Log.w(TAG, "Seek transition failed", e);
@@ -849,8 +880,7 @@ public class AudioPlayerService extends Service {
         }
     }
 
-    private void performSeek(MediaPlayer mp, int ms, final long generation,
-                             final long seekOperation) {
+    private void performSeek(int ms, final long generation, final long seekOperation) {
         if (!playbackState.isCurrentGeneration(generation)
                 || !playbackState.isCurrentSeekOperation(seekOperation)) return;
         if (activeSeekOperationId >= 0L) {
@@ -860,7 +890,7 @@ public class AudioPlayerService extends Service {
         }
         activeSeekOperationId = seekOperation;
         playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.SEEKING);
-        mp.seekTo(ms);
+        player.seekTo(ms);
         seekTimeoutRunnable = new Runnable() {
             @Override
             public void run() {
@@ -879,7 +909,7 @@ public class AudioPlayerService extends Service {
         progressHandler.postDelayed(seekTimeoutRunnable, SEEK_TIMEOUT_MS);
     }
 
-    private void handleSeekComplete(MediaPlayer mp, long generation) {
+    private void handleSeekComplete(long generation) {
         long completedOperation = activeSeekOperationId;
         if (completedOperation < 0L) return;
         activeSeekOperationId = -1L;
@@ -893,12 +923,12 @@ public class AudioPlayerService extends Service {
     }
 
     private void performQueuedSeek(long generation) {
-        if (queuedSeekOperationId < 0L || mediaPlayer == null) return;
+        if (queuedSeekOperationId < 0L || player == null) return;
         long operation = queuedSeekOperationId;
         int targetMs = queuedSeekMs;
         queuedSeekOperationId = -1L;
         queuedSeekMs = -1;
-        performSeek(mediaPlayer, targetMs, generation, operation);
+        performSeek(targetMs, generation, operation);
     }
 
     private void finishSeekTransition(long generation, long seekOperation) {
@@ -927,7 +957,7 @@ public class AudioPlayerService extends Service {
 
     public boolean isPlaying() {
         try {
-            return mediaPlayer != null && mediaPlayer.isPlaying();
+            return player != null && player.isPlaying();
         } catch (IllegalStateException e) {
             return false;
         }
@@ -942,9 +972,9 @@ public class AudioPlayerService extends Service {
 
     /** 播放器内的真实进度, 避免依赖可能滞后的 UI SeekBar 状态 */
     public int getCurrentPositionMs() {
-        if (mediaPlayer != null && playbackState.isPrepared()) {
+        if (player != null && playbackState.isPrepared()) {
             try {
-                return mediaPlayer.getCurrentPosition();
+                return player.getCurrentPosition();
             } catch (IllegalStateException e) {
                 return 0;
             }
@@ -1099,15 +1129,16 @@ public class AudioPlayerService extends Service {
         return true;
     }
 
-    /** 每次曲目 prepare 后调用: reset 会重建 AudioTrack, aux 挂接关系会丢, 必须重挂 */
-    private void applyAuxEffect(MediaPlayer mp) {
-        if (mp == null) return;
+    /** 每次曲目 prepare 后调用: reset 会重建 AudioTrack, aux 挂接关系会丢, 必须重挂。
+     *  v3 引擎下为 no-op (软件混响在 NativeDsp 内部)。 */
+    private void applyAuxEffect() {
+        if (playerIsV3 || player == null) return;
         try {
             if (currentReverbMode > 0 && ensureReverb()) {
-                mp.attachAuxEffect(environmentalReverb.getId());
-                mp.setAuxEffectSendLevel(REVERB_SEND_LEVEL);
+                player.attachAuxEffect(environmentalReverb.getId());
+                player.setAuxEffectSendLevel(REVERB_SEND_LEVEL);
             } else {
-                mp.attachAuxEffect(0);
+                player.attachAuxEffect(0);
             }
         } catch (Exception e) {
             Log.w(TAG, "attachAuxEffect failed", e);
@@ -1209,7 +1240,7 @@ public class AudioPlayerService extends Service {
         } else if (environmentalReverb != null) {
             try { environmentalReverb.setEnabled(false); } catch (Exception ignored) {}
         }
-        applyAuxEffect(mediaPlayer);
+        applyAuxEffect();
     }
 
     // ---------------- 音频焦点避让 ----------------
@@ -1259,15 +1290,22 @@ public class AudioPlayerService extends Service {
 
     // ---------------- Generation-bound MediaPlayer callbacks ----------------
 
-    private void handlePrepared(MediaPlayer mp, long generation) {
+    private void handlePrepared(int durationMs, long generation) {
         if (!playbackState.isCurrentGeneration(generation)) return;
         playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.READY);
         everPrepared = true;
         streamRetryCount = 0;
         stallRecovering = false;
         stallTicks = 0;
-        updateAudioFxSession(mp.getAudioSessionId());
-        if (ENABLE_PANORAMA_REVERB) applyAuxEffect(mp);
+        if (playerIsV3) {
+            // v3 引擎: 音效全部由 NativeDsp 在 PCM 链路内完成。
+            // 系统音效绝不能挂 (尤其 session 0 的 Virtualizer 有 bypass 静音缺陷)
+            releaseAudioFx();
+            currentAudioSessionId = -1;
+        } else {
+            updateAudioFxSession(player.getAudioSessionId());
+        }
+        if (!playerIsV3 && ENABLE_PANORAMA_REVERB) applyAuxEffect();
         int seekMs = pendingSeekMs;
         pendingSeekMs = -1;
         // 恢复锚点跟着当前曲目走: 若起播后立刻再次断流 (还没跑到第一个 tick),
@@ -1275,9 +1313,9 @@ public class AudioPlayerService extends Service {
         SongItem preparedSong = getCurrentSong();
         lastTickTrackId = preparedSong != null ? preparedSong.getId() : null;
         lastTickPositionMs = Math.max(seekMs, 0);
-        if (seekMs > 0 && seekMs < mp.getDuration()) {
+        if (seekMs > 0 && seekMs < durationMs) {
             long seekOperation = playbackState.beginSeekOperation();
-            performSeek(mp, seekMs, generation, seekOperation);
+            performSeek(seekMs, generation, seekOperation);
             return;
         }
         if (playbackState.canStart(generation, playbackState.getPlaybackOrigin())) {
@@ -1289,14 +1327,15 @@ public class AudioPlayerService extends Service {
     private static final long REAUTH_COOLDOWN_MS = 120 * 1000;
     private long lastReAuthAt = 0;
 
-    private boolean handleMediaPlayerError(final MediaPlayer mp, int what, int extra,
-                                           final long generation) {
-        if (!playbackState.isCurrentGeneration(generation)) return true;
+    private void handlePlayerError(int what, String extra, final long generation) {
+        if (!playbackState.isCurrentGeneration(generation)) return;
         Log.e(TAG, "MediaPlayer error: what=" + what + ", extra=" + extra);
         playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.ERROR);
         stallRecovering = false;
         invalidateSeekOperations();
-        boolean recoverable = (what == MediaPlayer.MEDIA_ERROR_IO || what == MEDIA_ERROR_SYSTEM);
+        // v3 引擎的负值错误码 (DECODE_FAILED=-10001) 一律按可恢复的网络/解码类错误重试
+        boolean recoverable = playerIsV3
+                || (what == MediaPlayer.MEDIA_ERROR_IO || what == MEDIA_ERROR_SYSTEM);
         boolean reauthCooldownElapsed =
                 System.currentTimeMillis() - lastReAuthAt > REAUTH_COOLDOWN_MS;
         PlaybackStateMachine.StreamRetryAction action = PlaybackStateMachine.streamRetryAction(
@@ -1307,7 +1346,7 @@ public class AudioPlayerService extends Service {
             if (failedSong != null && !authWaitInProgress) {
                 int resumeMs = pendingSeekMs;
                 if (resumeMs <= 0) {
-                    try { resumeMs = mp.getCurrentPosition(); } catch (Exception ignored) { resumeMs = 0; }
+                    try { resumeMs = player.getCurrentPosition(); } catch (Exception ignored) { resumeMs = 0; }
                 }
                 final int finalResumeMs = Math.max(resumeMs, 0);
                 pendingSeekMs = -1;
@@ -1315,7 +1354,7 @@ public class AudioPlayerService extends Service {
                     if (stateChangeListener != null) stateChangeListener.onError("网络波动, 自动重试 " + failedSong.getName());
                     replayPendingSong(failedSong, finalResumeMs,
                             PlaybackStateMachine.PlaybackOrigin.NETWORK_RECOVERY);
-                    return true;
+                    return;
                 }
                 lastReAuthAt = System.currentTimeMillis();
                 authWaitInProgress = true;
@@ -1338,12 +1377,11 @@ public class AudioPlayerService extends Service {
                         if (stateChangeListener != null) stateChangeListener.onError("重新登录失败, 无法播放 " + failedSong.getName());
                     }
                 });
-                return true;
+                return;
             }
         }
         pendingSeekMs = -1;
         if (stateChangeListener != null) stateChangeListener.onError("播放出错(Code " + what + ")");
-        return true;
     }
 
     @Override
@@ -1384,10 +1422,10 @@ public class AudioPlayerService extends Service {
             try { environmentalReverb.release(); } catch (Exception ignored) {}
             environmentalReverb = null;
         }
-        if (mediaPlayer != null) {
-            try { mediaPlayer.stop(); } catch (Exception ignored) {}
-            try { mediaPlayer.release(); } catch (Exception ignored) {}
-            mediaPlayer = null;
+        if (player != null) {
+            try { player.stop(); } catch (Exception ignored) {}
+            try { player.release(); } catch (Exception ignored) {}
+            player = null;
         }
         // v3: 释放流式缓冲数据源（本地代理的环形缓冲下载线程）
         try { HttpProxyServer.getInstance().clearSources(); } catch (Exception ignored) {}
