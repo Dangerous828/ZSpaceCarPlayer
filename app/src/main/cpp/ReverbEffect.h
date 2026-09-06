@@ -102,19 +102,19 @@ public:
             case MODE_ROOM:
                 setRoomSize(0.5f);
                 setDamp(0.5f);
-                setWet(0.25f);
+                setWet(0.45f);
                 setDry(0.9f);
                 break;
             case MODE_HALL:
                 setRoomSize(0.75f);
                 setDamp(0.35f);
-                setWet(0.35f);
+                setWet(0.62f);
                 setDry(0.85f);
                 break;
             case MODE_THEATER:
                 setRoomSize(0.88f);
                 setDamp(0.25f);
-                setWet(0.45f);
+                setWet(0.78f);
                 setDry(0.80f);
                 break;
             case MODE_OFF:
@@ -145,7 +145,8 @@ public:
 
         float inL = left;
         float inR = right;
-        float input = (inL + inR) * 0.015f; // Scale down for headroom
+        // 0.015 -> 0.022: 车载实测混响感知偏弱, 提高激励; 输出峰值由 SoftLimiter 兜底
+        float input = (inL + inR) * 0.022f; // Scale down for headroom
 
         float outL = 0.0f;
         float outR = 0.0f;

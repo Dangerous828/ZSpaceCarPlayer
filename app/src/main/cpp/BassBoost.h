@@ -43,10 +43,11 @@ private:
             filterR.reset();
             return;
         }
-        // 0% -> 0dB, 100% -> +12dB 低频增益 (LowShelf at 120Hz)
-        float gainDb = (strengthPercent / 100.0f) * 12.0f;
-        filterL.configure(BiquadFilter::LOWSHELF, sampleRate, 120.0f, 0.707f, gainDb);
-        filterR.configure(BiquadFilter::LOWSHELF, sampleRate, 120.0f, 0.707f, gainDb);
+        // 0% -> 0dB, 100% -> +14dB 低频增益 (LowShelf at 100Hz, 贴近车载 sub 频段;
+        // 2026-09-06 实测 +12dB@120Hz 力度不足, 下移频点并加深增益)
+        float gainDb = (strengthPercent / 100.0f) * 14.0f;
+        filterL.configure(BiquadFilter::LOWSHELF, sampleRate, 100.0f, 0.707f, gainDb);
+        filterR.configure(BiquadFilter::LOWSHELF, sampleRate, 100.0f, 0.707f, gainDb);
     }
 
     float sampleRate;

@@ -9,8 +9,10 @@ public:
     void setStrength(int percent) {
         if (percent < 0) percent = 0;
         if (percent > 100) percent = 100;
-        // 0% -> 1.0 (原声直通), 100% -> 2.2 (超宽立体声/全景声场)
-        width = 1.0f + (percent / 100.0f) * 1.2f;
+        // 0% -> 1.0 (原声直通), 100% -> 3.2 (全景声场拉满)。
+        // 车载听感 2026-09-06: 旧上限 2.2 对中置为主的音源感知太弱, 上调至 3.2;
+        // side 过冲由 SoftLimiter 兜底, 不会硬削顶
+        width = 1.0f + (percent / 100.0f) * 2.2f;
     }
 
     void reset() {}

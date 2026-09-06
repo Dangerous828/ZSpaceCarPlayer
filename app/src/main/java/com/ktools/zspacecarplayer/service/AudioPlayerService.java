@@ -130,6 +130,42 @@ public class AudioPlayerService extends Service {
     /** 0=关 1=房间 2=音乐厅 3=影院 */
     private int currentReverbMode = 0;
 
+    /** 音效设置持久化 key (v3 引擎每次 prepare 重建 DSP 引擎, 必须重放用户设置) */
+    private static final String DSP_PREF_KEY_EQ = "dsp_eq_preset";
+    private static final String DSP_PREF_KEY_BASS = "dsp_bass_percent";
+    private static final String DSP_PREF_KEY_VIRTUALIZER = "dsp_virtualizer_percent";
+    private static final String DSP_PREF_KEY_REVERB = "dsp_reverb_mode";
+
+    /** 把当前音效设置下发到 v3 DSP 引擎 (prepare 后调用, 覆盖 init 造成的归零) */
+    private void applyDspParamsToNative() {
+        com.ktools.zspacecarplayer.dsp.NativeDsp.setEqualizerPreset(currentPresetIndex);
+        com.ktools.zspacecarplayer.dsp.NativeDsp.setBassBoost(currentBassPercent);
+        com.ktools.zspacecarplayer.dsp.NativeDsp.setVirtualizer(currentVirtualizerPercent);
+        com.ktools.zspacecarplayer.dsp.NativeDsp.setReverb(currentReverbMode);
+        Log.i(TAG, "DSP params applied: eq=" + currentPresetIndex
+                + " bass=" + currentBassPercent + "% virt=" + currentVirtualizerPercent
+                + "% reverb=" + currentReverbMode);
+    }
+
+    private void loadDspParamsFromPrefs() {
+        android.content.SharedPreferences sp = getSharedPreferences(PREF_NAME, MODE_PRIVATE);
+        int eq = sp.getInt(DSP_PREF_KEY_EQ, -1);
+        currentPresetIndex = (short) eq;
+        currentBassPercent = sp.getInt(DSP_PREF_KEY_BASS, 0);
+        currentVirtualizerPercent = sp.getInt(DSP_PREF_KEY_VIRTUALIZER, 0);
+        currentReverbMode = sp.getInt(DSP_PREF_KEY_REVERB, 0);
+    }
+
+    private void saveDspParamsToPrefs() {
+        android.content.SharedPreferences sp = getSharedPreferences(PREF_NAME, MODE_PRIVATE);
+        sp.edit()
+                .putInt(DSP_PREF_KEY_EQ, currentPresetIndex)
+                .putInt(DSP_PREF_KEY_BASS, currentBassPercent)
+                .putInt(DSP_PREF_KEY_VIRTUALIZER, currentVirtualizerPercent)
+                .putInt(DSP_PREF_KEY_REVERB, currentReverbMode)
+                .apply();
+    }
+
     private OnPlayerStateChangeListener stateChangeListener;
     private final IBinder binder = new LocalBinder();
 
@@ -151,6 +187,7 @@ public class AudioPlayerService extends Service {
         super.onCreate();
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         initMediaPlayer();
+        loadDspParamsFromPrefs();
         initDspSafetyComponents();
         initProgressTracker();
         registerMediaButton();
@@ -1170,6 +1207,7 @@ public class AudioPlayerService extends Service {
 
     public void setEqPreset(short presetIndex) {
         this.currentPresetIndex = presetIndex;
+        saveDspParamsToPrefs();
         com.ktools.zspacecarplayer.dsp.NativeDsp.setEqualizerPreset(presetIndex);
         if (equalizer != null) {
             try {
@@ -1184,6 +1222,7 @@ public class AudioPlayerService extends Service {
 
     public void setBassBoostPercent(int percent) {
         this.currentBassPercent = percent;
+        saveDspParamsToPrefs();
         com.ktools.zspacecarplayer.dsp.NativeDsp.setBassBoost(percent);
         if (bassBoost != null) {
             try {
@@ -1203,6 +1242,7 @@ public class AudioPlayerService extends Service {
 
     public void setVirtualizerPercent(int percent) {
         this.currentVirtualizerPercent = Math.max(0, Math.min(100, percent));
+        saveDspParamsToPrefs();
         com.ktools.zspacecarplayer.dsp.NativeDsp.setVirtualizer(this.currentVirtualizerPercent);
         if (!ENABLE_PANORAMA_REVERB) return;
         if (this.currentVirtualizerPercent <= 0) {
@@ -1233,6 +1273,7 @@ public class AudioPlayerService extends Service {
 
     public void setReverbMode(int mode) {
         this.currentReverbMode = Math.max(0, Math.min(REVERB_PARAMS.length - 1, mode));
+        saveDspParamsToPrefs();
         com.ktools.zspacecarplayer.dsp.NativeDsp.setReverb(this.currentReverbMode);
         if (!ENABLE_PANORAMA_REVERB) return;
         if (this.currentReverbMode > 0) {
@@ -1302,6 +1343,7 @@ public class AudioPlayerService extends Service {
             // 系统音效绝不能挂 (尤其 session 0 的 Virtualizer 有 bypass 静音缺陷)
             releaseAudioFx();
             currentAudioSessionId = -1;
+            applyDspParamsToNative(); // 引擎刚被 init 重建, 必须重放用户音效设置
         } else {
             updateAudioFxSession(player.getAudioSessionId());
         }

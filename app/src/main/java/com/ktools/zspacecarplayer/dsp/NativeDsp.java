@@ -6,6 +6,14 @@ public class NativeDsp {
     private static final String TAG = "NativeDsp";
     private static boolean isLoaded = false;
 
+    // 最近一次下发的音效参数。nativeInit 会重建 C++ 引擎并清空全部参数
+    // (起播 prepare / 流格式变化都会触发), init 后必须自动重放, 否则用户
+    // 拉满的音效一切歌就静默归零。
+    private static int lastPreset = -1;
+    private static int lastBass = 0;
+    private static int lastVirtualizer = 0;
+    private static int lastReverb = 0;
+
     static {
         try {
             System.loadLibrary("zspacecarplayer_dsp");
@@ -24,6 +32,16 @@ public class NativeDsp {
         if (!isLoaded) return;
         try {
             nativeInit(sampleRate, channels);
+            // 重放最近一次参数, 对抗引擎重建时的默认值归零
+            if (lastPreset >= 0) {
+                nativeSetEqualizerPreset(lastPreset);
+            }
+            nativeSetBassBoost(lastBass);
+            nativeSetVirtualizer(lastVirtualizer);
+            nativeSetReverb(lastReverb);
+            Log.i(TAG, "init sr=" + sampleRate + " ch=" + channels
+                    + " reapplied: eq=" + lastPreset + " bass=" + lastBass
+                    + " virt=" + lastVirtualizer + " reverb=" + lastReverb);
         } catch (Throwable t) {
             Log.e(TAG, "nativeInit error", t);
         }
@@ -40,6 +58,7 @@ public class NativeDsp {
 
     public static void setEqualizerPreset(int preset) {
         if (!isLoaded) return;
+        lastPreset = preset;
         try {
             Log.d(TAG, "setEqualizerPreset: " + preset);
             nativeSetEqualizerPreset(preset);
@@ -60,6 +79,7 @@ public class NativeDsp {
 
     public static void setBassBoost(int percent) {
         if (!isLoaded) return;
+        lastBass = percent;
         try {
             Log.d(TAG, "setBassBoost: " + percent + "%");
             nativeSetBassBoost(percent);
@@ -70,6 +90,7 @@ public class NativeDsp {
 
     public static void setVirtualizer(int percent) {
         if (!isLoaded) return;
+        lastVirtualizer = percent;
         try {
             Log.d(TAG, "setVirtualizer: " + percent + "%");
             nativeSetVirtualizer(percent);
@@ -80,6 +101,7 @@ public class NativeDsp {
 
     public static void setReverb(int mode) {
         if (!isLoaded) return;
+        lastReverb = mode;
         try {
             Log.d(TAG, "setReverb: mode=" + mode);
             nativeSetReverb(mode);
