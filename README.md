@@ -155,3 +155,17 @@ cd /Users/cpuser/Code/kTool/ZSpaceCarPlayer
 ./deploy_to_car.sh
 ```
 该脚本会自动调用 Android SDK 编译 Debug APK，并通过网络 ADB 自动推送到 `10.212.252.52:5555` 车机并启动应用！
+
+### 7.3 构建 JDK 要求（JDK 17 ~ 21，严禁 25）
+* **失败形态：** Gradle 8.9 在 **JDK 25** 下于 daemon 启动阶段直接崩溃（`Unsupported class file major version` 一类），`build.gradle` 根本来不及执行，因此**无法用构建脚本自检拦截**，只能靠环境约定。
+* **本机（macOS + Homebrew）固定 JDK 21：**
+  ```bash
+  export JAVA_HOME=/opt/homebrew/Cellar/openjdk@21/21.0.9/libexec/openjdk.jdk/Contents/Home
+  ./gradlew testDebugUnitTest
+  ```
+* **或本地覆盖**（`gradle.properties` 已入库，机器相关路径不要写进去；用用户级文件）：
+  ```properties
+  # ~/.gradle/gradle.properties
+  org.gradle.java.home=/path/to/jdk-17-or-21
+  ```
+* **NDK：** v3 原生 DSP / 无损软解需要 NDK + CMake（`app/src/main/cpp`），双 ABI `armeabi-v7a` + `arm64-v8a`。
