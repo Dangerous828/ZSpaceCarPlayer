@@ -8,14 +8,15 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
+        android:name=".ZSpaceApplication"
         android:allowBackup="true"
         android:icon="@drawable/ic_launcher_car"
         android:label="ZSpaceCarPlayer"
         android:roundIcon="@drawable/ic_launcher_car"
         android:supportsRtl="true"
+        android:largeHeap="true"
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.AppCompat.NoActionBar">
-
         <activity
             android:name=".ui.MainActivity"
             android:configChanges="orientation|keyboardHidden|screenSize"
