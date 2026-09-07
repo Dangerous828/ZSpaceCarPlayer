@@ -380,9 +380,14 @@ public class JellyfinApiClient {
     }
 
     public String getStreamUrl(String itemId) {
+        return getStreamUrl(itemId, true);
+    }
+
+    public String getStreamUrl(String itemId, boolean directPlay) {
         if (itemId == null || itemId.isEmpty()) return "";
         if (accessToken == null || accessToken.isEmpty()) return "";
-        return serverUrl + "/Audio/" + itemId + "/stream.mp3?api_key=" + accessToken + "&static=true";
+        String base = serverUrl + "/Audio/" + itemId + "/stream.mp3?api_key=" + accessToken;
+        return directPlay ? (base + "&static=true") : base;
     }
 
     public String getCoverUrl(String itemId) {

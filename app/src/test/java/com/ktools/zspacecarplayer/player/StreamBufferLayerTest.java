@@ -11,12 +11,8 @@ import org.junit.Test;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.ServerSocket;
-import java.net.Socket;
 import java.util.Arrays;
 import java.util.Random;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -31,161 +27,16 @@ import static org.junit.Assert.assertTrue;
  */
 public class StreamBufferLayerTest {
 
-    // ===================== 测试用源服务器 ===================== //
-
-    /** 极简 HTTP 源服务器：按 Range 语义供数，可限速、可计数，全线程守护 */
-    private static final class TestOrigin {
-        final byte[] data;
-        volatile boolean supportRange = true;
-        volatile long chunkDelayMs = 0;
-        /** ≥0 时：首个请求只送这么多字节就干净关闭（模拟公网提前断流/截断） */
-        volatile long firstRequestTruncateAt = -1;
-        final AtomicInteger requestCount = new AtomicInteger();
-        final AtomicInteger rangeCount = new AtomicInteger();
-        private ServerSocket serverSocket;
-        private Thread acceptThread;
-
-        TestOrigin(byte[] data) throws IOException {
-            this.data = data;
-            serverSocket = new ServerSocket(0, 8, java.net.InetAddress.getByName("127.0.0.1"));
-            acceptThread = new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    acceptLoop();
-                }
-            }, "test-origin-accept");
-            acceptThread.setDaemon(true);
-            acceptThread.start();
-        }
-
-        String url() {
-            return "http://127.0.0.1:" + serverSocket.getLocalPort() + "/music.flac";
-        }
-
-        private void acceptLoop() {
-            while (!serverSocket.isClosed()) {
-                final Socket socket;
-                try {
-                    socket = serverSocket.accept();
-                } catch (IOException e) {
-                    return;
-                }
-                Thread t = new Thread(new Runnable() {
-                    @Override
-                    public void run() {
-                        handle(socket);
-                    }
-                }, "test-origin-conn");
-                t.setDaemon(true);
-                t.start();
-            }
-        }
-
-        private void handle(Socket socket) {
-            try {
-                socket.setSoTimeout(20_000);
-                InputStream in = socket.getInputStream();
-                OutputStream out = socket.getOutputStream();
-                String line = readLine(in);
-                long rangeStart = -1;
-                while (true) {
-                    String h = readLine(in);
-                    if (h == null || h.length() == 0) {
-                        break;
-                    }
-                    if (h.toLowerCase().startsWith("range:")) {
-                        String v = h.substring(6).trim();
-                        if (v.startsWith("bytes=")) {
-                            String spec = v.substring(6);
-                            int dash = spec.indexOf('-');
-                            if (dash > 0) {
-                                rangeStart = Long.parseLong(spec.substring(0, dash).trim());
-                            }
-                        }
-                    }
-                }
-                requestCount.incrementAndGet();
-                if (rangeStart >= 0) {
-                    rangeCount.incrementAndGet();
-                }
-                long start = (rangeStart >= 0 && supportRange) ? rangeStart : 0;
-                boolean truncate = requestCount.get() == 1 && firstRequestTruncateAt >= 0;
-                long bodyLimit = data.length - start;
-                if (truncate) {
-                    bodyLimit = Math.min(bodyLimit, Math.max(0, firstRequestTruncateAt - start));
-                }
-                if (rangeStart >= 0 && supportRange) {
-                    out.write(("HTTP/1.1 206 Partial Content\r\n"
-                            + "Content-Range: bytes " + start + "-" + (data.length - 1) + "/" + data.length + "\r\n"
-                            + "Content-Length: " + (data.length - start) + "\r\n"
-                            + "Content-Type: audio/flac\r\n"
-                            + "Accept-Ranges: bytes\r\n\r\n").getBytes("ISO-8859-1"));
-                } else {
-                    out.write(("HTTP/1.1 200 OK\r\n"
-                            + "Content-Length: " + data.length + "\r\n"
-                            + "Content-Type: audio/flac\r\n"
-                            + "Accept-Ranges: bytes\r\n\r\n").getBytes("ISO-8859-1"));
-                }
-                out.flush();
-                byte[] chunk = new byte[64 * 1024];
-                long pos = start;
-                long end = start + bodyLimit;
-                while (pos < end) {
-                    int n = (int) Math.min(chunk.length, end - pos);
-                    if (chunkDelayMs > 0) {
-                        Thread.sleep(chunkDelayMs);
-                    }
-                    out.write(Arrays.copyOfRange(data, (int) pos, (int) pos + n), 0, n);
-                    pos += n;
-                    out.flush();
-                }
-                out.flush();
-                socket.close();
-            } catch (Exception e) {
-                // 客户端提前断开属于正常路径
-                try {
-                    socket.close();
-                } catch (IOException ignored) {
-                }
-            }
-        }
-
-        private String readLine(InputStream in) throws IOException {
-            StringBuilder sb = new StringBuilder(80);
-            while (true) {
-                int c = in.read();
-                if (c < 0) {
-                    return sb.length() == 0 ? null : sb.toString();
-                }
-                if (c == '\n') {
-                    int len = sb.length();
-                    if (len > 0 && sb.charAt(len - 1) == '\r') {
-                        sb.setLength(len - 1);
-                    }
-                    return sb.toString();
-                }
-                sb.append((char) c);
-            }
-        }
-
-        void shutdown() {
-            try {
-                serverSocket.close();
-            } catch (IOException ignored) {
-            }
-        }
-    }
-
     private static final byte[] CONTENT = new byte[2 * 1024 * 1024];
 
     static {
         new Random(42).nextBytes(CONTENT);
     }
 
-    private TestOrigin origin;
+    private TestHttpOrigin origin;
 
-    private TestOrigin newOrigin() throws IOException {
-        origin = new TestOrigin(CONTENT);
+    private TestHttpOrigin newOrigin() throws IOException {
+        origin = new TestHttpOrigin(CONTENT);
         return origin;
     }
 
@@ -216,7 +67,7 @@ public class StreamBufferLayerTest {
     /** 顺序读穿整段流；窗口必须恒 ≤ 容量（环形回收生效且不死锁） */
     @Test(timeout = 60_000)
     public void sequentialReadWrapsRingWithBoundedWindow() throws Exception {
-        TestOrigin src = newOrigin();
+        TestHttpOrigin src = newOrigin();
         int capacity = 256 * 1024; // 故意 < 旧实现 1MB 的 PROTECT 保留量，回归回收死锁
         BufferedHttpSource source = new BufferedHttpSource(src.url(), capacity);
         Object token = new Object();
@@ -242,7 +93,7 @@ public class StreamBufferLayerTest {
     /** 向后 seek 落在窗口外：触发 reset + 从新位置重新下载，数据必须正确 */
     @Test(timeout = 60_000)
     public void backwardSeekOutsideWindowRepositions() throws Exception {
-        TestOrigin src = newOrigin();
+        TestHttpOrigin src = newOrigin();
         int capacity = 256 * 1024;
         BufferedHttpSource source = new BufferedHttpSource(src.url(), capacity);
         byte[] buf = new byte[32 * 1024];
@@ -270,7 +121,7 @@ public class StreamBufferLayerTest {
     /** 全量拉流：200 + Content-Length + 字节一致 + 远端仅 1 次请求 */
     @Test(timeout = 60_000)
     public void proxyFullStreamByteIdentical() throws Exception {
-        TestOrigin src = newOrigin();
+        TestHttpOrigin src = newOrigin();
         String proxyUrl = HttpProxyServer.getInstance().getProxyUrl(src.url());
         assertTrue(proxyUrl.startsWith("http://127.0.0.1:"));
         java.net.HttpURLConnection conn =
@@ -287,7 +138,7 @@ public class StreamBufferLayerTest {
     /** Range 请求：206 + Content-Range + 切片字节正确 */
     @Test(timeout = 60_000)
     public void proxyRangeRequestReturns206Slice() throws Exception {
-        TestOrigin src = newOrigin();
+        TestHttpOrigin src = newOrigin();
         String proxyUrl = HttpProxyServer.getInstance().getProxyUrl(src.url());
         java.net.HttpURLConnection conn =
                 (java.net.HttpURLConnection) new java.net.URL(proxyUrl).openConnection();
@@ -304,7 +155,7 @@ public class StreamBufferLayerTest {
     /** seek 落在缓冲窗口内：第二个连接共享数据源，从断点续传而不重新下载已缓冲区间 */
     @Test(timeout = 60_000)
     public void seekWithinWindowServedWithoutRemoteRequest() throws Exception {
-        TestOrigin src = newOrigin();
+        TestHttpOrigin src = newOrigin();
         String remoteUrl = src.url();
         String proxyUrl = HttpProxyServer.getInstance().getProxyUrl(remoteUrl);
 
@@ -341,7 +192,7 @@ public class StreamBufferLayerTest {
     /** 网络抖动（源端按块延迟）：代理持续供数不饿死 */
     @Test(timeout = 60_000)
     public void jitteredSourceStillStreams() throws Exception {
-        TestOrigin src = newOrigin();
+        TestHttpOrigin src = newOrigin();
         src.chunkDelayMs = 20; // 每块 64KB 延迟 20ms，模拟公网抖动
         String proxyUrl = HttpProxyServer.getInstance().getProxyUrl(src.url());
         java.net.HttpURLConnection conn =
@@ -355,7 +206,7 @@ public class StreamBufferLayerTest {
     /** 源端不支持 Range（恒 200 全量）：读过容量后回读触发 reset，下载侧走 skip 续传路径仍正确 */
     @Test(timeout = 90_000)
     public void remoteWithoutRangeSupportStillServes() throws Exception {
-        TestOrigin src = newOrigin();
+        TestHttpOrigin src = newOrigin();
         src.supportRange = false;
         // 容量 256KB：先顺序读 512KB 让窗口滑过开头，再回读 1000 位置触发 reset
         BufferedHttpSource source = new BufferedHttpSource(src.url(), 256 * 1024);
@@ -394,7 +245,7 @@ public class StreamBufferLayerTest {
      */
     @Test(timeout = 90_000)
     public void farRangeConnectionForksInsteadOfPingPong() throws Exception {
-        TestOrigin src = newOrigin();
+        TestHttpOrigin src = newOrigin();
         src.chunkDelayMs = 25; // 放慢源端，保证主连接仍在读时第二连接到来
         String proxyUrl = HttpProxyServer.getInstance().getProxyUrl(src.url());
 
@@ -439,7 +290,7 @@ public class StreamBufferLayerTest {
     /** 远端干净 FIN 但总长未下满：必须按截断续传而非误标 EOF，最终数据完整 */
     @Test(timeout = 60_000)
     public void truncatedRemoteResumesInsteadOfPrematureEof() throws Exception {
-        TestOrigin src = newOrigin();
+        TestHttpOrigin src = newOrigin();
         src.firstRequestTruncateAt = 256 * 1024;
         BufferedHttpSource source = new BufferedHttpSource(src.url());
         byte[] buf = new byte[64 * 1024];
@@ -462,7 +313,7 @@ public class StreamBufferLayerTest {
     /** 截断场景走代理：客户端仍拿到字节一致的全量 body */
     @Test(timeout = 60_000)
     public void truncatedRemoteServesFullBodyThroughProxy() throws Exception {
-        TestOrigin src = newOrigin();
+        TestHttpOrigin src = newOrigin();
         src.firstRequestTruncateAt = 300 * 1024;
         String proxyUrl = HttpProxyServer.getInstance().getProxyUrl(src.url());
         java.net.HttpURLConnection conn =

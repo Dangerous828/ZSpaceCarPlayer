@@ -12,7 +12,10 @@ import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
 
+import com.ktools.zspacecarplayer.crash.CrashMonitor;
 import com.ktools.zspacecarplayer.dsp.NativeDsp;
+import com.ktools.zspacecarplayer.dsp.NativeLosslessDecoder;
+import com.ktools.zspacecarplayer.player.stream.BufferedHttpSource;
 import com.ktools.zspacecarplayer.player.stream.HttpProxyServer;
 
 import java.io.File;
@@ -22,9 +25,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 针对 Android 4.3 (API 18) 与吉利 8600 车机优化的自研软解管线播放器:
- * 1. 使用 MediaExtractor + MediaCodec 将音频解出原始 PCM (16-bit)
- * 2. 经由私有 C++ NativeDsp 核心进行 EQ、BassBoost、全景声场 (Widener) 与 Reverb 处理
- * 3. 通过纯裸 AudioTrack 写入车机 AudioFlinger，彻底绕过系统缺陷 Virtualizer/Reverb
+ * 1. 优先通过流头嗅探检测 FLAC / WAV 容器头；命中后由 C++ NativeLosslessDecoder
+ *    (基于 dr_flac / dr_wav) 绕开系统残缺的 MediaCodec 直接硬核软解出原始 PCM (16-bit)
+ * 2. 对非无损流 (如标准 MP3/AAC) 自动降级至 MediaExtractor + MediaCodec 解码出 PCM
+ * 3. 解码后的 PCM 帧送入私有 C++ NativeDsp 核心进行 EQ、BassBoost、全景声场 (Widener) 与 Reverb 运算
+ * 4. 通过纯裸 AudioTrack 写入车机 AudioFlinger，彻底绕过系统缺陷 Virtualizer/Reverb
  */
 public class DspAudioTrackPlayer implements IAudioPlayer {
     private static final String TAG = "DspAudioTrackPlayer";
@@ -32,6 +37,11 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     private static final int MSG_PREPARE = 1;
     private static final int MSG_SEEK = 2;
     private static final int MSG_RELEASE = 3;
+    private static final int MSG_TEARDOWN = 4;
+
+    /** 原生解码器 open 的阻塞上限。drflac_open 会一路读容器头，弱网下可能长时间
+     *  卡在环形缓冲等下载；超时后由看门狗 abort 读者，避免解码线程被永久占死。 */
+    private static final long NATIVE_OPEN_TIMEOUT_MS = 15_000L;
 
     private String dataSourcePath;
     private OnEventListener eventListener;
@@ -49,6 +59,13 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     private volatile int pendingSeekMs = -1;
 
     private AudioTrack audioTrack;
+
+    // ---- 原生无损软解分支 (FLAC / WAV) ----
+    private NativeLosslessDecoder nativeDecoder;
+    private volatile boolean isNativeMode = false;
+    private volatile long currentPresentationFrame = 0;
+
+    // ---- 传统系统解码器分支 (MP3 / AAC 等) ----
     private MediaExtractor extractor;
     private MediaCodec codec;
 
@@ -60,36 +77,6 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     private final AtomicBoolean isRendering = new AtomicBoolean(false);
     private volatile boolean sawInputEOS = false;
     private volatile boolean sawOutputEOS = false;
-
-    /** 渲染线程内执行 seek：重定位 extractor、flush 解码器与 AudioTrack，回调 onSeekComplete */
-    private void doSeekInternal(int seekTargetMs) {
-        MediaExtractor ex = extractor;
-        MediaCodec dec = codec;
-        if (ex == null || dec == null) {
-            return;
-        }
-        try {
-            ex.seekTo(seekTargetMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
-            dec.flush();
-            sawInputEOS = false;
-            sawOutputEOS = false;
-            if (audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
-                audioTrack.pause();
-                audioTrack.flush();
-                audioTrack.play();
-            }
-            mainHandler.post(new Runnable() {
-                @Override
-                public void run() {
-                    if (eventListener != null) {
-                        eventListener.onSeekComplete();
-                    }
-                }
-            });
-        } catch (Exception e) {
-            Log.w(TAG, "Seek error in render loop", e);
-        }
-    }
 
     public DspAudioTrackPlayer() {
         startDecodeThread();
@@ -111,6 +98,9 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                     case MSG_RELEASE:
                         doRelease();
                         break;
+                    case MSG_TEARDOWN:
+                        doTeardown();
+                        break;
                 }
             }
         };
@@ -123,6 +113,7 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             this.isPrepared = false;
             this.isPlaying = false;
             this.currentPresentationTimeUs = 0;
+            this.currentPresentationFrame = 0;
             this.pendingSeekMs = -1;
         }
     }
@@ -139,96 +130,28 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             if (isReleased) return;
         }
 
+        // 这条同时是解码线程的存活证明：报告里有 prepareAsync 却没有 doPrepare begin，
+        // 说明解码线程被上一次 open 占死，消息根本没排上队
+        CrashMonitor.breadcrumb("v3", "doPrepare begin path=" + dataSourcePath);
         try {
             stopRenderingThread();
             releaseDecoderComponents();
 
-            extractor = new MediaExtractor();
-            if (dataSourcePath.startsWith("http://") || dataSourcePath.startsWith("https://")) {
-                if (dataSourcePath.contains("127.0.0.1") && dataSourcePath.contains("/stream?u=")) {
-                    // 服务层已包过一次本地代理, 不能二次嵌套 (否则嵌套两层 BufferedHttpSource 双份下载)
-                    extractor.setDataSource(dataSourcePath);
-                } else {
-                    // v3: 网络源经本地回环代理，前置大环形缓冲抗抖动
-                    extractor.setDataSource(HttpProxyServer.getInstance().getProxyUrl(dataSourcePath));
-                }
-            } else {
-                File file = new File(dataSourcePath);
-                FileInputStream fis = new FileInputStream(file);
-                extractor.setDataSource(fis.getFD());
-                fis.close();
+            // 1. 尝试嗅探流格式，判断是否能直接走原生 C++ 软解管道 (FLAC / WAV)
+            boolean nativePrepared = tryPrepareNativeLossless();
+            if (nativePrepared) {
+                // 原生软解管道准备就绪
+                onPrepareSuccess();
+                return;
             }
 
-            int audioTrackIndex = -1;
-            MediaFormat format = null;
-            int numTracks = extractor.getTrackCount();
-            for (int i = 0; i < numTracks; i++) {
-                MediaFormat f = extractor.getTrackFormat(i);
-                String mime = f.getString(MediaFormat.KEY_MIME);
-                if (mime != null && mime.startsWith("audio/")) {
-                    audioTrackIndex = i;
-                    format = f;
-                    break;
-                }
-            }
-
-            if (audioTrackIndex < 0 || format == null) {
-                throw new IllegalStateException("No audio track found in: " + dataSourcePath);
-            }
-
-            extractor.selectTrack(audioTrackIndex);
-            String mime = format.getString(MediaFormat.KEY_MIME);
-            sampleRate = format.containsKey(MediaFormat.KEY_SAMPLE_RATE) ? format.getInteger(MediaFormat.KEY_SAMPLE_RATE) : 44100;
-            channelCount = format.containsKey(MediaFormat.KEY_CHANNEL_COUNT) ? format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : 2;
-
-            if (format.containsKey(MediaFormat.KEY_DURATION)) {
-                currentDurationMs = (int) (format.getLong(MediaFormat.KEY_DURATION) / 1000);
-            } else {
-                currentDurationMs = 0;
-            }
-
-            Log.i(TAG, "Audio format: " + mime + ", sr=" + sampleRate + ", ch=" + channelCount + ", dur=" + currentDurationMs);
-
-            // 初始化 Native DSP 核心
-            NativeDsp.init(sampleRate, channelCount);
-
-            // 配置 AudioTrack (Android 4.3 兼容)
-            int channelConfig = (channelCount == 1) ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
-            int minBufSize = AudioTrack.getMinBufferSize(sampleRate, channelConfig, AudioFormat.ENCODING_PCM_16BIT);
-            // 给 4 倍 buffer 防止吉利 8600 车机 CPU 抖动产生 underrun
-            int bufferSize = Math.max(minBufSize * 4, 32768);
-
-            audioTrack = new AudioTrack(
-                    AudioManager.STREAM_MUSIC,
-                    sampleRate,
-                    channelConfig,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufferSize,
-                    AudioTrack.MODE_STREAM
-            );
-            audioTrack.setStereoVolume(volume, volume);
-
-            codec = MediaCodec.createDecoderByType(mime);
-            codec.configure(format, null, null, 0);
-            codec.start();
-
-            synchronized (stateLock) {
-                isPrepared = true;
-            }
-
-            startRenderingLoop();
-
-            mainHandler.post(new Runnable() {
-                @Override
-                public void run() {
-                    if (eventListener != null) {
-                        eventListener.onPrepared(currentDurationMs);
-                    }
-                }
-            });
+            // 2. 原生软解未命中或失败，回退到系统 MediaExtractor + MediaCodec
+            prepareMediaCodec();
+            onPrepareSuccess();
 
         } catch (final Exception e) {
             Log.e(TAG, "doPrepare failed", e);
+            CrashMonitor.breadcrumb("v3", "doPrepare failed: " + e);
             synchronized (stateLock) {
                 isPrepared = false;
             }
@@ -243,6 +166,221 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         }
     }
 
+    /**
+     * 探测数据源头部：如果是 FLAC / WAV，直接走 C++ 原生无损软解。
+     */
+    private boolean tryPrepareNativeLossless() {
+        Log.i(TAG, "tryPrepareNativeLossless: available=" + NativeLosslessDecoder.isAvailable()
+                + " path=" + dataSourcePath);
+        if (!NativeLosslessDecoder.isAvailable()) {
+            return false;
+        }
+
+        NativeLosslessDecoder.LosslessStreamReader streamReader = null;
+        NativeLosslessDecoder dec = null;
+        Thread openWatchdog = null;
+        try {
+            if (dataSourcePath.startsWith("http://") || dataSourcePath.startsWith("https://")) {
+                String realUrl = HttpProxyServer.extractRemoteUrl(dataSourcePath);
+                Log.i(TAG, "tryPrepareNativeLossless: realUrl=" + realUrl);
+                BufferedHttpSource source = HttpProxyServer.getInstance().acquireSource(realUrl, 0);
+                streamReader = new NativeLosslessDecoder.HttpSourceReader(source, 0);
+            } else {
+                File file = new File(dataSourcePath);
+                if (file.exists() && file.isFile()) {
+                    streamReader = new NativeLosslessDecoder.FileSourceReader(file);
+                }
+            }
+
+            if (streamReader == null) {
+                Log.w(TAG, "tryPrepareNativeLossless: streamReader is null");
+                return false;
+            }
+
+            // 头部嗅探读与 drflac_open 都会阻塞在环形缓冲等下载。不设上限的话一次弱网
+            // 起播就能把唯一的解码线程永久占死，之后所有 prepare/seek/release 消息都排不
+            // 上队（车机表现：点了不播，且这个进程再也不会播了）。
+            final NativeLosslessDecoder.LosslessStreamReader guarded = streamReader;
+            openWatchdog = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        Thread.sleep(NATIVE_OPEN_TIMEOUT_MS);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    Log.e(TAG, "native open blocked over " + NATIVE_OPEN_TIMEOUT_MS
+                            + "ms, aborting reader to free decode thread");
+                    CrashMonitor.putContext("nativeOpenTimeout", true);
+                    CrashMonitor.breadcrumb("v3", "native open blocked >"
+                            + NATIVE_OPEN_TIMEOUT_MS + "ms, aborting reader");
+                    try {
+                        guarded.abort();
+                    } catch (Throwable ignored) {}
+                }
+            }, "DspPlayer-OpenWatchdog");
+            openWatchdog.setDaemon(true);
+            openWatchdog.start();
+
+            byte[] header = new byte[16];
+            int n = streamReader.read(header, 0, header.length);
+            int format = (n >= 4) ? NativeLosslessDecoder.sniffFormat(header) : NativeLosslessDecoder.FMT_UNKNOWN;
+            Log.i(TAG, "tryPrepareNativeLossless: sniff n=" + n + " fmt=" + format
+                    + " bytes=[" + (n>0?header[0]:0) + "," + (n>1?header[1]:0) + "," + (n>2?header[2]:0) + "," + (n>3?header[3]:0) + "]");
+            CrashMonitor.putContext("streamFormat", format);
+            CrashMonitor.putContext("sniffBytes", n);
+            streamReader.seek(0);
+
+            // 回退边界由 NativeLosslessDecoder 统一裁定（吉利 8600 MediaCodec 缺 FLAC/WAV）
+            if (!NativeLosslessDecoder.isNativeSupportedFormat(format)) {
+                Log.i(TAG, "tryPrepareNativeLossless: format not FLAC/WAV (" + format + "), close & fallback");
+                CrashMonitor.breadcrumb("v3", "sniff fmt=" + format + " not lossless, fallback");
+                streamReader.close();
+                return false;
+            }
+
+            dec = new NativeLosslessDecoder();
+            // 先登记再 open：open 阻塞期间外部 reset()/release() 才能顺着这个引用取消读者，
+            // 否则解码器对象和它持有的两个 JNI GlobalRef 无人可释放
+            this.nativeDecoder = dec;
+            if (!dec.open(streamReader, format)) {
+                Log.w(TAG, "NativeLosslessDecoder open failed for format: " + format);
+                CrashMonitor.breadcrumb("v3", "native open failed fmt=" + format + ", fallback");
+                this.nativeDecoder = null;
+                dec.close(); // ptr 为 0 时只关 reader，幂等
+                return false;
+            }
+
+            this.isNativeMode = true;
+            this.sampleRate = dec.getSampleRate() > 0 ? dec.getSampleRate() : 44100;
+            this.channelCount = dec.getChannels() > 0 ? dec.getChannels() : 2;
+            this.currentDurationMs = dec.getDurationMs();
+            this.currentPresentationFrame = 0;
+            this.currentPresentationTimeUs = 0;
+
+            Log.i(TAG, "Native lossless pipeline established: fmt=" + format + ", sr="
+                    + sampleRate + ", ch=" + channelCount + ", durMs=" + currentDurationMs);
+            CrashMonitor.putContext("sampleRate", sampleRate);
+            CrashMonitor.putContext("channelCount", channelCount);
+            CrashMonitor.breadcrumb("v3", "native pipeline up fmt=" + format
+                    + " sr=" + sampleRate + " ch=" + channelCount
+                    + " dur=" + currentDurationMs + "ms");
+
+            initAudioTrackAndDsp();
+            return true;
+
+        } catch (Throwable t) {
+            Log.w(TAG, "tryPrepareNativeLossless exception, fallback to MediaCodec", t);
+            // 捕获的是 Throwable：UnsatisfiedLinkError 之类的 so 加载失败也走这里，
+            // 静默回退后现场就没了，必须留痕
+            CrashMonitor.breadcrumb("v3", "native prepare threw, fallback: " + t);
+            if (streamReader != null) {
+                try { streamReader.close(); } catch (Throwable ignored) {}
+            }
+            if (nativeDecoder != null) {
+                try { nativeDecoder.close(); } catch (Throwable ignored) {}
+                nativeDecoder = null;
+            }
+            isNativeMode = false;
+            return false;
+        } finally {
+            if (openWatchdog != null) {
+                openWatchdog.interrupt();
+            }
+        }
+    }
+
+    /**
+     * 针对标准 MP3/AAC 的系统 MediaExtractor + MediaCodec 管线
+     */
+    private void prepareMediaCodec() throws Exception {
+        extractor = new MediaExtractor();
+        if (dataSourcePath.startsWith("http://") || dataSourcePath.startsWith("https://")) {
+            if (dataSourcePath.contains("127.0.0.1") && dataSourcePath.contains("/stream?u=")) {
+                extractor.setDataSource(dataSourcePath);
+            } else {
+                extractor.setDataSource(HttpProxyServer.getInstance().getProxyUrl(dataSourcePath));
+            }
+        } else {
+            File file = new File(dataSourcePath);
+            FileInputStream fis = new FileInputStream(file);
+            extractor.setDataSource(fis.getFD());
+            fis.close();
+        }
+
+        int audioTrackIndex = -1;
+        MediaFormat format = null;
+        int numTracks = extractor.getTrackCount();
+        for (int i = 0; i < numTracks; i++) {
+            MediaFormat f = extractor.getTrackFormat(i);
+            String mime = f.getString(MediaFormat.KEY_MIME);
+            if (mime != null && mime.startsWith("audio/")) {
+                audioTrackIndex = i;
+                format = f;
+                break;
+            }
+        }
+
+        if (audioTrackIndex < 0 || format == null) {
+            throw new IllegalStateException("No audio track found in: " + dataSourcePath);
+        }
+
+        extractor.selectTrack(audioTrackIndex);
+        String mime = format.getString(MediaFormat.KEY_MIME);
+        sampleRate = format.containsKey(MediaFormat.KEY_SAMPLE_RATE) ? format.getInteger(MediaFormat.KEY_SAMPLE_RATE) : 44100;
+        channelCount = format.containsKey(MediaFormat.KEY_CHANNEL_COUNT) ? format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : 2;
+
+        if (format.containsKey(MediaFormat.KEY_DURATION)) {
+            currentDurationMs = (int) (format.getLong(MediaFormat.KEY_DURATION) / 1000);
+        } else {
+            currentDurationMs = 0;
+        }
+
+        Log.i(TAG, "MediaCodec Audio format: " + mime + ", sr=" + sampleRate + ", ch=" + channelCount + ", dur=" + currentDurationMs);
+
+        initAudioTrackAndDsp();
+
+        codec = MediaCodec.createDecoderByType(mime);
+        codec.configure(format, null, null, 0);
+        codec.start();
+    }
+
+    private void initAudioTrackAndDsp() {
+        // 初始化 Native DSP 核心
+        NativeDsp.init(sampleRate, channelCount);
+
+        // 配置 AudioTrack (Android 4.3 兼容)
+        int channelConfig = (channelCount == 1) ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
+        int minBufSize = AudioTrack.getMinBufferSize(sampleRate, channelConfig, AudioFormat.ENCODING_PCM_16BIT);
+        // 给 4 倍 buffer 防止吉利 8600 车机 CPU 抖动产生 underrun
+        int bufferSize = Math.max(minBufSize * 4, 32768);
+
+        audioTrack = new AudioTrack(
+                AudioManager.STREAM_MUSIC,
+                sampleRate,
+                channelConfig,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize,
+                AudioTrack.MODE_STREAM
+        );
+        audioTrack.setStereoVolume(volume, volume);
+    }
+
+    private void onPrepareSuccess() {
+        synchronized (stateLock) {
+            isPrepared = true;
+        }
+        startRenderingLoop();
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (eventListener != null) {
+                    eventListener.onPrepared(currentDurationMs);
+                }
+            }
+        });
+    }
+
     private void startRenderingLoop() {
         stopRenderingThread();
         sawInputEOS = false;
@@ -251,7 +389,11 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         renderThread = new Thread(new Runnable() {
             @Override
             public void run() {
-                renderLoop();
+                if (isNativeMode) {
+                    nativeRenderLoop();
+                } else {
+                    codecRenderLoop();
+                }
             }
         }, "DspPlayer-RenderLoop");
         renderThread.start();
@@ -259,8 +401,6 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
 
     private void stopRenderingThread() {
         isRendering.set(false);
-        // 先暂停 AudioTrack：让阻塞在 write() 里的渲染线程尽快返回，避免 join 超时后
-        // 释放解码器/轨道与仍存活的写操作竞态（旧 Android 上直接 SIGSEGV）
         AudioTrack at = audioTrack;
         if (at != null) {
             try { at.pause(); } catch (Exception ignored) {}
@@ -274,7 +414,160 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         }
     }
 
-    private void renderLoop() {
+    /**
+     * 原生 C++ 软解流式渲染主循环 (FLAC / WAV 直解 PCM)
+     */
+    private void nativeRenderLoop() {
+        NativeLosslessDecoder dec = nativeDecoder;
+        if (dec == null) return;
+
+        final int framesPerRead = 2048;
+        short[] pcmBuf = new short[framesPerRead * channelCount];
+
+        try {
+            while (isRendering.get() && !sawOutputEOS) {
+                int seekTarget = pendingSeekMs;
+                if (seekTarget >= 0) {
+                    pendingSeekMs = -1;
+                    doNativeSeekInternal(seekTarget);
+                }
+
+                if (!isPlaying) {
+                    try {
+                        Thread.sleep(20);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                    continue;
+                }
+
+                int framesGot = dec.readSamples(pcmBuf, 0, framesPerRead);
+                if (framesGot <= 0) {
+                    // 拆机会先置 isRendering=false 再 interrupt，阻塞在 JNI 回调里的
+                    // readSamples 随即返回 0，与真 EOF 从返回值上无法区分。此时上报
+                    // onCompletion 会让服务自动切下一首（表现为切歌/停止时曲目乱跳）。
+                    if (!isRendering.get()) {
+                        break;
+                    }
+                    // 断流（环形缓冲无进展 fatal / 涓流饥饿）经 bridgeReadAt 也折叠成 0。
+                    // 误报 onCompletion = 歌自己乱跳；如实报 onError 才会走服务侧带断点的
+                    // 同曲重试（handlePlayerError 对 v3 引擎的负值码一律按可恢复处理）。
+                    if (framesGot < 0 || dec.hasStreamFailed()) {
+                        reportNativeStreamFailure(framesGot,
+                                (int) (currentPresentationTimeUs / 1000));
+                        break;
+                    }
+                    sawOutputEOS = true;
+                    Log.i(TAG, "Native lossless decoder reached end of stream");
+                    mainHandler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (eventListener != null) {
+                                eventListener.onCompletion();
+                            }
+                        }
+                    });
+                    break;
+                }
+
+                currentPresentationFrame += framesGot;
+                if (sampleRate > 0) {
+                    currentPresentationTimeUs = currentPresentationFrame * 1_000_000L / sampleRate;
+                }
+
+                // ★★★ 核心：进入 Native C++ DSP 进行 EQ、BassBoost、全景声场与混响运算 ★★★
+                NativeDsp.processShorts(pcmBuf, 0, framesGot);
+
+                // 写入裸 PCM AudioTrack (直接写 short 数组)
+                if (audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                    audioTrack.write(pcmBuf, 0, framesGot * channelCount);
+                }
+            }
+        } catch (Exception e) {
+            if (isRendering.get()) {
+                Log.e(TAG, "Exception in nativeRenderLoop", e);
+                synchronized (stateLock) {
+                    isPrepared = false;
+                    isPlaying = false;
+                }
+                mainHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (eventListener != null) {
+                            eventListener.onError(MediaPlayerError.DECODE_FAILED,
+                                    "native render loop died: " + e.getMessage());
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /**
+     * 原生软解断流（非播完）：留痕并如实上报错误。
+     *
+     * 绝不能上报 onCompletion——那会让服务自动切下一首，用户看到的是「歌自己乱跳」。
+     * 上报 onError 后 {@code AudioPlayerService.handlePlayerError} 对 v3 引擎的负值
+     * 错误码一律按可恢复处理，会带当前进度重试同一首。
+     */
+    private void reportNativeStreamFailure(final int framesGot, final int atPositionMs) {
+        final String detail = "native stream stalled: frames=" + framesGot
+                + " at=" + atPositionMs + "ms/" + currentDurationMs + "ms"
+                + " sr=" + sampleRate + " ch=" + channelCount
+                + " path=" + dataSourcePath;
+        Log.e(TAG, detail);
+        CrashMonitor.putContext("nativeStreamStalled", true);
+        CrashMonitor.putContext("nativeStallAtMs", atPositionMs);
+        CrashMonitor.breadcrumb("v3", detail);
+        synchronized (stateLock) {
+            isPrepared = false;
+            isPlaying = false;
+        }
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (eventListener != null) {
+                    eventListener.onError(MediaPlayerError.STREAM_STALL, detail);
+                }
+            }
+        });
+    }
+
+    /**
+     * 原生软解 Seek 执行
+     */
+    private void doNativeSeekInternal(int seekTargetMs) {
+        NativeLosslessDecoder dec = nativeDecoder;
+        if (dec == null) return;
+        try {
+            boolean ok = dec.seekToMs(seekTargetMs);
+            if (ok) {
+                currentPresentationFrame = (long) seekTargetMs * sampleRate / 1000L;
+                currentPresentationTimeUs = currentPresentationFrame * 1_000_000L / sampleRate;
+            }
+            sawOutputEOS = false;
+            if (audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                audioTrack.pause();
+                audioTrack.flush();
+                audioTrack.play();
+            }
+            mainHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (eventListener != null) {
+                        eventListener.onSeekComplete();
+                    }
+                }
+            });
+        } catch (Exception e) {
+            Log.w(TAG, "Seek error in native render loop", e);
+        }
+    }
+
+    /**
+     * 系统 MediaCodec 传统解码渲染循环 (MP3/AAC)
+     */
+    private void codecRenderLoop() {
         ByteBuffer[] inputBuffers = codec.getInputBuffers();
         ByteBuffer[] outputBuffers = codec.getOutputBuffers();
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
@@ -283,12 +576,10 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
 
         try {
             while (isRendering.get() && !sawOutputEOS) {
-                // 处理 Seek 请求——必须先于 isPlaying 判断：
-                // 失焦恢复/看门狗重建都是「先 seek 再 start」，暂停态 seek 不处理会死等回调
                 int seekTarget = pendingSeekMs;
                 if (seekTarget >= 0) {
                     pendingSeekMs = -1;
-                    doSeekInternal(seekTarget);
+                    doCodecSeekInternal(seekTarget);
                 }
 
                 if (!isPlaying) {
@@ -333,7 +624,7 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                             int toRead = Math.min(remaining, pcmTempBuf.length);
                             outputBuffer.get(pcmTempBuf, 0, toRead);
 
-                            // ★★★ 核心：进入 Native C++ DSP 进行 EQ、BassBoost、全景声场与混响运算 ★★★
+                            // ★★★ 核心：进入 Native C++ DSP 进行音效运算 ★★★
                             NativeDsp.processBytes(pcmTempBuf, 0, toRead);
 
                             // 写入裸 PCM AudioTrack
@@ -348,7 +639,10 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
 
                     if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                         sawOutputEOS = true;
-                        Log.i(TAG, "Reached end of audio stream");
+                        Log.i(TAG, "MediaCodec reached end of audio stream");
+                        if (!isRendering.get()) {
+                            break; // 拆机期间的滞留 EOS：不是真播完，别触发自动切歌
+                        }
                         mainHandler.post(new Runnable() {
                             @Override
                             public void run() {
@@ -374,8 +668,7 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             }
         } catch (Exception e) {
             if (isRendering.get()) {
-                Log.e(TAG, "Exception in renderLoop", e);
-                // 渲染循环死亡必须上报，否则服务看门狗只能靠进度冻结兜底，UI 无感知
+                Log.e(TAG, "Exception in codecRenderLoop", e);
                 synchronized (stateLock) {
                     isPrepared = false;
                     isPlaying = false;
@@ -385,7 +678,7 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                     public void run() {
                         if (eventListener != null) {
                             eventListener.onError(MediaPlayerError.DECODE_FAILED,
-                                    "render loop died: " + e.getMessage());
+                                    "codec render loop died: " + e.getMessage());
                         }
                     }
                 });
@@ -393,9 +686,43 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         }
     }
 
+    /**
+     * MediaCodec 渲染线程内执行 seek
+     */
+    private void doCodecSeekInternal(int seekTargetMs) {
+        MediaExtractor ex = extractor;
+        MediaCodec dec = codec;
+        if (ex == null || dec == null) {
+            return;
+        }
+        try {
+            ex.seekTo(seekTargetMs * 1000L, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
+            dec.flush();
+            sawInputEOS = false;
+            sawOutputEOS = false;
+            if (audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
+                audioTrack.pause();
+                audioTrack.flush();
+                audioTrack.play();
+            }
+            mainHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    if (eventListener != null) {
+                        eventListener.onSeekComplete();
+                    }
+                }
+            });
+        } catch (Exception e) {
+            Log.w(TAG, "Seek error in codec render loop", e);
+        }
+    }
+
     /** 错误码约定：负值与系统 MediaPlayer 错误码空间区分开 */
     public static final class MediaPlayerError {
         public static final int DECODE_FAILED = -10001;
+        /** 供数断流（环形缓冲无进展 / 上游涓流饥饿），非解码器本身故障 */
+        public static final int STREAM_STALL = -10002;
         private MediaPlayerError() {}
     }
 
@@ -464,12 +791,21 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     }
 
     private void doRelease() {
-        stopRenderingThread();
-        releaseDecoderComponents();
+        doTeardown();
         if (decodeThread != null) {
             decodeThread.quit();
             decodeThread = null;
         }
+    }
+
+    /** 停渲染 + 释放解码组件，但保留解码线程（reset 后还要能继续 prepare） */
+    private void doTeardown() {
+        long beginMs = System.currentTimeMillis();
+        stopRenderingThread();
+        releaseDecoderComponents();
+        // 耗时能说明拆机是否踩在 join(3000) / native close 超时的边缘
+        CrashMonitor.breadcrumb("v3", "teardown done in "
+                + (System.currentTimeMillis() - beginMs) + "ms");
     }
 
     @Override
@@ -479,11 +815,18 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             isPrepared = false;
             currentDurationMs = 0;
             currentPresentationTimeUs = 0;
+            currentPresentationFrame = 0;
             pendingSeekMs = -1;
         }
-        stopRenderingThread();
-        releaseDecoderComponents();
         NativeDsp.reset();
+        // 拆机绝不能在调用方线程做：stopRenderingThread 里的 join(3000) 会挂住调用方，
+        // 而 reset 是 AudioPlayerService 在主线程（含 500ms 看门狗 tick）直接调的
+        Handler h = decodeHandler;
+        if (h != null && decodeThread != null && decodeThread.isAlive()) {
+            h.obtainMessage(MSG_TEARDOWN).sendToTarget();
+        } else {
+            doTeardown();
+        }
     }
 
     private void releaseDecoderComponents() {
@@ -494,6 +837,14 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             } catch (Exception ignored) {}
             audioTrack = null;
         }
+        if (nativeDecoder != null) {
+            try {
+                nativeDecoder.close();
+            } catch (Exception ignored) {}
+            nativeDecoder = null;
+        }
+        isNativeMode = false;
+        currentPresentationFrame = 0;
         if (codec != null) {
             try {
                 codec.stop();

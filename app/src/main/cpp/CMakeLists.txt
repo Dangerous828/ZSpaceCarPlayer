@@ -6,6 +6,7 @@ add_library(
         zspacecarplayer_dsp
         SHARED
         native-lib.cpp
+        NativeLossless.cpp
 )
 
 find_library(
