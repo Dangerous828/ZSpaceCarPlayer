@@ -43,11 +43,11 @@ public final class HttpProxyServer {
 
     private static HttpProxyServer sInstance;
 
-    /** 同时保留的远端数据源上限（LRU 淘汰空闲者）。每源 8MB 环形缓冲，
-     *  主连接 + extractor 位置探测分家源 + 1 个空闲复用 ≈ 24MB 为常态峰值。 */
-    private static final int MAX_SOURCES = 4;
-    /** 新建数据源后最多保留的空闲（无读者）源数，超出立即关闭释放 8MB 窗口 */
-    private static final int MAX_IDLE_SOURCES = 1;
+    /** 同时保留的远端数据源上限（LRU 淘汰空闲者）。每源 2MB 环形缓冲，
+     *  主连接 + extractor 位置探测分家源 ≈ 4MB，安全契合 Android 4.3 堆空间。 */
+    private static final int MAX_SOURCES = 2;
+    /** 新建数据源后最多保留的空闲（无读者）源数，超出立即关闭释放窗口 */
+    private static final int MAX_IDLE_SOURCES = 0;
     /** 等待远端响应头就绪的上限（决定能否回复 Content-Length） */
     private static final long META_WAIT_MS = 10_000L;
     /** 客户端 socket 空闲读超时（请求头阶段） */
@@ -55,7 +55,7 @@ public final class HttpProxyServer {
     /** 每次向客户端写出的数据块 */
     private static final int PUMP_CHUNK = 32 * 1024;
     /** 每累积这么多字节 flush 一次，让客户端尽早拿到数据 */
-    private static final long FLUSH_INTERVAL_BYTES = 256 * 1024;
+    private static final long FLUSH_INTERVAL_BYTES = 64 * 1024;
 
     private ServerSocket serverSocket;
     private int port = -1;
@@ -101,6 +101,32 @@ public final class HttpProxyServer {
         } catch (UnsupportedEncodingException e) {
             return remoteUrl;
         }
+    }
+
+    /**
+     * 为原生软解等需要直接读取 BufferedHttpSource 的组件获取数据源实例并增加引用计数。
+     * 调用方在使用完毕后必须显式调用 source.release()。
+     */
+    public BufferedHttpSource acquireSource(String remoteUrl, long requestStart) {
+        ensureStarted();
+        BufferedHttpSource source = obtainSource(remoteUrl, requestStart);
+        source.addRef();
+        return source;
+    }
+
+    /**
+     * 从本地回环代理 URL (http://127.0.0.1:port/stream?u=...) 中提取原始远端 URL。
+     */
+    public static String extractRemoteUrl(String pathOrUrl) {
+        if (pathOrUrl == null) return "";
+        if (pathOrUrl.contains("/stream?u=")) {
+            int idx = pathOrUrl.indexOf("/stream?u=");
+            String encoded = pathOrUrl.substring(idx + "/stream?u=".length());
+            try {
+                return java.net.URLDecoder.decode(encoded, "UTF-8");
+            } catch (Exception ignored) {}
+        }
+        return pathOrUrl;
     }
 
     /**
@@ -270,6 +296,7 @@ public final class HttpProxyServer {
         long pos = start;
         long lastFlush = pos;
         source.addReadPos(token, pos);
+        boolean firstChunk = true;
         while (true) {
             int n = source.readAt(pos, buf, 0, buf.length);
             if (n < 0) {
@@ -278,9 +305,10 @@ public final class HttpProxyServer {
             out.write(buf, 0, n);
             pos += n;
             source.updateReadPos(token, pos);
-            if (pos - lastFlush >= FLUSH_INTERVAL_BYTES) {
+            if (firstChunk || pos - lastFlush >= FLUSH_INTERVAL_BYTES) {
                 out.flush();
                 lastFlush = pos;
+                firstChunk = false;
             }
         }
         out.flush();
@@ -321,6 +349,14 @@ public final class HttpProxyServer {
                     it.remove();
                     continue;
                 }
+                if (candidate.hasFatalError()) {
+                    // 已不可恢复（断流 / 重试耗尽 / 涓流饥饿）：fatal 只能靠重定位清除，
+                    // 而重试同一首的 requestStart 往往正落在旧窗口内、会被判成近邻共享，
+                    // 新读者一进来就吃 IOException，自愈永远发生不了。直接回收逼出新源。
+                    candidate.close();
+                    it.remove();
+                    continue;
+                }
                 if (!candidate.getUrl().equals(remoteUrl)) {
                     continue;
                 }
@@ -356,7 +392,7 @@ public final class HttpProxyServer {
                     }
                 }
             }
-            BufferedHttpSource created = new BufferedHttpSource(remoteUrl);
+            BufferedHttpSource created = new BufferedHttpSource(remoteUrl, requestStart < 0 ? 0 : requestStart);
             boolean isFork = false;
             for (BufferedHttpSource s : sources.values()) {
                 if (!s.isClosed() && s.getUrl().equals(remoteUrl)) {

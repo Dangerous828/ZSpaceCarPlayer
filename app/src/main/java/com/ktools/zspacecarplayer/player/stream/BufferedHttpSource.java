@@ -8,6 +8,7 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.HashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * v3 抗抖动流式数据源（Feeder 层）。
@@ -34,8 +35,8 @@ public class BufferedHttpSource {
 
     private static final String TAG = "BufferedHttpSource";
 
-    /** 默认窗口容量：8MB ≈ 1.5Mbps 下约 42s、320kbps 下约 3.4min 的抗抖动余量 */
-    public static final int DEFAULT_CAPACITY_BYTES = 8 * 1024 * 1024;
+    /** 默认窗口容量：2MB ≈ 1.5Mbps 下约 11s、320kbps 下约 50s 的抗抖动余量（适配 4.3 车机堆预算） */
+    public static final int DEFAULT_CAPACITY_BYTES = 2 * 1024 * 1024;
     /** 单次网络读块大小 */
     private static final int CHUNK_SIZE = 64 * 1024;
     /** 连续网络失败的最大重试次数（指数退避） */
@@ -44,6 +45,18 @@ public class BufferedHttpSource {
     private static final long RETRY_BASE_MS = 800L;
     /** 网络无任何进展视为卡死的时限 */
     private static final long STALL_TIMEOUT_MS = 30_000L;
+    /**
+     * 涓流饥饿检测：滑动窗口长度与「窗口内读者等不到数据的累计时长」上限。
+     *
+     * 只靠 {@link #STALL_TIMEOUT_MS}（有无字节进展）判不出涓流——上游每秒挤几百字节也算
+     * 进展，基准被不断刷新，read timeout 也因为每次 read 都在 15s 内返回而不触发；环形缓冲
+     * 十几秒被抽干后，读者就在 bufEnd 上永久 wait，播放进度冻结而 UI 仍显示播放中。
+     * 因此改成从读者视角判定：一个窗口内几乎全程挨饿即视为断流。
+     */
+    private static final long STARVE_WINDOW_MS = 20_000L;
+    private static final long STARVE_LIMIT_MS = 18_000L;
+    /** 连续饥饿判定次数上限：前几次只强制重连续传（窗口不丢），超过才升级 fatal 让上层报错 */
+    private static final int MAX_STARVE_STALLS = 2;
     private static final int CONNECT_TIMEOUT_MS = 10_000;
     private static final int READ_TIMEOUT_MS = 15_000;
 
@@ -70,7 +83,24 @@ public class BufferedHttpSource {
     private volatile boolean downloadAbort = false;
     private volatile boolean closed = false;
     private long downloadEpoch = 0L;     // 每次 reset +1，拒绝旧连接迟到写入
-    private long lastProgressAtMs = 0L;  // 最后一次成功写窗时间（卡死检测）
+    /** 最后一次「下载侧应取得进展」的时间基准（卡死检测）。-1 = 尚未武装。
+     *  构造 / 拉起下载线程 / reset 时即武装，否则冷启动弱网下（首字节还没进窗口）
+     *  检测器永不触发，readAt 会无限 wait 下去。 */
+    private long lastProgressAtMs = -1L;
+
+    // ---- 涓流饥饿检测（lock 保护） ----
+    /** 当前滑动窗口起点；-1 = 未武装（无读者在等数据） */
+    private long starveWindowStartMs = -1L;
+    /** 本窗口内已结算（读者拿到过数据）的挨饿时长 */
+    private long starvedAccumMs = 0L;
+    /** 当前这段连续挨饿的起点；-1 = 此刻读者有数据可读 */
+    private long starvedSinceMs = -1L;
+    /** 连续判定为饥饿的次数；某个窗口喂得上就清零 */
+    private int starveStallCount = 0;
+
+    // ---- 当前活动下载连接 (用于 abort/reset 时打断阻塞的底层 read) ----
+    private HttpURLConnection activeConn = null;
+    private InputStream activeIn = null;
 
     // ---- 代理服务侧引用计数 ----
     private int refCount = 0;
@@ -84,13 +114,27 @@ public class BufferedHttpSource {
     }
 
     public BufferedHttpSource(String url) {
-        this(url, DEFAULT_CAPACITY_BYTES);
+        this(url, DEFAULT_CAPACITY_BYTES, 0L);
+    }
+
+    public BufferedHttpSource(String url, long initialPosition) {
+        this(url, DEFAULT_CAPACITY_BYTES, initialPosition);
     }
 
     public BufferedHttpSource(String url, int capacityBytes) {
+        this(url, capacityBytes, 0L);
+    }
+
+    public BufferedHttpSource(String url, int capacityBytes, long initialPosition) {
         this.url = url;
         this.capacity = Math.max(CHUNK_SIZE * 2, capacityBytes);
         this.ring = new byte[this.capacity];
+        long initPos = Math.max(0L, initialPosition);
+        synchronized (lock) {
+            this.bufStart = initPos;
+            this.bufEnd = initPos;
+            this.lastProgressAtMs = SystemClock.elapsedRealtime();
+        }
         ensureDownloader();
     }
 
@@ -105,11 +149,27 @@ public class BufferedHttpSource {
      * @throws IOException 源已关闭 / 下载侧 fatal / 等待被打断
      */
     public int readAt(long position, byte[] dest, int destOffset, int length) throws IOException {
+        return readAt(position, dest, destOffset, length, null);
+    }
+
+    /**
+     * 阻塞读取指定绝对位置的数据，支持外部取消。
+     *
+     * @param cancel 置位后本调用立即抛出 IOException，用于原生解码器 close 时
+     *               解开卡在等网络供数上的解码线程
+     * @return 实际读取字节数；数据流结束返回 -1
+     * @throws IOException 源已关闭 / 下载侧 fatal / 已取消 / 等待被打断
+     */
+    public int readAt(long position, byte[] dest, int destOffset, int length,
+                      AtomicBoolean cancel) throws IOException {
         if (dest == null || length <= 0) {
             return 0;
         }
         synchronized (lock) {
             while (true) {
+                if (cancel != null && cancel.get()) {
+                    throw new IOException("readAt cancelled");
+                }
                 if (fatalError != null) {
                     throw new IOException("buffered source error: " + fatalError);
                 }
@@ -121,6 +181,7 @@ public class BufferedHttpSource {
                     int avail = (int) (bufEnd - position);
                     int n = Math.min(length, Math.min(avail, capacity - off));
                     System.arraycopy(ring, off, dest, destOffset, n);
+                    noteReaderFedLocked(SystemClock.elapsedRealtime());
                     return n;
                 }
                 if (eof && position >= bufEnd) {
@@ -133,15 +194,20 @@ public class BufferedHttpSource {
                 }
                 // position == bufEnd 且未 EOF：等待下载推进；做卡死检测
                 long now = SystemClock.elapsedRealtime();
-                if (lastProgressAtMs > 0 && now - lastProgressAtMs > STALL_TIMEOUT_MS) {
+                if (lastProgressAtMs >= 0 && now - lastProgressAtMs > STALL_TIMEOUT_MS) {
                     if (downloaderThread == null || !downloaderThread.isAlive()) {
                         fatalError = "downloader dead with no progress";
                     } else {
                         fatalError = "network stall over " + STALL_TIMEOUT_MS + "ms";
+                        abortActiveConnectionLocked(); // 强行打断阻塞在 recvfrom 的连接，促发重试续传
                     }
                     Log.e(TAG, "readAt stall: url=" + url + " pos=" + position);
                     lock.notifyAll();
                     continue;
+                }
+                noteReaderStarvingLocked(now);
+                if (handleStarvationLocked(now, position)) {
+                    continue; // 已强制重连或升级 fatal：重新判定（可能已有数据或直接抛出）
                 }
                 try {
                     lock.wait(300);
@@ -150,6 +216,115 @@ public class BufferedHttpSource {
                 }
             }
         }
+    }
+
+    /** 读者拿到了数据：结算这段挨饿时长，并在窗口未武装时武装它 */
+    private void noteReaderFedLocked(long now) {
+        if (starvedSinceMs >= 0) {
+            starvedAccumMs += now - starvedSinceMs;
+            starvedSinceMs = -1L;
+        }
+        if (starveWindowStartMs < 0) {
+            starveWindowStartMs = now;
+        }
+    }
+
+    /** 读者停在 bufEnd 等下载推进：开始（或继续）计挨饿 */
+    private void noteReaderStarvingLocked(long now) {
+        if (starveWindowStartMs < 0) {
+            starveWindowStartMs = now;
+            starvedAccumMs = 0L;
+            starvedSinceMs = now;
+        } else if (starvedSinceMs < 0) {
+            starvedSinceMs = now;
+        }
+    }
+
+    /**
+     * 滑动窗口结算：窗口内读者挨饿时长超过 {@link #STARVE_LIMIT_MS} 即判定涓流断流。
+     *
+     * 前 {@link #MAX_STARVE_STALLS} 次只强制换连接（epoch +1 让 downloadLoop 从 bufEnd
+     * 带退避续传，已缓冲的窗口内容不丢），给弱网一次自愈机会；仍救不回来才置 fatalError，
+     * 让读者的 readAt 抛出，由上层如实报错重试——绝不允许无限静默等待。
+     *
+     * @return true 表示已采取动作，调用方须重新走一遍 readAt 判定
+     */
+    private boolean handleStarvationLocked(long now, long position) {
+        boolean windowRolled = starveWindowStartMs >= 0
+                && now - starveWindowStartMs >= STARVE_WINDOW_MS;
+        int verdict = starveVerdict(starveWindowStartMs, starvedAccumMs, starvedSinceMs,
+                starveStallCount, now);
+        if (verdict == STARVE_OK) {
+            if (windowRolled) {
+                rollStarveWindowLocked(now);
+                starveStallCount = 0; // 本窗口喂得上：健康
+            }
+            return false;
+        }
+        rollStarveWindowLocked(now);
+        starveStallCount++;
+        if (verdict == STARVE_FATAL) {
+            fatalError = "stream starved: reader idle over " + STARVE_LIMIT_MS + "ms/"
+                    + STARVE_WINDOW_MS + "ms for " + starveStallCount + " windows";
+            Log.e(TAG, "starve fatal: " + fatalError + " pos=" + position + " url=" + url);
+            abortActiveConnectionLocked();
+            lock.notifyAll();
+            return true;
+        }
+        Log.w(TAG, "starve stall " + starveStallCount + "/" + MAX_STARVE_STALLS
+                + ": reader idle over " + STARVE_LIMIT_MS + "ms/" + STARVE_WINDOW_MS
+                + "ms, reconnecting from " + bufEnd + " url=" + url);
+        downloadEpoch++;
+        downloadAbort = true;
+        abortActiveConnectionLocked();
+        // 重新武装无进展基准：否则旧基准会让下一次循环立刻误判成 30s 断流 fatal
+        lastProgressAtMs = now;
+        lock.notifyAll();
+        ensureDownloaderLocked();
+        return true;
+    }
+
+    /** 窗口滚动：仍在挨饿的话，新窗口从此刻重新计 */
+    private void rollStarveWindowLocked(long now) {
+        starveWindowStartMs = now;
+        starvedAccumMs = 0L;
+        starvedSinceMs = starvedSinceMs >= 0 ? now : -1L;
+    }
+
+    /** 读者全部离开：解除饥饿检测武装，避免下次有人来读时把整段空闲算成挨饿 */
+    private void disarmStarveLocked() {
+        starveWindowStartMs = -1L;
+        starvedAccumMs = 0L;
+        starvedSinceMs = -1L;
+        starveStallCount = 0;
+    }
+
+    static final int STARVE_OK = 0;
+    static final int STARVE_RECONNECT = 1;
+    static final int STARVE_FATAL = 2;
+
+    /**
+     * 纯判定：本窗口是否已滚动，以及滚动后读者挨饿到什么程度该做什么。
+     *
+     * 抽成静态纯函数是因为 JVM 单测里 {@code SystemClock.elapsedRealtime()} 恒为 0，
+     * 带真实时钟的实例方法在单测中永远推进不了窗口（同 PlaybackStateMachine.streamRetryAction）。
+     *
+     * @param windowStartMs  当前窗口起点；&lt;0 = 未武装
+     * @param accumMs        窗口内已结算的挨饿时长
+     * @param starvedSinceMs 当前这段连续挨饿的起点；&lt;0 = 此刻有数据可读
+     * @param stallCount     此前连续判定为饥饿的次数
+     * @param nowMs          当前时刻
+     */
+    static int starveVerdict(long windowStartMs, long accumMs, long starvedSinceMs,
+                             int stallCount, long nowMs) {
+        if (windowStartMs < 0 || nowMs - windowStartMs < STARVE_WINDOW_MS) {
+            return STARVE_OK;
+        }
+        long starved = accumMs + (starvedSinceMs >= 0 ? nowMs - starvedSinceMs : 0L);
+        if (starved < STARVE_LIMIT_MS) {
+            return STARVE_OK;
+        }
+        return (stallCount + 1 > MAX_STARVE_STALLS) ? STARVE_FATAL : STARVE_RECONNECT;
     }
 
     /** 登记一个读方（连接）的起始位置。token 由调用方保证唯一。 */
@@ -173,10 +348,34 @@ public class BufferedHttpSource {
         }
     }
 
+    /** 读者强制重定位（原生解码器回溯 seek）：updateReadPos 只进不退，回溯必须能落回小位。 */
+    public void seekReadPos(Object token, long pos) {
+        synchronized (lock) {
+            if (readPosMap.containsKey(token)) {
+                readPosMap.put(token, Math.max(0L, pos));
+            }
+            lock.notifyAll();
+        }
+    }
+
     /** 读方（连接）结束，注销。 */
     public void removeReadPos(Object token) {
         synchronized (lock) {
             readPosMap.remove(token);
+            if (readPosMap.isEmpty()) {
+                disarmStarveLocked();
+            }
+            lock.notifyAll();
+        }
+    }
+
+    /**
+     * 唤醒所有阻塞在 {@link #readAt} 等待循环中的读者。
+     * 原生解码器 close 路径靠它解开卡在等网络供数上的解码线程（配合读者自身的
+     * cancel 标志，被唤醒后会立即抛出而不是继续 wait）。
+     */
+    public void cancelWaiters() {
+        synchronized (lock) {
             lock.notifyAll();
         }
     }
@@ -258,6 +457,16 @@ public class BufferedHttpSource {
         return closed;
     }
 
+    /**
+     * 下载侧是否已进入不可恢复错误（断流 / 重试耗尽 / 涓流饥饿）。
+     * 此时 readAt 只会抛 IOException，唯有重定位（reset）能清掉；注册表据此回收死源。
+     */
+    public boolean hasFatalError() {
+        synchronized (lock) {
+            return fatalError != null;
+        }
+    }
+
     public int getRefCount() {
         synchronized (lock) {
             return refCount;
@@ -298,6 +507,7 @@ public class BufferedHttpSource {
             }
             closed = true;
             downloadAbort = true;
+            abortActiveConnectionLocked();
             lock.notifyAll();
         }
         Thread t = downloaderThread;
@@ -305,6 +515,23 @@ public class BufferedHttpSource {
             t.interrupt();
         }
         Log.i(TAG, "closed: " + url);
+    }
+
+    private void abortActiveConnectionLocked() {
+        if (activeIn != null) {
+            try { activeIn.close(); } catch (Throwable ignored) {}
+            activeIn = null;
+        }
+        if (activeConn != null) {
+            final HttpURLConnection c = activeConn;
+            activeConn = null;
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try { c.disconnect(); } catch (Throwable ignored) {}
+                }
+            }, "bufsrc-abort").start();
+        }
     }
 
     // ------------------------------------------------------------------ //
@@ -331,6 +558,9 @@ public class BufferedHttpSource {
             }
         }, "bufsrc-dl");
         downloaderThread.setDaemon(true);
+        // 重新武装卡死基准：休眠期间 lastProgressAtMs 停在很久以前，不刷新会让
+        // 新读者的第一次 readAt 被误判成「已断流 30s」而立刻进入 fatal
+        lastProgressAtMs = SystemClock.elapsedRealtime();
         downloaderThread.start();
     }
 
@@ -341,11 +571,13 @@ public class BufferedHttpSource {
     private void requestResetLocked(long position) {
         downloadEpoch++;
         downloadAbort = true;
+        abortActiveConnectionLocked();
         eof = false;
         bufStart = position;
         bufEnd = position;
         fatalError = null;
         lastProgressAtMs = SystemClock.elapsedRealtime();
+        disarmStarveLocked();
         lock.notifyAll();
         ensureDownloaderLocked();
         Log.i(TAG, "reset download -> " + position + " url=" + url);
@@ -448,8 +680,23 @@ public class BufferedHttpSource {
                 skipFully(in, start);
             }
             conn = c;
+            synchronized (lock) {
+                if (downloadAbort || epoch != downloadEpoch || closed) {
+                    return;
+                }
+                activeConn = c;
+                activeIn = in;
+            }
             pumpIntoRing(in, epoch);
         } finally {
+            synchronized (lock) {
+                if (activeConn == conn) {
+                    activeConn = null;
+                }
+                if (activeIn == in) {
+                    activeIn = null;
+                }
+            }
             if (in != null) {
                 try { in.close(); } catch (IOException ignored) {}
             }
