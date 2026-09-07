@@ -299,6 +299,44 @@ public class PlaybackStateMachineTest {
     }
 
     @Test
+    public void transientTransportErrorIsOnlyWhatOneWithMinus19Extra() {
+        Assert.assertTrue(PlaybackStateMachine.isTransientTransportError(1, "-19"));
+        Assert.assertFalse(PlaybackStateMachine.isTransientTransportError(1, "-1004"));
+        Assert.assertFalse(PlaybackStateMachine.isTransientTransportError(1, null));
+        Assert.assertFalse(PlaybackStateMachine.isTransientTransportError(0, "-19"));
+        // v3 自研引擎的负值码 (STREAM_STALL/DECODE_FAILED) 走另一条判定, 不得混入
+        Assert.assertFalse(PlaybackStateMachine.isTransientTransportError(-10002, "-10002"));
+    }
+
+    @Test
+    public void transportErrorsNeverSpendAnAttemptOnReauth() {
+        Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.PLAIN_RETRY,
+                PlaybackStateMachine.effectiveRetryAction(
+                        PlaybackStateMachine.StreamRetryAction.REAUTH_RETRY, true));
+        Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.REAUTH_RETRY,
+                PlaybackStateMachine.effectiveRetryAction(
+                        PlaybackStateMachine.StreamRetryAction.REAUTH_RETRY, false));
+        // 重试链耗尽后不得被降级逻辑复活
+        Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.GIVE_UP,
+                PlaybackStateMachine.effectiveRetryAction(
+                        PlaybackStateMachine.StreamRetryAction.GIVE_UP, true));
+
+        // 端到端: 慢网 (1,-19) 在第 3 次尝试上仍走直接重试而非重新登录
+        PlaybackStateMachine.StreamRetryAction third = PlaybackStateMachine.streamRetryAction(
+                PlaybackStateMachine.isTransientTransportError(1, "-19"), 2, true);
+        Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.REAUTH_RETRY, third);
+        Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.PLAIN_RETRY,
+                PlaybackStateMachine.effectiveRetryAction(third, true));
+    }
+
+    @Test
+    public void repeatErrorsNotifyOnlyOncePerAttemptEpisode() {
+        Assert.assertTrue(PlaybackStateMachine.shouldNotifyError(1));
+        Assert.assertFalse(PlaybackStateMachine.shouldNotifyError(2));
+        Assert.assertFalse(PlaybackStateMachine.shouldNotifyError(50));
+    }
+
+    @Test
     public void transientResumeRefreshOnlyAppliesAfterFourSecondPause() {
         Assert.assertFalse(
                 PlaybackStateMachine.shouldRefreshOnTransientResume(

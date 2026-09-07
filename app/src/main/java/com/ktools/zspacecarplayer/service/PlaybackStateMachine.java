@@ -63,6 +63,10 @@ public final class PlaybackStateMachine {
     /** 同一曲目最多尝试 3 次: 前 2 次直接重试, 第 3 次先重新登录再重试。 */
     public static final int MAX_STREAM_RETRY_ATTEMPTS = 3;
     private static final int REAUTH_ATTEMPT = 3;
+    /** android.media.MediaPlayer.MEDIA_ERROR_UNKNOWN 的值 (本类不依赖 Android, 故镜像于此)。 */
+    private static final int MEDIA_ERROR_UNKNOWN_WHAT = 1;
+    /** 慢网冷启动时 start/seek 撞车产生的传输层错误 extra, 重试即可恢复。 */
+    private static final String TRANSIENT_TRANSPORT_EXTRA = "-19";
     /** 距曲尾这么近就从头重播, 避免恢复瞬间又触发 onCompletion 跳下一首。 */
     private static final int END_OF_TRACK_GUARD_MS = 3000;
     /**
@@ -327,6 +331,33 @@ public final class PlaybackStateMachine {
             return StreamRetryAction.PLAIN_RETRY;
         }
         return reauthCooldownElapsed ? StreamRetryAction.REAUTH_RETRY : StreamRetryAction.PLAIN_RETRY;
+    }
+
+    /**
+     * 慢网冷启动时系统 MediaPlayer 抛 (what=1, extra="-19"): start/seek 撞车, 底层数据源瞬时不可用,
+     * 属传输层问题, 重试即可恢复。旧行为把它当致命错误直接 GIVE_UP, 而看门狗每 ≤60s 又重启一次
+     * 当前曲目, 于是每轮都复现一次错误 —— Toast 与日志无限循环刷屏。
+     */
+    public static boolean isTransientTransportError(int what, String extra) {
+        return what == MEDIA_ERROR_UNKNOWN_WHAT && TRANSIENT_TRANSPORT_EXTRA.equals(extra);
+    }
+
+    /** 传输层错误与会话有效性无关, 重新登录只会白等一轮鉴权冷却, 降级成直接重试。 */
+    public static StreamRetryAction effectiveRetryAction(StreamRetryAction action,
+                                                         boolean transientTransportError) {
+        if (transientTransportError && action == StreamRetryAction.REAUTH_RETRY) {
+            return StreamRetryAction.PLAIN_RETRY;
+        }
+        return action;
+    }
+
+    /**
+     * 同一轮起播未成功期间 (errorStreak 从 1 起计) 只提示用户一次。慢网下看门狗按指数退避
+     * 反复重启当前曲目, 每次都弹 Toast 会盖满车机屏幕; 后续重复只落日志与面包屑。
+     * errorStreak 在起播成功或用户切歌时归零, 因此下一轮仍有提示机会。
+     */
+    public static boolean shouldNotifyError(int errorStreak) {
+        return errorStreak <= 1;
     }
 
     private static boolean isPreparedState(EngineState state) {

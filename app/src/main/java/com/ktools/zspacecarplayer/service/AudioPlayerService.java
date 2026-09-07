@@ -87,6 +87,8 @@ public class AudioPlayerService extends Service {
     private boolean authWaitInProgress = false;
     /** MEDIA_ERROR_IO 后的原曲重试计数, 起播成功 (onPrepared) 后归零 */
     private int streamRetryCount = 0;
+    /** 同一轮起播未成功期间的重复错误计数, 用于抑制 Toast 刷屏; 与 streamRetryCount 同时归零 */
+    private int silentErrorStreak = 0;
     /** 流卡死看门狗: isPlaying 但位置连续 10 秒零位移则从断点重启当前曲目 */
     private int lastTickPositionMs = -1;
     /** lastTickPositionMs 属于哪首歌, 防止把上一首的断点带到新曲目上 */
@@ -462,6 +464,7 @@ public class AudioPlayerService extends Service {
     private void playSong(SongItem song, int startMs,
                           PlaybackStateMachine.PlaybackOrigin origin) {
         streamRetryCount = 0;
+        silentErrorStreak = 0;
         playbackState.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);
         startPlaybackWithSeek(song, startMs, origin);
     }
@@ -662,6 +665,7 @@ public class AudioPlayerService extends Service {
         if (playlist != null && !playlist.isEmpty()) {
             if (currentIndex < 0 || currentIndex >= playlist.size()) currentIndex = 0;
             streamRetryCount = 0;
+            silentErrorStreak = 0;
             startPlaybackWithSeek(playlist.get(currentIndex), -1, origin);
         }
     }
@@ -885,6 +889,7 @@ public class AudioPlayerService extends Service {
             currentIndex = (currentIndex + 1) % playlist.size();
         }
         streamRetryCount = 0;
+        silentErrorStreak = 0;
         playbackState.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);
         startPlaybackWithSeek(playlist.get(currentIndex), -1, origin);
     }
@@ -901,6 +906,7 @@ public class AudioPlayerService extends Service {
             currentIndex = (currentIndex - 1 + playlist.size()) % playlist.size();
         }
         streamRetryCount = 0;
+        silentErrorStreak = 0;
         playbackState.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);
         startPlaybackWithSeek(playlist.get(currentIndex), -1, origin);
     }
@@ -1354,6 +1360,7 @@ public class AudioPlayerService extends Service {
         playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.READY);
         everPrepared = true;
         streamRetryCount = 0;
+        silentErrorStreak = 0;
         stallRecovering = false;
         stallTicks = 0;
         if (playerIsV3) {
@@ -1389,21 +1396,27 @@ public class AudioPlayerService extends Service {
 
     private void handlePlayerError(int what, String extra, final long generation) {
         if (!playbackState.isCurrentGeneration(generation)) return;
-        Log.e(TAG, "MediaPlayer error: what=" + what + ", extra=" + extra);
+        silentErrorStreak++;
+        Log.e(TAG, "MediaPlayer error: what=" + what + ", extra=" + extra
+                + ", streak=" + silentErrorStreak);
         CrashMonitor.putContext("lastErrorWhat", what);
         CrashMonitor.putContext("lastErrorExtra", String.valueOf(extra));
         CrashMonitor.breadcrumb("play", "error what=" + what + " extra=" + extra
-                + " retry=" + streamRetryCount + " v3=" + playerIsV3);
+                + " retry=" + streamRetryCount + " streak=" + silentErrorStreak + " v3=" + playerIsV3);
         playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.ERROR);
         stallRecovering = false;
         invalidateSeekOperations();
-        // v3 引擎的负值错误码 (DECODE_FAILED=-10001) 一律按可恢复的网络/解码类错误重试
-        boolean recoverable = playerIsV3
+        // v3 引擎的负值错误码 (DECODE_FAILED / STREAM_STALL) 一律按可恢复的网络/解码类错误重试;
+        // 慢网 (1,-19) 是传输层瞬时错误, 同样可恢复, 否则看门狗每轮重启都复现一次 GIVE_UP
+        boolean transientTransport = !playerIsV3
+                && PlaybackStateMachine.isTransientTransportError(what, extra);
+        boolean recoverable = playerIsV3 || transientTransport
                 || (what == MediaPlayer.MEDIA_ERROR_IO || what == MEDIA_ERROR_SYSTEM);
         boolean reauthCooldownElapsed =
                 System.currentTimeMillis() - lastReAuthAt > REAUTH_COOLDOWN_MS;
-        PlaybackStateMachine.StreamRetryAction action = PlaybackStateMachine.streamRetryAction(
-                recoverable, streamRetryCount, reauthCooldownElapsed);
+        PlaybackStateMachine.StreamRetryAction action = PlaybackStateMachine.effectiveRetryAction(
+                PlaybackStateMachine.streamRetryAction(recoverable, streamRetryCount, reauthCooldownElapsed),
+                transientTransport);
         if (action != PlaybackStateMachine.StreamRetryAction.GIVE_UP) {
             streamRetryCount++;
             final SongItem failedSong = getCurrentSong();
@@ -1415,14 +1428,14 @@ public class AudioPlayerService extends Service {
                 final int finalResumeMs = Math.max(resumeMs, 0);
                 pendingSeekMs = -1;
                 if (action == PlaybackStateMachine.StreamRetryAction.PLAIN_RETRY) {
-                    if (stateChangeListener != null) stateChangeListener.onError("网络波动, 自动重试 " + failedSong.getName());
+                    reportPlaybackError("网络波动, 自动重试 " + failedSong.getName());
                     replayPendingSong(failedSong, finalResumeMs,
                             PlaybackStateMachine.PlaybackOrigin.NETWORK_RECOVERY);
                     return;
                 }
                 lastReAuthAt = System.currentTimeMillis();
                 authWaitInProgress = true;
-                if (stateChangeListener != null) stateChangeListener.onError("会话可能失效, 重新登录后自动重试...");
+                reportPlaybackError("会话可能失效, 重新登录后自动重试...");
                 JellyfinApiClient.getInstance().authenticateFromPrefs(this, new JellyfinApiClient.ApiCallback<Boolean>() {
                     @Override
                     public void onSuccess(Boolean result) {
@@ -1445,7 +1458,17 @@ public class AudioPlayerService extends Service {
             }
         }
         pendingSeekMs = -1;
-        if (stateChangeListener != null) stateChangeListener.onError("播放出错(Code " + what + ")");
+        reportPlaybackError("播放出错(Code " + what + ")");
+    }
+
+    /** 重复错误只提示一次, 其余落日志与面包屑 (慢网下看门狗会反复重启当前曲目)。 */
+    private void reportPlaybackError(String message) {
+        if (PlaybackStateMachine.shouldNotifyError(silentErrorStreak)) {
+            if (stateChangeListener != null) stateChangeListener.onError(message);
+            return;
+        }
+        Log.w(TAG, "Repeat playback error suppressed (streak=" + silentErrorStreak + "): " + message);
+        CrashMonitor.breadcrumb("play", "error suppressed streak=" + silentErrorStreak);
     }
 
     @Override
