@@ -260,10 +260,13 @@
 
                 <Button
                     android:id="@+id/btnSettingEngineValue"
-                    android:layout_width="@dimen/font_w"
+                    android:layout_width="wrap_content"
                     android:layout_height="@dimen/mini_h"
                     android:background="@drawable/bg_soft_pill"
+                    android:minWidth="@dimen/font_w"
+                    android:singleLine="true"
                     android:text="系统"
+                    android:textAllCaps="false"
                     android:textColor="@color/ink_dim"
                     android:textSize="@dimen/mini_text" />
             </LinearLayout>

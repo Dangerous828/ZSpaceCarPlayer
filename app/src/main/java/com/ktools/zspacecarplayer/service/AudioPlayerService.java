@@ -265,10 +265,22 @@ public class AudioPlayerService extends Service {
         }
     }
 
-    /** 是否启用 v3 自研 DSP 引擎 (设置页可切换) */
+    /**
+     * 是否启用 v3 自研 DSP 引擎 (设置页可切换)。
+     *
+     * 偏好为真还要再过一道崩溃熔断：v3 连续崩过阈值次数后强制走系统引擎，
+     * 直到用户在设置页显式重开（见 {@link com.ktools.zspacecarplayer.crash.NativeEngineGuard}）。
+     */
     public boolean isV3EngineEnabled() {
-        return getSharedPreferences(PREF_NAME, MODE_PRIVATE)
-                .getBoolean(PREF_KEY_ENGINE_V3, DEFAULT_ENGINE_V3);
+        if (!getSharedPreferences(PREF_NAME, MODE_PRIVATE)
+                .getBoolean(PREF_KEY_ENGINE_V3, DEFAULT_ENGINE_V3)) {
+            return false;
+        }
+        if (CrashMonitor.isEngineAutoDisabled()) {
+            Log.w(TAG, "v3 engine preferred but circuit-broken by crash guard, using system MediaPlayer");
+            return false;
+        }
+        return true;
     }
 
     /** 确保当前引擎与偏好一致; 不一致 (或未创建) 时重建。在每次起播前调用。 */
@@ -289,6 +301,8 @@ public class AudioPlayerService extends Service {
         Log.i(TAG, "Player engine: " + (wantV3 ? "v3 native DSP (AudioTrack)" : "system MediaPlayer"));
         CrashMonitor.putContext("engine", wantV3 ? "v3" : "system");
         CrashMonitor.breadcrumb("engine", wantV3 ? "v3 native DSP" : "system MediaPlayer");
+        // 崩溃归因：进程若在此后死掉，下次启动靠这条标记判断当时是不是在用原生引擎
+        CrashMonitor.markV3EngineActive(wantV3);
     }
 
     private void initMediaPlayer() {

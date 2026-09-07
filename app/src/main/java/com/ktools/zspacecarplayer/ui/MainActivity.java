@@ -37,6 +37,7 @@ import com.bumptech.glide.Glide;
 import com.ktools.zspacecarplayer.R;
 import com.ktools.zspacecarplayer.db.SongDao;
 import com.ktools.zspacecarplayer.crash.CrashMonitor;
+import com.ktools.zspacecarplayer.crash.NativeEngineGuard;
 import com.ktools.zspacecarplayer.model.CategoryItem;
 import com.ktools.zspacecarplayer.model.LyricLine;
 import com.ktools.zspacecarplayer.model.SongItem;
@@ -128,21 +129,6 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         super.onCreate(savedInstanceState);
         ensureSystemUiVisible();
         setContentView(R.layout.activity_main);
-
-        // 验证 NativeDsp 运行与自检
-        if (com.ktools.zspacecarplayer.dsp.NativeDsp.isAvailable()) {
-            com.ktools.zspacecarplayer.dsp.NativeDsp.init(44100, 2);
-            short[] testSine = new short[1024];
-            for (int i = 0; i < testSine.length; i++) {
-                testSine[i] = (short) (Math.sin(2.0 * Math.PI * 440.0 * i / 44100.0) * 16384.0);
-            }
-            com.ktools.zspacecarplayer.dsp.NativeDsp.setBassBoost(50);
-            com.ktools.zspacecarplayer.dsp.NativeDsp.setVirtualizer(50);
-            com.ktools.zspacecarplayer.dsp.NativeDsp.processShorts(testSine, 0, testSine.length / 2);
-            android.util.Log.i("MainActivity", "★★★★★ NativeDsp self-test PASSED in MainActivity! ★★★★★");
-        } else {
-            android.util.Log.e("MainActivity", "★★★★★ NativeDsp is NOT available! ★★★★★");
-        }
 
         JellyfinApiClient.getInstance().init(getApplicationContext());
 
@@ -660,23 +646,45 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         final Button valueBtn = layoutSettingsPage.findViewById(R.id.btnSettingEngineValue);
         if (row == null || valueBtn == null) return;
 
-        SharedPreferences sp = getSharedPreferences(AudioPlayerService.PREF_NAME, MODE_PRIVATE);
-        valueBtn.setText(sp.getBoolean(AudioPlayerService.PREF_KEY_ENGINE_V3, false) ? "v3 DSP" : "系统");
+        final SharedPreferences sp = getSharedPreferences(AudioPlayerService.PREF_NAME, MODE_PRIVATE);
+        updateEngineLabel(sp, valueBtn);
 
         row.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                SharedPreferences sp = getSharedPreferences(
-                        AudioPlayerService.PREF_NAME, MODE_PRIVATE);
-                boolean next = !sp.getBoolean(AudioPlayerService.PREF_KEY_ENGINE_V3, false);
+                // 熔断期间偏好仍是 true 而实际跑系统引擎, 必须按有效状态翻转, 否则要点两次
+                boolean autoDisabled = CrashMonitor.isEngineAutoDisabled();
+                boolean effective = sp.getBoolean(AudioPlayerService.PREF_KEY_ENGINE_V3, false)
+                        && !autoDisabled;
+                boolean next = !effective;
+                if (next && autoDisabled) {
+                    // 显式重开即给一轮新预算: 清空熔断与连续崩溃计数
+                    CrashMonitor.resetEngineGuard();
+                }
                 sp.edit().putBoolean(AudioPlayerService.PREF_KEY_ENGINE_V3, next).apply();
-                valueBtn.setText(next ? "v3 DSP" : "系统");
-                Toast.makeText(MainActivity.this,
-                        next ? "已切换 v3 自研 DSP 引擎, 下一首歌起生效"
-                             : "已切换回系统 MediaPlayer, 下一首歌起生效",
-                        Toast.LENGTH_LONG).show();
+                updateEngineLabel(sp, valueBtn);
+                String message;
+                if (next) {
+                    message = autoDisabled
+                            ? "已重开 v3 引擎 (此前连续 " + NativeEngineGuard.CRASH_LIMIT
+                              + " 次崩溃被自动回退), 下一首歌起生效"
+                            : "已切换 v3 自研 DSP 引擎, 下一首歌起生效";
+                } else {
+                    message = "已切换回系统 MediaPlayer, 下一首歌起生效";
+                }
+                Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
             }
         });
+    }
+
+    /** 引擎标签: 被崩溃熔断强制回退时明确标出, 否则用户会以为偏好没生效 */
+    private void updateEngineLabel(SharedPreferences sp, Button valueBtn) {
+        boolean wanted = sp.getBoolean(AudioPlayerService.PREF_KEY_ENGINE_V3, false);
+        if (wanted && CrashMonitor.isEngineAutoDisabled()) {
+            valueBtn.setText("系统 (崩溃保护)");
+        } else {
+            valueBtn.setText(wanted ? "v3 DSP" : "系统");
+        }
     }
 
     private String getPlayModeText(int mode) {

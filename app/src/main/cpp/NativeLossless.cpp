@@ -310,6 +310,18 @@ Java_com_ktools_zspacecarplayer_dsp_NativeLosslessDecoder_nativeReadSamples(
     std::unique_lock<std::timed_mutex> lk(dec->apiMutex, std::defer_lock);
     if (!lk.try_lock()) return -1;
     if (dec->bridge.aborted.load()) return -1;
+    // dr_* 会往 dst 写 numFrames * channels 个 short。越界写是堆破坏（SIGSEGV 或静默踩内存），
+    // Java 侧 try-catch 拦不住，只能在 JNI 边界挡住。校验放在拿锁之后，
+    // 免得读到正在被 close 释放的字段。
+    if (dstOffset < 0 || dec->channels <= 0) return -1;
+    jsize dstLen = env->GetArrayLength(dst);
+    if (static_cast<long long>(dstOffset)
+            + static_cast<long long>(numFrames) * dec->channels
+        > static_cast<long long>(dstLen)) {
+        LOGE("readSamples rejected: dstLen=%d offset=%d frames=%d ch=%d",
+             (int) dstLen, (int) dstOffset, numFrames, dec->channels);
+        return -1;
+    }
     jshort *buf = env->GetShortArrayElements(dst, nullptr);
     if (!buf) return -1;
     drflac_uint64 got = 0;

@@ -38,6 +38,10 @@ import java.util.Random;
  *
  * 上传失败不丢报告：留在本地按指数退避重试，目录最多存 20 份。
  * 端点可用 SharedPreferences 覆盖（{@code adb shell} 改即可），便于自测。
+ *
+ * 会话标记同时是 v3 原生引擎的熔断依据：连续多次可归因崩溃即强制回退系统 MediaPlayer
+ * （{@link NativeEngineGuard}），否则车机会在现场陷进「一放歌就闪退」的死循环，
+ * 而用户不会自己去设置页关引擎。
  */
 public final class CrashMonitor {
 
@@ -50,6 +54,10 @@ public final class CrashMonitor {
     private static final String PREF_NEXT_ATTEMPT_AT = "crash_upload_next_attempt_at";
     private static final String PREF_FAILURE_STREAK = "crash_upload_failure_streak";
     private static final String PREF_LAST_BLOCKED_REPORT_AT = "crash_last_blocked_report_at";
+    /** v3 原生引擎连续崩溃计数与熔断判定，策略见 {@link NativeEngineGuard} */
+    private static final String PREF_ENGINE_CRASH_COUNT = "engine_v3_crash_count";
+    private static final String PREF_ENGINE_AUTO_DISABLED = "engine_v3_auto_disabled";
+    private static final String PREF_ENGINE_AUTO_DISABLED_AT = "engine_v3_auto_disabled_at";
 
     /**
      * 默认收集端点。与曲库同域，走已经在 8600 上验证过的 Caddy 入口。
@@ -86,6 +94,12 @@ public final class CrashMonitor {
     /** 业务侧随时可写的现场上下文（当前曲目、引擎、缓冲百分比等），进每份报告 */
     private static final Map<String, String> sContext = new LinkedHashMap<String, String>();
 
+    /**
+     * 本次会话是否启用了 v3 原生引擎。写进会话标记，下次启动据此把崩溃归因到引擎上
+     * （{@link NativeEngineGuard}）；系统引擎下的崩溃不许连累 v3。
+     */
+    private static volatile boolean sV3EngineActive = false;
+
     private final Context appContext;
     private final CrashReportStore store;
     private final CrashUploader uploader;
@@ -99,6 +113,8 @@ public final class CrashMonitor {
     private volatile long pingSeq = 0L;
     private volatile long pingAckSeq = 0L;
     private boolean installed = false;
+    /** 会话标记前缀 "pid|启动时刻"，引擎切换时据此重写标记而不必重新取 pid */
+    private volatile String sessionMarkerHead;
 
     private CrashMonitor(Context context) {
         this.appContext = context.getApplicationContext();
@@ -215,6 +231,10 @@ public final class CrashMonitor {
                         // 标记已单独成报，删掉会话标记避免下次启动重复报 abnormal_exit
                         deleteSessionMarker();
                     }
+                    if (sV3EngineActive) {
+                        // 标记被删后下次启动无从归因，v3 期间的 Java 崩溃只能在此刻计入熔断
+                        applyEngineGuard(CrashReport.KIND_JAVA_CRASH, true);
+                    }
                 } catch (Throwable ignored) {
                     // 崩溃处理链自己再崩就没有下一层了，静默
                 } finally {
@@ -232,12 +252,40 @@ public final class CrashMonitor {
     // ------------------------------------------------------------------ //
 
     private void writeSessionMarker() {
+        sessionMarkerHead = android.os.Process.myPid() + "|" + System.currentTimeMillis();
+        writeMarkerBody(sessionMarkerHead + "|" + engineField());
+    }
+
+    /**
+     * 会话内引擎切换（设置页改偏好后下一首起播时惰性重建）时重写标记，让「上次死的时候
+     * 在用哪个引擎」始终是最新的——归因错了，熔断就会误伤好引擎或放过坏引擎。
+     */
+    public static void markV3EngineActive(boolean active) {
+        sV3EngineActive = active;
+        CrashMonitor monitor = sInstance;
+        if (monitor != null) {
+            monitor.rewriteSessionMarker();
+        }
+    }
+
+    private void rewriteSessionMarker() {
+        String head = sessionMarkerHead;
+        if (head != null) {
+            writeMarkerBody(head + "|" + engineField());
+        }
+    }
+
+    private static String engineField() {
+        return sV3EngineActive ? "v3" : "sys";
+    }
+
+    private void writeMarkerBody(String body) {
         FileOutputStream fos = null;
         try {
             File f = markerFile();
             fos = new FileOutputStream(f);
             Writer w = new OutputStreamWriter(fos, "UTF-8");
-            w.write(android.os.Process.myPid() + "|" + System.currentTimeMillis());
+            w.write(body);
             w.flush();
             fos.getFD().sync();
         } catch (Throwable t) {
@@ -268,14 +316,18 @@ public final class CrashMonitor {
     private void inspectPreviousSession() {
         File marker = markerFile();
         if (!marker.exists()) {
+            // 上次会话干净收尾（Java 崩溃处理链已删标记）：连续崩溃计数清零，
+            // 但熔断判定保持——要恢复 v3 得由用户在设置页显式重开
+            clearEngineCrashCount();
             return;
         }
         String markerBody = readTextFile(marker, 64);
         deleteSessionMarker();
 
-        // 标记格式 "pid|startWallMs"：据此算出上次进程活了多久
+        // 标记格式 "pid|startWallMs|engine"：据此算出上次进程活了多久、当时在用哪个引擎
         String previousPid = "";
         long previousSessionMs = -1L;
+        boolean previousV3Active = false;
         if (markerBody != null) {
             String[] parts = markerBody.trim().split("\\|");
             if (parts.length >= 1) {
@@ -285,6 +337,9 @@ public final class CrashMonitor {
                 try {
                     previousSessionMs = System.currentTimeMillis() - Long.parseLong(parts[1]);
                 } catch (NumberFormatException ignored) {}
+            }
+            if (parts.length >= 3) {
+                previousV3Active = "v3".equals(parts[2]);
             }
         }
 
@@ -306,13 +361,90 @@ public final class CrashMonitor {
         CrashReport report = newReport(kind);
         report.put("previousPid", previousPid);
         report.put("previousSessionMs", previousSessionMs);
+        report.put("previousEngineV3", previousV3Active);
         report.put("evidenceConfidence", confidence);
         report.setLogcat(logcat);
         report.setThreadDump(CrashReport.dumpAllThreads());
         File written = store.write(report);
         Log.w(TAG, "previous session ended abnormally -> " + kind
                 + " confidence=" + confidence + " afterMs=" + previousSessionMs
-                + " file=" + written);
+                + " v3Engine=" + previousV3Active + " file=" + written);
+        applyEngineGuard(kind, previousV3Active);
+    }
+
+    // ------------------------------------------------------------------ //
+    //  v3 原生引擎熔断（策略见 NativeEngineGuard）
+    // ------------------------------------------------------------------ //
+
+    /**
+     * 按上次会话的死法更新连续崩溃计数，达到阈值即熔断。
+     *
+     * 用 {@code commit()} 而不是 {@code apply()}：Java 崩溃路径上进程正在死，
+     * 异步写盘大概率来不及落地，下次启动就白丢一次计数。
+     */
+    private void applyEngineGuard(String kind, boolean v3Active) {
+        try {
+            int recorded = prefs.getInt(PREF_ENGINE_CRASH_COUNT, 0);
+            boolean alreadyDisabled = prefs.getBoolean(PREF_ENGINE_AUTO_DISABLED, false);
+            int next = NativeEngineGuard.nextCrashCount(kind, v3Active, recorded);
+            boolean disable = NativeEngineGuard.shouldAutoDisable(next, alreadyDisabled);
+            long latchedAt = prefs.getLong(PREF_ENGINE_AUTO_DISABLED_AT, 0L);
+            prefs.edit()
+                    .putInt(PREF_ENGINE_CRASH_COUNT, next)
+                    .putBoolean(PREF_ENGINE_AUTO_DISABLED, disable)
+                    .putLong(PREF_ENGINE_AUTO_DISABLED_AT,
+                            disable ? (latchedAt != 0L ? latchedAt : System.currentTimeMillis()) : 0L)
+                    .commit();
+            if (disable && !alreadyDisabled) {
+                Log.e(TAG, "v3 native engine circuit-broken after " + next
+                        + " attributed crashes; forcing system MediaPlayer until user re-enables");
+                breadcrumb("engine", "auto-disabled after " + next + " crashes");
+            } else if (disable) {
+                Log.w(TAG, "engine guard still latched (streak reset to " + next
+                        + "); system MediaPlayer stays until user re-enables");
+            } else if (next > 0) {
+                Log.w(TAG, "engine crash count=" + next + "/" + NativeEngineGuard.CRASH_LIMIT
+                        + " kind=" + kind);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "applyEngineGuard failed", t);
+        }
+    }
+
+    private void clearEngineCrashCount() {
+        if (prefs.getInt(PREF_ENGINE_CRASH_COUNT, 0) != 0) {
+            prefs.edit().putInt(PREF_ENGINE_CRASH_COUNT, 0).commit();
+        }
+    }
+
+    /** v3 引擎是否已被崩溃熔断强制关闭（设置页据此显示与恢复） */
+    public static boolean isEngineAutoDisabled() {
+        CrashMonitor monitor = sInstance;
+        return monitor != null && monitor.prefs.getBoolean(PREF_ENGINE_AUTO_DISABLED, false);
+    }
+
+    /** 当前连续崩溃计数（诊断/设置页展示用） */
+    public static int getEngineCrashCount() {
+        CrashMonitor monitor = sInstance;
+        return monitor == null ? 0 : monitor.prefs.getInt(PREF_ENGINE_CRASH_COUNT, 0);
+    }
+
+    /**
+     * 用户在设置页显式重开 v3：清空熔断与计数，给一轮全新预算。
+     * 不自动恢复——熔断的意义就在于「机器自己不再尝试已经崩过三次的路径」。
+     */
+    public static void resetEngineGuard() {
+        CrashMonitor monitor = sInstance;
+        if (monitor == null) {
+            return;
+        }
+        monitor.prefs.edit()
+                .putBoolean(PREF_ENGINE_AUTO_DISABLED, false)
+                .putLong(PREF_ENGINE_AUTO_DISABLED_AT, 0L)
+                .putInt(PREF_ENGINE_CRASH_COUNT, 0)
+                .commit();
+        breadcrumb("engine", "guard reset by user re-enable");
+        Log.i(TAG, "engine guard reset by user");
     }
 
     private static boolean containsFatalSignal(String logcat) {
