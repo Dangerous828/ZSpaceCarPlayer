@@ -60,6 +60,26 @@ public class TextRepairTest {
         assertEquals("\u8C2D\u548F", TextRepair.repair("\u0337\u04FD"));
     }
 
+    // ---------------- 幂等: 缓存写侧存已修复文本, 读侧会再修一次 ----------------
+
+    @Test
+    public void repairIsIdempotentOnAlreadyRepairedText() {
+        String[] repaired = {
+                "HISTORY\uff08\u4e2d\u6587\u7248\uff09",
+                "MAMA\uff08Chinese Ver.\uff09",
+                "\u98D8\u96EA",
+                "\u8C2D\u548F",
+                "\u8C2D\u548F\u9E9F - \u8BB2\u4E0D\u51FA\u518D\u89C1",
+                "Kelly Clarkson\uff08\u51EF\u8389\u00B7\u514B\u83B1\u68EE\uff09",
+                "Monica",
+                "Caf\u00E9",
+                "Sigur R\u00F3s",
+        };
+        for (String s : repaired) {
+            assertEquals(s, TextRepair.repair(TextRepair.repair(s)));
+        }
+    }
+
     // ---------------- 合法文字必须原样返回 ----------------
 
     @Test

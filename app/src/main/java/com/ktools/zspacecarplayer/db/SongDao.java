@@ -10,6 +10,7 @@ import android.util.Log;
 
 import com.ktools.zspacecarplayer.model.SongItem;
 import com.ktools.zspacecarplayer.util.PinyinUtils;
+import com.ktools.zspacecarplayer.util.TextRepair;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -278,15 +279,18 @@ public class SongDao {
 
     private SongItem parseCursorToSong(Cursor cursor) {
         String id = cursor.getString(cursor.getColumnIndexOrThrow("id"));
-        String name = cursor.getString(cursor.getColumnIndexOrThrow("name"));
-        String artist = cursor.getString(cursor.getColumnIndexOrThrow("artist"));
-        String album = cursor.getString(cursor.getColumnIndexOrThrow("album"));
-        String genre = cursor.getString(cursor.getColumnIndexOrThrow("genre"));
+        // 写侧存的是修复后文本, 但修复逻辑上线前写入的旧行仍是 GBK 乱码,
+        // 进程重启后先读缓存就会短暂显示乱码, 直到网络刷新覆盖。读侧补一道修复
+        // (TextRepair 对已修复文本是恒等操作, 重复调用安全)
+        String name = TextRepair.repair(cursor.getString(cursor.getColumnIndexOrThrow("name")));
+        String artist = TextRepair.repair(cursor.getString(cursor.getColumnIndexOrThrow("artist")));
+        String album = TextRepair.repair(cursor.getString(cursor.getColumnIndexOrThrow("album")));
+        String genre = TextRepair.repair(cursor.getString(cursor.getColumnIndexOrThrow("genre")));
 
         String folderName = "未分类";
         int folderIdx = cursor.getColumnIndex("folder_name");
         if (folderIdx != -1 && !cursor.isNull(folderIdx)) {
-            folderName = cursor.getString(folderIdx);
+            folderName = TextRepair.repair(cursor.getString(folderIdx));
         }
 
         long durationMs = cursor.getLong(cursor.getColumnIndexOrThrow("duration_ms"));
