@@ -36,6 +36,7 @@ import androidx.recyclerview.widget.RecyclerView;
 import com.bumptech.glide.Glide;
 import com.ktools.zspacecarplayer.R;
 import com.ktools.zspacecarplayer.db.SongDao;
+import com.ktools.zspacecarplayer.crash.CrashMonitor;
 import com.ktools.zspacecarplayer.model.CategoryItem;
 import com.ktools.zspacecarplayer.model.LyricLine;
 import com.ktools.zspacecarplayer.model.SongItem;
@@ -247,9 +248,14 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 hideSoftKeyboard();
                 if (isBound && playerService != null) {
                     int exactMs = SongDao.getInstance(MainActivity.this).getSongProgress(song.getId());
+                    CrashMonitor.breadcrumb("ui", "song clicked pos=" + position
+                            + " " + song.getName() + " resumeMs=" + exactMs);
                     playerService.setPlaylist(currentDisplayedSongs, position, exactMs,
                             PlaybackStateMachine.PlaybackOrigin.USER_UI);
                 } else {
+                    // 服务未绑定时点击只会弹 Toast，用户观感同样是「点了没反应」
+                    CrashMonitor.breadcrumb("ui", "song clicked but service not bound: "
+                            + song.getName());
                     Toast.makeText(MainActivity.this, "播放服务初始化中, 请稍候再试", Toast.LENGTH_SHORT).show();
                 }
             }
@@ -442,6 +448,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         btnNavSettings.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                CrashMonitor.breadcrumb("ui", "settings clicked");
                 hideSoftKeyboard();
                 showSettingsPageView();
             }
@@ -537,6 +544,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         if (category == null) return;
         String id = category.getId();
         String name = category.getName();
+        CrashMonitor.putContext("category", name);
+        CrashMonitor.breadcrumb("ui", "category " + name + " id=" + id
+                + " count=" + category.getSongCount());
         if ("fav".equals(id) || name.contains("红心")) {
             loadFavoriteSongs();
         } else if ("most_played".equals(id) || name.contains("播放最多")) {

@@ -25,6 +25,7 @@ import android.util.Log;
 import androidx.core.app.NotificationCompat;
 
 import com.ktools.zspacecarplayer.R;
+import com.ktools.zspacecarplayer.crash.CrashMonitor;
 import com.ktools.zspacecarplayer.db.SongDao;
 import com.ktools.zspacecarplayer.net.JellyfinApiClient;
 import com.ktools.zspacecarplayer.player.DspAudioTrackPlayer;
@@ -188,6 +189,10 @@ public class AudioPlayerService extends Service {
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         initMediaPlayer();
         loadDspParamsFromPrefs();
+        // 立刻把持久化的音效参数灌进 NativeDsp 的静态缓存。此时 native 引擎还没建
+        // （setter 内部有空判，是安全 no-op），引擎 init 时会重放这份缓存；若只在
+        // handlePrepared 里下发，崩溃重启后首次 prepare 一旦卡住，音效就永远停在关闭态
+        applyDspParamsToNative();
         initDspSafetyComponents();
         initProgressTracker();
         registerMediaButton();
@@ -280,6 +285,8 @@ public class AudioPlayerService extends Service {
         player = wantV3 ? new DspAudioTrackPlayer() : new AndroidMediaPlayerWrapper();
         playerIsV3 = wantV3;
         Log.i(TAG, "Player engine: " + (wantV3 ? "v3 native DSP (AudioTrack)" : "system MediaPlayer"));
+        CrashMonitor.putContext("engine", wantV3 ? "v3" : "system");
+        CrashMonitor.breadcrumb("engine", wantV3 ? "v3 native DSP" : "system MediaPlayer");
     }
 
     private void initMediaPlayer() {
@@ -415,6 +422,10 @@ public class AudioPlayerService extends Service {
                             PlaybackStateMachine.PlaybackOrigin origin) {
         this.playlist = new ArrayList<>(songs);
         this.currentIndex = startIndex;
+        CrashMonitor.putContext("playlistSize", playlist.size());
+        CrashMonitor.putContext("playlistIndex", startIndex);
+        CrashMonitor.breadcrumb("play", "setPlaylist size=" + playlist.size()
+                + " index=" + startIndex + " startMs=" + startMs);
         if (currentIndex >= 0 && currentIndex < playlist.size()) {
             PlaybackStateMachine.PlaybackOrigin safeOrigin = origin == null
                     ? PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME : origin;
@@ -478,6 +489,13 @@ public class AudioPlayerService extends Service {
                 playbackState.getEngineState(), gainEnvelope.getCurrentGain());
         final long generation = playbackState.beginGeneration(
                 PlaybackStateMachine.EngineState.PREPARING, origin);
+        CrashMonitor.putContext("songId", song.getId());
+        CrashMonitor.putContext("songTitle", song.getName());
+        CrashMonitor.putContext("generation", generation);
+        CrashMonitor.putContext("origin", String.valueOf(origin));
+        CrashMonitor.breadcrumb("play", "startPlayback " + song.getName()
+                + " id=" + song.getId() + " seek=" + pendingSeekMs
+                + " origin=" + origin + " fade=" + fadeExistingPlayer);
         cancelSeekTimeout();
         activeSeekOperationId = -1L;
         queuedSeekOperationId = -1L;
@@ -487,20 +505,10 @@ public class AudioPlayerService extends Service {
         JellyfinApiClient client = JellyfinApiClient.getInstance();
         if (!client.hasToken()) {
             client.restoreAuthFromPrefs(this);
-        }
-
-        final String urlToPlay = client.getStreamUrl(song.getId());
-        if (urlToPlay == null || urlToPlay.trim().isEmpty()) {
-            if (client.hasToken()) {
-                playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.ERROR);
-                pendingSeekMs = -1;
-                if (stateChangeListener != null) {
-                    stateChangeListener.onError("无效的音频播放地址");
-                }
-            } else {
+            if (!client.hasToken()) {
                 waitForAuthThenPlay(song, generation);
+                return;
             }
-            return;
         }
 
         pendingAuthSong = null;
@@ -517,12 +525,20 @@ public class AudioPlayerService extends Service {
                     if (isPlaying()) {
                         player.pause();
                     }
+                    // reset 在主线程执行且内部要等渲染线程退出，是「卡死」的高危窗口。
+                    // 主线程看门狗抓到的报告停在这一条上，就能断定是拆机阻塞而非 UI 自身问题。
+                    CrashMonitor.breadcrumb("play", "reset begin");
                     player.reset();
+                    CrashMonitor.breadcrumb("play", "reset done");
                     bindPlayerCallbacks(generation);
                     gainEnvelope.setImmediate(0.0f);
-                    // v3: 本地回环代理 + 大环形缓冲，抵御公网串流抖动（消除“播 2s 停 1s”式 underrun）
+                    // 双引擎均支持原码率直传无损 (static=true)：v3 经原生 dr_* 软解出 PCM 送 NativeDsp，系统引擎走系统 MediaPlayer
+                    String urlToPlay = client.getStreamUrl(song.getId());
+                    CrashMonitor.putContext("streamUrl", urlToPlay);
+                    // v3: 本地回环代理 + 环形缓冲，抵御公网串流抖动（消除“播 2s 停 1s”式 underrun）
                     player.setDataSource(HttpProxyServer.getInstance().getProxyUrl(urlToPlay));
                     playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.PREPARING);
+                    CrashMonitor.breadcrumb("play", "prepareAsync");
                     player.prepareAsync();
                     startForegroundServiceNotification("正在播放", song.getName() + " - " + song.getArtist());
                     if (remoteControlClient != null) {
@@ -534,6 +550,7 @@ public class AudioPlayerService extends Service {
                     }
                 } catch (Exception e) {
                     Log.e(TAG, "Error playing song", e);
+                    CrashMonitor.breadcrumb("play", "startPlayback failed: " + e);
                     playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.ERROR);
                     pendingSeekMs = -1;
                     if (stateChangeListener != null) {
@@ -1333,6 +1350,7 @@ public class AudioPlayerService extends Service {
 
     private void handlePrepared(int durationMs, long generation) {
         if (!playbackState.isCurrentGeneration(generation)) return;
+        CrashMonitor.breadcrumb("play", "prepared dur=" + durationMs + "ms v3=" + playerIsV3);
         playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.READY);
         everPrepared = true;
         streamRetryCount = 0;
@@ -1372,6 +1390,10 @@ public class AudioPlayerService extends Service {
     private void handlePlayerError(int what, String extra, final long generation) {
         if (!playbackState.isCurrentGeneration(generation)) return;
         Log.e(TAG, "MediaPlayer error: what=" + what + ", extra=" + extra);
+        CrashMonitor.putContext("lastErrorWhat", what);
+        CrashMonitor.putContext("lastErrorExtra", String.valueOf(extra));
+        CrashMonitor.breadcrumb("play", "error what=" + what + " extra=" + extra
+                + " retry=" + streamRetryCount + " v3=" + playerIsV3);
         playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.ERROR);
         stallRecovering = false;
         invalidateSeekOperations();
