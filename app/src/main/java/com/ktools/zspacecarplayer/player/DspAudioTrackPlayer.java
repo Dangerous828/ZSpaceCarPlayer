@@ -10,6 +10,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Message;
+import android.os.SystemClock;
 import android.util.Log;
 
 import com.ktools.zspacecarplayer.crash.CrashMonitor;
@@ -429,7 +430,11 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                 int seekTarget = pendingSeekMs;
                 if (seekTarget >= 0) {
                     pendingSeekMs = -1;
-                    doNativeSeekInternal(seekTarget);
+                    if (!doNativeSeekInternal(seekTarget)) {
+                        // seek 失败已如实上报 onError：解码器流位置不可信，
+                        // 退出循环，服务层会带断点重试同一首
+                        break;
+                    }
                 }
 
                 if (!isPlaying) {
@@ -511,13 +516,29 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
      * 错误码一律按可恢复处理，会带当前进度重试同一首。
      */
     private void reportNativeStreamFailure(final int framesGot, final int atPositionMs) {
-        final String detail = "native stream stalled: frames=" + framesGot
-                + " at=" + atPositionMs + "ms/" + currentDurationMs + "ms"
-                + " sr=" + sampleRate + " ch=" + channelCount
-                + " path=" + dataSourcePath;
-        Log.e(TAG, detail);
         CrashMonitor.putContext("nativeStreamStalled", true);
         CrashMonitor.putContext("nativeStallAtMs", atPositionMs);
+        reportNativeFailure("native stream stalled: frames=" + framesGot
+                + " at=" + atPositionMs + "ms/" + currentDurationMs + "ms"
+                + " sr=" + sampleRate + " ch=" + channelCount
+                + " path=" + dataSourcePath, atPositionMs);
+    }
+
+    /**
+     * 原生软解 seek 失败：同样必须如实上报。
+     *
+     * 二分 seek 中途失败（网络超时/截止）后 dr_flac 的流位置停在二分中间，
+     * 继续读只会解出乱数据；也不许静默按旧位置续播。上报后走服务层带断点的
+     * 同曲重试（有 GIVE_UP 上限，不会无限循环）。
+     */
+    private void reportNativeSeekFailure(final int seekTargetMs) {
+        reportNativeFailure("native seek failed: target=" + seekTargetMs
+                + "ms at=" + (currentPresentationTimeUs / 1000) + "ms"
+                + " path=" + dataSourcePath, (int) (currentPresentationTimeUs / 1000));
+    }
+
+    private void reportNativeFailure(final String detail, final int atPositionMs) {
+        Log.e(TAG, detail);
         CrashMonitor.breadcrumb("v3", detail);
         synchronized (stateLock) {
             isPrepared = false;
@@ -534,16 +555,31 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     }
 
     /**
-     * 原生软解 Seek 执行
+     * 原生软解 Seek 执行。
+     *
+     * @return true = seek 完成（无论原目标位置还是旧位置），渲染循环继续；
+     *         false = seek 失败且已上报 onError，渲染循环必须退出。
+     *         失败时会把 pendingSeekMs 回填为本次目标，服务层重试时断点不丢
+     *         （handlePlayerError 优先取 pendingSeekMs 作恢复位置）。
      */
-    private void doNativeSeekInternal(int seekTargetMs) {
+    private boolean doNativeSeekInternal(int seekTargetMs) {
         NativeLosslessDecoder dec = nativeDecoder;
-        if (dec == null) return;
+        if (dec == null) return true;
+        final long startedAt = SystemClock.elapsedRealtime();
+        boolean ok = false;
         try {
-            boolean ok = dec.seekToMs(seekTargetMs);
+            ok = dec.seekToMs(seekTargetMs);
             if (ok) {
                 currentPresentationFrame = (long) seekTargetMs * sampleRate / 1000L;
                 currentPresentationTimeUs = currentPresentationFrame * 1_000_000L / sampleRate;
+                long tookMs = SystemClock.elapsedRealtime() - startedAt;
+                if (tookMs > 1000) {
+                    // 装车复验量化点：>1s 的 seek 基本是弱网下 dr_flac 二分重定位串
+                    Log.i(TAG, "native seek " + seekTargetMs + "ms took " + tookMs
+                            + "ms (relocation burst on weak link)");
+                    CrashMonitor.breadcrumb("v3", "slow native seek " + tookMs
+                            + "ms -> " + seekTargetMs + "ms");
+                }
             }
             sawOutputEOS = false;
             if (audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
@@ -562,6 +598,18 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         } catch (Exception e) {
             Log.w(TAG, "Seek error in native render loop", e);
         }
+        // seek 失败后解码器内部流位置已不可信（二分中断点），绝不能静默续播旧数据；
+        // 正在拆除（isRendering 已清）时不报错，由 close 流程收尾。
+        // 展示位锚到本次目标：解码器已死、渲染循环即将退出，该值此后只作重试锚点——
+        // 服务层 handlePlayerError 经 getCurrentPosition() 取恢复位置，锚在目标上
+        // 重试断点不丢（锚在旧位 0ms 会丢断点）
+        if (!ok && isRendering.get() && nativeDecoder == dec) {
+            currentPresentationFrame = (long) seekTargetMs * sampleRate / 1000L;
+            currentPresentationTimeUs = currentPresentationFrame * 1_000_000L / sampleRate;
+            reportNativeSeekFailure(seekTargetMs);
+            return false;
+        }
+        return true;
     }
 
     /**

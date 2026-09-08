@@ -44,9 +44,15 @@ namespace {
         jobject readerGlobal;      // Java LosslessStreamReader
         jbyteArray bufGlobal;      // 预分配的 64KB 搬运缓冲区（生命周期内复用，避免高频 GC）
         std::atomic<bool> aborted; // release 后拒绝一切回调，防止悬垂引用
+        // seek 截止时刻（steady_clock 毫秒；0 = 未武装）。真车实测：dr_flac 二分 seek
+        // 每步都阻塞在 JNI 回调等环形缓冲重定位下载，网络卡死时最坏要等 30s 断流检测
+        // 才失败，期间渲染线程冻结、与 close 3s 锁超时互相打架。武装后回调超时快速
+        // 失败，dr_flac 立刻以读失败退出二分。只在 nativeSeekToFrame 期间武装。
+        std::atomic<long long> seekDeadlineMs;
         long long pos;             // 当前绝对字节位：read 推进 / seek 重定位（单一权威游标）
 
-        StreamBridge() : readerGlobal(nullptr), bufGlobal(nullptr), aborted(false), pos(0) {}
+        StreamBridge() : readerGlobal(nullptr), bufGlobal(nullptr), aborted(false),
+                         seekDeadlineMs(0), pos(0) {}
     };
 
     int detachIfNeeded() {
@@ -67,9 +73,36 @@ namespace {
     }
 
     // ---- 共享读/seek 实现 ----
+    // 单次 seek 的总时长预算。真车暴露：无 seektable 的 FLAC
+    // 走 dr_flac 全文件二分（19MB 约 9 次中点跳读），每次跳读都同步等环形缓冲重定位
+    // 下载；若远端挂死，回调会一直阻塞到 30s 断流检测兜底。超时后让回调立即失败，
+    // dr_flac 当作读失败尽快退出二分，由 Java 层如实上报走断点重试。
+    const long long SEEK_DEADLINE_MS = 10000;
+
+    // SEEK_CUR 前向小跳改为顺序读丢弃的上限。
+    // 真车暴露：dr_flac open 时 onMeta=NULL，对 PICTURE（嵌入封面 MB 级）/PADDING
+    // 等 metadata block 全部用 onSeek(SEEK_CUR, blockSize) 跳过；seek 目标越过
+    // bufEnd 时 BufferedHttpSource 会清窗断连重新 Range 建连——每首歌 open 都要
+    // 经历 3~5 次断连风暴（约 10-20s），这正是「大分类第一首歌加载很久」与断点
+    // 恢复 9 次重定位突发的共同根因。上限内的前向跳读改为读入临时缓冲丢弃：
+    // 下载线程零断连，代价仅 memcpy 与环形滑动，弱网下比断连重连快一个量级。
+    const long long FORWARD_SKIP_MAX_BYTES = 8LL * 1024 * 1024;
+
+    long long steadyNowMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    // seek 截止已到（或已 abort）：读/seek 回调必须快速失败
+    bool callbackDeadlineExceeded(StreamBridge *b) {
+        if (b->aborted.load()) return true;
+        long long deadline = b->seekDeadlineMs.load();
+        return deadline != 0 && steadyNowMs() > deadline;
+    }
+
     // 顺序读固定 from-position=b->pos（dr_* 顺序消费即读即推进；seek 走 bridgeSeek）
     size_t bridgeRead(StreamBridge *b, void *dst, size_t bytesToRead) {
-        if (b->aborted.load() || bytesToRead == 0) return 0;
+        if (callbackDeadlineExceeded(b) || bytesToRead == 0) return 0;
         int nd = detachIfNeeded();
         if (nd < 0) return 0;
         JNIEnv *env = nullptr;
@@ -78,6 +111,7 @@ namespace {
         const int CAP = 65536;
         size_t total = 0;
         while (total < bytesToRead) {
+            if (callbackDeadlineExceeded(b)) break; // seek 截止已到：立即收手
             int want = static_cast<int>(bytesToRead - total);
             if (want > CAP) want = CAP;
             jint n = env->CallStaticIntMethod(g_cls, g_readMid, b->readerGlobal,
@@ -93,9 +127,37 @@ namespace {
         return total;
     }
 
+    // 前向跳过 bytes 字节：复用 bridgeRead 顺序消费并丢弃（pos 随之推进）。
+    // 返回 false 表示中途 EOF/出错——dr_* 会把它当作 seek 失败处理。
+    // 丢弃用固定栈外小缓冲循环读，不占 64KB JNI 搬运缓冲区（那条通道只服务真读）。
+    bool bridgeSeekForwardByRead(StreamBridge *b, long long bytes) {
+        static const size_t CHUNK = 16 * 1024;
+        char discard[16 * 1024];
+        long long remaining = bytes;
+        while (remaining > 0) {
+            if (callbackDeadlineExceeded(b)) return false;
+            size_t want = remaining > (long long) CHUNK ? CHUNK : (size_t) remaining;
+            size_t got = bridgeRead(b, discard, want);
+            if (got == 0) return false; // EOF 或读失败
+            remaining -= (long long) got;
+        }
+        return true;
+    }
+
     // origin: 0=SET 1=CUR 2=END（三库枚举逐一对齐）
     bool bridgeSeek(StreamBridge *b, long long offset, int origin) {
-        if (b->aborted.load()) return false;
+        if (callbackDeadlineExceeded(b)) return false;
+        // 前向跳读改顺序丢弃：SEEK_CUR（dr_flac open 的 metadata skip）与
+        // SEEK_SET 前向（无 seektable FLAC 的二分 seek 跳读、断点续播定位）。
+        // 二分 seek 的中点跳读多为前向——每次 reset 都是断连+TLS 握手+Range
+        // 响应（弱网数秒），19MB 断点 seek 实测 9 次重定位突发；前向 ≤8MB
+        // 一律顺序读丢弃，跳读零断连。后向跳数据流不可回退，仍走重定位。
+        if (origin == 1 && offset > 0 && offset <= FORWARD_SKIP_MAX_BYTES) {
+            return bridgeSeekForwardByRead(b, offset);
+        }
+        if (origin == 0 && offset >= b->pos && offset - b->pos <= FORWARD_SKIP_MAX_BYTES) {
+            return bridgeSeekForwardByRead(b, offset - b->pos);
+        }
         long long target;
         if (origin == 0) {          // SEEK_SET
             target = offset;
@@ -347,6 +409,10 @@ Java_com_ktools_zspacecarplayer_dsp_NativeLosslessDecoder_nativeSeekToFrame(
     std::unique_lock<std::timed_mutex> lk(dec->apiMutex, std::defer_lock);
     if (!lk.try_lock()) return JNI_FALSE;
     if (dec->bridge.aborted.load()) return JNI_FALSE;
+    // 武装 seek 截止：期间任何读/seek 回调超过预算立即失败，杜绝网络挂死时
+    // 二分 seek 拖住渲染线程直至 30s 断流检测才醒（阶段 0 自审预警项，真车显形）
+    dec->bridge.seekDeadlineMs.store(steadyNowMs() + SEEK_DEADLINE_MS);
+    long long startedAt = steadyNowMs();
     bool ok = false;
     if (dec->format == FMT_FLAC) {
         ok = drflac_seek_to_pcm_frame(dec->flac, static_cast<drflac_uint64>(frameIndex)) == DRFLAC_TRUE;
@@ -354,6 +420,15 @@ Java_com_ktools_zspacecarplayer_dsp_NativeLosslessDecoder_nativeSeekToFrame(
         ok = drwav_seek_to_pcm_frame(dec->wav, static_cast<drwav_uint64>(frameIndex)) == DRWAV_TRUE;
     } else if (dec->format == FMT_MP3) {
         ok = drmp3_seek_to_pcm_frame(dec->mp3, static_cast<drmp3_uint64>(frameIndex)) == DRMP3_TRUE;
+    }
+    dec->bridge.seekDeadlineMs.store(0);
+    long long elapsed = steadyNowMs() - startedAt;
+    if (!ok) {
+        LOGE("seek to frame %lld failed after %lldms (deadline %lldms)",
+             (long long) frameIndex, elapsed, SEEK_DEADLINE_MS);
+    } else if (elapsed > 1000) {
+        LOGI("seek to frame %lld slow: %lldms (binary-search relocations on weak link)",
+             (long long) frameIndex, elapsed);
     }
     return ok ? JNI_TRUE : JNI_FALSE;
 }

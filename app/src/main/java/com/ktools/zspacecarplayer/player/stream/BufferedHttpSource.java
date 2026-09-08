@@ -35,8 +35,14 @@ public class BufferedHttpSource {
 
     private static final String TAG = "BufferedHttpSource";
 
-    /** 默认窗口容量：2MB ≈ 1.5Mbps 下约 11s、320kbps 下约 50s 的抗抖动余量（适配 4.3 车机堆预算） */
-    public static final int DEFAULT_CAPACITY_BYTES = 2 * 1024 * 1024;
+    /**
+     * 默认窗口容量：8MB ≈ 1.5Mbps 下约 42s、320kbps 下约 200s 的抗抖动余量。
+     * 2026-09-08 实车反馈「网络正常仍 2s 抖一下」——若供给端（Jellyfin/公网链路）
+     * 存在应用层发送节奏顿挫, 2MB 窗口余量太薄会被打穿; 8MB 把分钟级顿挫也平滑掉。
+     * 车机 RSS 实测 60~63MB, 多 6MB 数组在预算内（2026-09-03 从 8MB 缩到 2MB 是
+     * 为了堆红线, 现实测堆余量充足, 恢复设计值）。
+     */
+    public static final int DEFAULT_CAPACITY_BYTES = 8 * 1024 * 1024;
     /** 单次网络读块大小 */
     private static final int CHUNK_SIZE = 64 * 1024;
     /** 连续网络失败的最大重试次数（指数退避） */
@@ -752,6 +758,7 @@ public class BufferedHttpSource {
             synchronized (lock) {
                 if (epoch == downloadEpoch) {
                     lastProgressAtMs = SystemClock.elapsedRealtime();
+                    logWatermarkLocked(epoch);
                 }
             }
         }
@@ -819,6 +826,37 @@ public class BufferedHttpSource {
             }
         }
         return min;
+    }
+
+    // ---- 水位诊断日志（装车量化缓冲健康度的唯一入口） ----
+    private long lastWatermarkLogAtMs = 0L;
+    private long lastWatermarkBytes = 0L;
+
+    /**
+     * 每 5s 打一行窗口水位与供给速率。调用方已持 lock 且确认 epoch 当前。
+     *
+     * 判读：水位持续 <1MB → 供给不足（服务器发送节奏/带宽），抖动来自网络侧；
+     * 水位贴满 capacity → 供给充足，若仍停顿则问题在消费侧（解码/AudioTrack）。
+     * rate 单调偏低（<消费码率）同样指向供给不足。
+     */
+    private void logWatermarkLocked(long epoch) {
+        long now = SystemClock.elapsedRealtime();
+        if (lastWatermarkLogAtMs == 0L) {
+            lastWatermarkLogAtMs = now;
+            lastWatermarkBytes = bufEnd;
+            return;
+        }
+        long elapsed = now - lastWatermarkLogAtMs;
+        if (elapsed < 5000L) {
+            return;
+        }
+        long buffered = bufEnd - bufStart;
+        long rateKbps = (bufEnd - lastWatermarkBytes) * 8L / elapsed; // kbit/s
+        Log.i(TAG, "watermark: buffered=" + (buffered / 1024) + "KB/" + (capacity / 1024)
+                + "KB rate=" + rateKbps + "kbps eof=" + eof + " fatal=" + fatalError
+                + " epoch=" + epoch);
+        lastWatermarkLogAtMs = now;
+        lastWatermarkBytes = bufEnd;
     }
 
     // ------------------------------------------------------------------ //
