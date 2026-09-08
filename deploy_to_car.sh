@@ -20,8 +20,22 @@ if [ -z "$ANDROID_HOME" ] && [ -d "$HOME/Library/Android/sdk" ]; then
     export ANDROID_HOME="$HOME/Library/Android/sdk"
 fi
 
-CAR_IP="10.212.252.52:5555"
+# 车机 IP 不固定 (DHCP/多网段, 2026-09-08 实测从 10.212.252.52 漂到 10.202.110.52):
+# 环境变量 CAR_IP=host:port 优先; 否则按已知候选依次探测 5555 端口, 全部不通则报错退出
+if [ -z "$CAR_IP" ]; then
+    for cand in 10.202.110.52 10.212.252.52; do
+        if nc -z -G 1 "$cand" 5555 >/dev/null 2>&1; then
+            CAR_IP="$cand:5555"
+            break
+        fi
+    done
+fi
+if [ -z "$CAR_IP" ]; then
+    echo "错误: 未发现车机 (5555 端口), 请确认车机网络后用 CAR_IP=host:port ./deploy_to_car.sh 指定"
+    exit 1
+fi
 export ANDROID_SERIAL="$CAR_IP"
+echo "目标车机: $CAR_IP"
 APK_PATH="$SCRIPT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
 echo "=========================================="
