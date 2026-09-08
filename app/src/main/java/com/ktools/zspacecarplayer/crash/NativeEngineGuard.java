@@ -62,4 +62,125 @@ public final class NativeEngineGuard {
     public static boolean shouldAutoDisable(int crashCount, boolean alreadyAutoDisabled) {
         return alreadyAutoDisabled || crashCount >= CRASH_LIMIT;
     }
+
+    // ------------------------------------------------------------------ //
+    //  崩溃证据归属：谁的 logcat 行才算我们的崩溃
+    // ------------------------------------------------------------------ //
+
+    private static final String[] FATAL_SIGNAL_MARKS = {
+            "Fatal signal", "SIGSEGV", "SIGABRT", "tombstone"
+    };
+
+    private static final String[] FATAL_EXCEPTION_MARKS = {"FATAL EXCEPTION"};
+
+    /**
+     * logcat 里是否存在**属于指定进程**的 native 致命信号证据。
+     *
+     * 必须按 pid 过滤：车机上第三方进程（厂商服务、adb 的 {@code top}/{@code ps}）崩出
+     * SIGPIPE/SIGSEGV 是家常便饭，而 {@code logcat -d} 的尾巴里混着它们的行。早先只做
+     * 全文子串匹配，于是「别的进程崩了」会被记成 v3 引擎的 native 崩溃，攒满
+     * {@link #CRASH_LIMIT} 次就把原生引擎永久熔断——用户看到的「一放歌就闪退」被误判到
+     * 我们头上，而我们的引擎根本没崩。
+     *
+     * @param victimPid 上次会话的 pid（取自会话标记）。为空时退化为全文匹配，
+     *                  调用方应据此下调证据置信度。
+     */
+    public static boolean hasFatalSignalForPid(String logcat, String victimPid) {
+        return hasMarkForPid(logcat, victimPid, FATAL_SIGNAL_MARKS);
+    }
+
+    /** Java 未捕获异常的归属判定，语义同 {@link #hasFatalSignalForPid}。 */
+    public static boolean hasFatalExceptionForPid(String logcat, String victimPid) {
+        return hasMarkForPid(logcat, victimPid, FATAL_EXCEPTION_MARKS);
+    }
+
+    private static boolean hasMarkForPid(String logcat, String victimPid, String[] marks) {
+        if (logcat == null || logcat.length() == 0) {
+            return false;
+        }
+        boolean strict = victimPid != null && victimPid.length() > 0;
+        String[] lines = logcat.split("\n");
+        for (int i = 0; i < lines.length; i++) {
+            if (!containsAny(lines[i], marks)) {
+                continue;
+            }
+            // 拿不到上次 pid（旧标记 / 标记被截断）时只能退回全文匹配，
+            // 但调用方会把 confidence 降级，不再当作 high 铁证
+            if (!strict || victimPid.equals(pidOf(lines[i]))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsAny(String line, String[] marks) {
+        if (line == null) {
+            return false;
+        }
+        for (int i = 0; i < marks.length; i++) {
+            if (line.indexOf(marks[i]) >= 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 取一行 logcat 的归属进程号，认两种真实形态：
+     * <ul>
+     * <li>前缀式 {@code F/libc(25261): Fatal signal 13 ...}；</li>
+     * <li>debuggerd 正文式 {@code ... pid: 21288, tid: 21310 ... signal 11 (SIGSEGV)}——
+     * 这种行的前缀 pid 是 debuggerd 自己的，必须优先取正文里的 {@code pid:}，
+     * 否则我们自己进程的真崩溃会被判成「不是我们崩的」。</li>
+     * </ul>
+     * 认不出时返回空串（调用方按「不匹配」处理）。
+     */
+    static String pidOf(String line) {
+        if (line == null) {
+            return "";
+        }
+        String fromBody = readNumberAfter(line, "pid:");
+        if (fromBody != null) {
+            return fromBody;
+        }
+        String fromPrefix = readNumberInsideParen(line);
+        return fromPrefix == null ? "" : fromPrefix;
+    }
+
+    /** 在 {@code key} 之后跳过空白取一串数字；没有数字则返回 null。 */
+    private static String readNumberAfter(String line, String key) {
+        int at = line.indexOf(key);
+        if (at < 0) {
+            return null;
+        }
+        int i = at + key.length();
+        while (i < line.length() && Character.isWhitespace(line.charAt(i))) {
+            i++;
+        }
+        int start = i;
+        while (i < line.length() && Character.isDigit(line.charAt(i))) {
+            i++;
+        }
+        return i > start ? line.substring(start, i) : null;
+    }
+
+    /** 取第一个括号里的数字，即 logcat 前缀的 pid 字段。 */
+    private static String readNumberInsideParen(String line) {
+        int open = line.indexOf('(');
+        if (open < 0) {
+            return null;
+        }
+        int i = open + 1;
+        while (i < line.length() && Character.isWhitespace(line.charAt(i))) {
+            i++;
+        }
+        int start = i;
+        while (i < line.length() && Character.isDigit(line.charAt(i))) {
+            i++;
+        }
+        if (i == start || i >= line.length() || line.charAt(i) != ')') {
+            return null;
+        }
+        return line.substring(start, i);
+    }
 }

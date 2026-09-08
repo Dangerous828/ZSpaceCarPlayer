@@ -344,18 +344,24 @@ public final class CrashMonitor {
         }
 
         String logcat = readLogcat();
+        // 证据必须归属到上次那个 pid：车机上第三方进程崩出 SIGPIPE/SIGSEGV 太常见，
+        // 全文子串匹配会把别人的崩溃记到 v3 引擎头上（判定见 NativeEngineGuard）
         String kind;
         String confidence;
-        if (containsFatalSignal(logcat)) {
+        if (NativeEngineGuard.hasFatalSignalForPid(logcat, previousPid)) {
             kind = CrashReport.KIND_NATIVE_CRASH;
             confidence = "high";
-        } else if (logcat.contains("FATAL EXCEPTION")) {
+        } else if (NativeEngineGuard.hasFatalExceptionForPid(logcat, previousPid)) {
             // Java handler 写盘失败（磁盘满等）时的兜底
             kind = CrashReport.KIND_JAVA_CRASH;
             confidence = "medium";
         } else {
             kind = CrashReport.KIND_ABNORMAL_EXIT;
             confidence = "low";
+        }
+        if (previousPid.length() == 0 && !"low".equals(confidence)) {
+            // 标记里没有 pid，上面的匹配退化成全文判定，证据强度必须降级
+            confidence = confidence + "/pid_unmatched";
         }
 
         CrashReport report = newReport(kind);
@@ -445,14 +451,6 @@ public final class CrashMonitor {
                 .commit();
         breadcrumb("engine", "guard reset by user re-enable");
         Log.i(TAG, "engine guard reset by user");
-    }
-
-    private static boolean containsFatalSignal(String logcat) {
-        if (logcat == null) {
-            return false;
-        }
-        return logcat.contains("Fatal signal") || logcat.contains("SIGSEGV")
-                || logcat.contains("SIGABRT") || logcat.contains("tombstone");
     }
 
     // ------------------------------------------------------------------ //

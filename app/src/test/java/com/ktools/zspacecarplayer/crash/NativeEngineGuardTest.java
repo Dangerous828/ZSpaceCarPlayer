@@ -85,4 +85,60 @@ public class NativeEngineGuardTest {
         assertEquals(1, NativeEngineGuard.nextCrashCount(CrashReport.KIND_NATIVE_CRASH, true, -5));
         assertFalse(NativeEngineGuard.shouldAutoDisable(1, false));
     }
+
+    // ---- 崩溃证据归属：夹具是 2026-09-08 吉利 8600 真车 logcat 原文 ---- //
+
+    /** APP 自己的 pid；下面两条 SIGPIPE 来自 adb shell 的 top / ps，属第三方进程 */
+    private static final String OUR_PID = "21288";
+
+    private static final String FOREIGN_FATALS =
+            "09-08 08:43:08.000 F/libc    (25261): Fatal signal 13 (SIGPIPE) at 0x000062ad (code=0), thread 25261 (ps)\n"
+            + "09-08 08:43:27.030 F/libc    (25500): Fatal signal 13 (SIGPIPE) at 0x0000639c (code=0), thread 25500 (top)\n"
+            + "09-08 08:43:27.100 I/AudioPlayerService(21288): Player engine: DspAudioTrackPlayer\n";
+
+    @Test
+    public void anotherProcessFatalIsNotOurCrash() {
+        // 旧实现只做全文子串匹配，这两行会把 v3 引擎记上一笔 native 崩溃
+        assertFalse(NativeEngineGuard.hasFatalSignalForPid(FOREIGN_FATALS, OUR_PID));
+        assertFalse(NativeEngineGuard.hasFatalExceptionForPid(FOREIGN_FATALS, OUR_PID));
+    }
+
+    @Test
+    public void ourOwnFatalSignalIsAttributedToUs() {
+        String logcat = FOREIGN_FATALS
+                + "09-08 08:44:01.200 F/libc    (21288): Fatal signal 11 (SIGSEGV) at 0x00000000 (code=1), thread 21310 (DspAudioTrack)\n";
+        assertTrue(NativeEngineGuard.hasFatalSignalForPid(logcat, OUR_PID));
+    }
+
+    @Test
+    public void debuggerdBodyPidWinsOverItsOwnPrefixPid() {
+        // debuggerd 行的前缀 pid 是 debuggerd 自己的 (200)，真凶在正文 pid: 里
+        String line = "09-08 08:44:01.300 F/DEBUG   (  200): pid: 21288, tid: 21310, name DspAudioTrack  "
+                + ">>> com.ktools.zspacecarplayer <<< signal 11 (SIGSEGV), fault addr 0x0\n";
+        assertTrue(NativeEngineGuard.hasFatalSignalForPid(line, OUR_PID));
+        assertFalse(NativeEngineGuard.hasFatalSignalForPid(line, "200"));
+        assertEquals("21288", NativeEngineGuard.pidOf(line));
+    }
+
+    @Test
+    public void missingPidFallsBackToLooseMatch() {
+        // 会话标记取不到 pid 时只能退回全文判定，由调用方把 confidence 降级
+        assertTrue(NativeEngineGuard.hasFatalSignalForPid(FOREIGN_FATALS, ""));
+        assertTrue(NativeEngineGuard.hasFatalSignalForPid(FOREIGN_FATALS, null));
+    }
+
+    @Test
+    public void javaFatalExceptionAlsoRequiresOurPid() {
+        String logcat = "09-08 08:45:00.000 E/AndroidRuntime( 3380): FATAL EXCEPTION: main\n";
+        assertFalse(NativeEngineGuard.hasFatalExceptionForPid(logcat, OUR_PID));
+        assertTrue(NativeEngineGuard.hasFatalExceptionForPid(
+                "09-08 08:45:00.000 E/AndroidRuntime(21288): FATAL EXCEPTION: main\n", OUR_PID));
+    }
+
+    @Test
+    public void emptyLogcatHasNoEvidence() {
+        assertFalse(NativeEngineGuard.hasFatalSignalForPid("", OUR_PID));
+        assertFalse(NativeEngineGuard.hasFatalSignalForPid(null, OUR_PID));
+        assertFalse(NativeEngineGuard.hasFatalExceptionForPid(null, OUR_PID));
+    }
 }
