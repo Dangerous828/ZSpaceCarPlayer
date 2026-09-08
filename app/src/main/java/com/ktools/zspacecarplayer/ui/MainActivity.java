@@ -4,6 +4,8 @@ import android.app.Dialog;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.media.AudioManager;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.graphics.Color;
@@ -27,6 +29,7 @@ import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.util.Log;
 
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.GridLayoutManager;
@@ -56,6 +59,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
     // 鉴权 SharedPreferences 文件名/key 与默认凭据统一引用 JellyfinApiClient 常量,
     // 保证 Service 后台静默登录与 Activity 读写的是同一份会话凭据
+    private static final String TAG = "MainActivity";
+
     private static final String KEY_LAST_SONG_ID = "last_song_id";
     private static final String KEY_LAST_CAT = "last_cat";
 
@@ -146,6 +151,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         // 3. 绑定服务并初始化网络
         bindPlayerService();
         loadSavedServerConfig();
+
+        // 4. 车机音频路由调试入口 (实车 HAL 绑卡错乱修复工具, adb 广播触发)
+        registerDebugRouteReceiver();
     }
 
     @Override
@@ -649,7 +657,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         final SharedPreferences sp = getSharedPreferences(AudioPlayerService.PREF_NAME, MODE_PRIVATE);
         updateEngineLabel(sp, valueBtn);
 
-        row.setOnClickListener(new View.OnClickListener() {
+        final View.OnClickListener toggleListener = new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 // 熔断期间偏好仍是 true 而实际跑系统引擎, 必须按有效状态翻转, 否则要点两次
@@ -674,7 +682,11 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 }
                 Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
             }
-        });
+        };
+        // 药丸是 Button，默认 clickable=true：不单独挂监听就会把落在它上面的触点吞掉，
+        // 而它恰恰是显示「系统 (崩溃保护)」的那个最显眼的可点目标。
+        row.setOnClickListener(toggleListener);
+        valueBtn.setOnClickListener(toggleListener);
     }
 
     /** 引擎标签: 被崩溃熔断强制回退时明确标出, 否则用户会以为偏好没生效 */
@@ -725,7 +737,6 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         final TextView tvPanoVal = dialog.findViewById(R.id.tvPanoValue);
         SeekBar sbPano = dialog.findViewById(R.id.sbPanorama);
         final TextView tvSpaceVal = dialog.findViewById(R.id.tvSpaceValue);
-        SeekBar sbSpace = dialog.findViewById(R.id.sbSpaceReverb);
 
         if (presets == null || presets.isEmpty()) {
             spEq.setEnabled(false);
@@ -760,14 +771,38 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         sbBass.setProgress(currentBass);
         tvBassVal.setText(currentBass + "%");
 
-        final String[] spaceModes = {"关", "房间", "音乐厅", "影院"};
         int currentPano = playerService.getCurrentVirtualizerPercent();
         sbPano.setProgress(currentPano);
         tvPanoVal.setText(currentPano + "%");
 
         int currentSpace = playerService.getCurrentReverbMode();
-        sbSpace.setProgress(currentSpace);
-        tvSpaceVal.setText(spaceModes[currentSpace]);
+        // 点选式档位: SeekBar 在车机上难以精确停档 (2026-09-08 实车反馈),
+        // 改为 4 个按钮, 点击即刻生效, 选中态高亮
+        final String[] spaceModes = {"关", "房间", "音乐厅", "影院"};
+        final Button[] spaceTabs = {
+                dialog.findViewById(R.id.btnSpace0),
+                dialog.findViewById(R.id.btnSpace1),
+                dialog.findViewById(R.id.btnSpace2),
+                dialog.findViewById(R.id.btnSpace3)
+        };
+        View.OnClickListener spaceTabClick = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                int mode = Integer.parseInt((String) v.getTag());
+                for (int i = 0; i < spaceTabs.length; i++) {
+                    spaceTabs[i].setSelected(i == mode);
+                }
+                tvSpaceVal.setText(spaceModes[mode]);
+                playerService.setReverbMode(mode);
+            }
+        };
+        for (int i = 0; i < spaceTabs.length; i++) {
+            spaceTabs[i].setTag(String.valueOf(i));
+            spaceTabs[i].setOnClickListener(spaceTabClick);
+        }
+        int cur = Math.max(0, Math.min(spaceModes.length - 1, currentSpace));
+        spaceTabs[cur].setSelected(true);
+        tvSpaceVal.setText(spaceModes[cur]);
 
         spEq.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             private boolean isFirstSelection = true;
@@ -804,20 +839,6 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 tvPanoVal.setText(progress + "%");
                 playerService.setVirtualizerPercent(progress);
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {}
-
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
-        });
-
-        sbSpace.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                tvSpaceVal.setText(spaceModes[Math.max(0, Math.min(spaceModes.length - 1, progress))]);
-                playerService.setReverbMode(progress);
             }
 
             @Override
@@ -1052,10 +1073,28 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             playerService.setPlaylist(currentSongs, targetIndex, exactMs,
                     PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
         } else {
+            // 当前显示分类里找不到上次歌曲 (分类被切换过/歌曲归属变化):
+            // 回退到全曲库匹配, 绝不能因为分类过滤而丢掉自动续播
+            List<SongItem> fallback = allSongsList;
+            if (fallback != null && !fallback.isEmpty()) {
+                for (int i = 0; i < fallback.size(); i++) {
+                    if (lastSongId.equals(fallback.get(i).getId())) {
+                        isAutoPlayInitialized = true;
+                        int exactMs = SongDao.getInstance(this).getSongProgress(lastSongId);
+                        playerService.setPlaylist(fallback, i, exactMs,
+                                PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
+                        Log.i(TAG, "auto-resume: last song not in category '"
+                                + getLastCategoryName() + "', fell back to full library index " + i);
+                        return;
+                    }
+                }
+            }
             // 无上次播放记录: 只挂载播放列表，不自动播放，等待用户点击
             isAutoPlayInitialized = true;
             playerService.setPlaylist(currentSongs, -1);
             songAdapter.setSelectedIndex(0);
+            Log.i(TAG, "auto-resume: no last song record (lastSongId='"
+                    + lastSongId + "'), mount playlist only");
         }
     }
 
@@ -1468,6 +1507,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     @Override
     protected void onDestroy() {
         saveCurrentState();
+        if (debugRouteReceiver != null) {
+            try { unregisterReceiver(debugRouteReceiver); } catch (Exception ignored) {}
+            debugRouteReceiver = null;
+        }
         if (isBound && playerService != null) {
             playerService.setOnPlayerStateChangeListener(null);
         }
@@ -1480,6 +1523,48 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             // 音频资源已在 exitPlayerCompletely 释放; 这里结束进程, 确保代理 accept 线程、
             // 原生库与一切后台线程零残留 (进度状态已在 onPause 落库)
             android.os.Process.killProcess(android.os.Process.myPid());
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  车机音频路由调试入口 (HAL 绑卡错乱修复工具)
+    //
+    //  2026-09-08 实车根因: NeuSoft HAL 按 persist.neusoft.iPod.mode=CarPlay
+    //  把 primary 输出绑到 card2 (Carplay 回声参考卡, 不接喇叭), card1 (tef6638
+    //  功放) closed → 整车 Android 音频全局哑。persist 属性无 root 不可改,
+    //  HAL 的 audio.primary.C3ALFUS.so 只认运行时 setParameters 命令:
+    //  "set route primary|CARPLAYAUDIO|BTAUDIO|HFT|NAVI TTS|RING|TTS|VR|EMPTY"。
+    //  shell 调不到 AudioFlinger.setParameters, 唯一通路是本 app
+    //  (持有 MODIFY_AUDIO_SETTINGS)。用法 (adb):
+    //    am broadcast -a com.ktools.zspacecarplayer.DEBUG_AUDIO_ROUTE \
+    //        --es route primary
+    // ------------------------------------------------------------------ //
+    private android.content.BroadcastReceiver debugRouteReceiver;
+
+    private void registerDebugRouteReceiver() {
+        debugRouteReceiver = new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String route = intent.getStringExtra("route");
+                if (route == null || route.trim().isEmpty()) route = "primary";
+                AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+                if (am == null) return;
+                String cmd = "set route " + route.trim();
+                try {
+                    am.setParameters(cmd);
+                    Log.i(TAG, "debug route sent: " + cmd);
+                    Toast.makeText(MainActivity.this, "已发送: " + cmd, Toast.LENGTH_SHORT).show();
+                } catch (Throwable t) {
+                    Log.w(TAG, "debug route failed: " + cmd, t);
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction("com.ktools.zspacecarplayer.DEBUG_AUDIO_ROUTE");
+        try {
+            registerReceiver(debugRouteReceiver, filter);
+        } catch (Exception e) {
+            Log.w(TAG, "debug route receiver register failed", e);
         }
     }
 }

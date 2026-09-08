@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- EQ 空间混响档位选择按钮: 点选式替代 SeekBar (4.3 车机上滑条精确停档太难操作,
+     2026-09-08 实车反馈), 选中态青色高亮、未选中态与 bg_button 一致 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_selected="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#20303F4B" />
+            <corners android:radius="10dp" />
+            <stroke android:width="2dp" android:color="#00E5FF" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/panel_3" />
+            <corners android:radius="10dp" />
+            <stroke android:width="1dp" android:color="#40FFFFFF" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/panel_2" />
+            <corners android:radius="10dp" />
+            <stroke android:width="1dp" android:color="@color/line" />
+        </shape>
+    </item>
+</selector>

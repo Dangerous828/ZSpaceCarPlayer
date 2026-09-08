@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 强调色圆角矩形按钮背景: bg_play_btn 是 oval (圆形播放钮专用),
+     复用在 120x40dp 的矩形按钮上会被拉成椭圆 (2026-09-08 实车反馈) -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/accent" />
+    <corners android:radius="10dp" />
+    <stroke android:width="2dp" android:color="@color/play_border" />
+</shape>

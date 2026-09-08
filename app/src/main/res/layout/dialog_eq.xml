@@ -121,7 +121,7 @@
         android:thumb="@drawable/seekbar_thumb"
         android:thumbOffset="@dimen/seek_thumb_off" />
 
-    <!-- 空间混响 (EnvironmentalReverb aux) -->
+    <!-- 空间混响 (EnvironmentalReverb aux): 点选式档位, SeekBar 在车机上难以精确停档 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -147,22 +147,62 @@
             android:textSize="@dimen/dialog_text" />
     </LinearLayout>
 
-    <SeekBar
-        android:id="@+id/sbSpaceReverb"
+    <LinearLayout
+        android:id="@+id/llSpaceTabs"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="@dimen/dialog_input_h"
         android:layout_marginTop="8dp"
-        android:max="3"
-        android:progress="0"
-        android:progressDrawable="@drawable/eq_seekbar_track"
-        android:thumb="@drawable/seekbar_thumb"
-        android:thumbOffset="@dimen/seek_thumb_off" />
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnSpace0"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="6dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_space_tab"
+            android:text="关"
+            android:textColor="#FFFFFF"
+            android:textSize="@dimen/dialog_text" />
+
+        <Button
+            android:id="@+id/btnSpace1"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="6dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_space_tab"
+            android:text="房间"
+            android:textColor="#FFFFFF"
+            android:textSize="@dimen/dialog_text" />
+
+        <Button
+            android:id="@+id/btnSpace2"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="6dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_space_tab"
+            android:text="音乐厅"
+            android:textColor="#FFFFFF"
+            android:textSize="@dimen/dialog_text" />
+
+        <Button
+            android:id="@+id/btnSpace3"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:background="@drawable/bg_space_tab"
+            android:text="影院"
+            android:textColor="#FFFFFF"
+            android:textSize="@dimen/dialog_text" />
+    </LinearLayout>
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
-        android:text="档位：关 / 房间 / 音乐厅 / 影院"
+        android:text="点击档位即刻生效：关 / 房间 / 音乐厅 / 影院"
         android:textColor="#80FFFFFF"
         android:textSize="@dimen/dialog_text" />
 
