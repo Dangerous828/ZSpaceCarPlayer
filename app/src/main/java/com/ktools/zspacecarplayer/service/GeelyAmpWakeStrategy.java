@@ -17,6 +17,8 @@ public final class GeelyAmpWakeStrategy {
     interface AmpController {
         int getMaxMusicVolume();
         int getMusicVolume();
+        /** 系统是否处于静音状态 (master mute / ROM 静音键)。静音是用户意图，唤醒不得破坏。 */
+        boolean isMusicMuted();
         void setMusicVolume(int volume);
     }
 
@@ -70,6 +72,30 @@ public final class GeelyAmpWakeStrategy {
             }
 
             @Override
+            public boolean isMusicMuted() {
+                // Android 4.3 (API 18) 无 isMasterMute/isStreamMute 公开方法 (API 23+ 才有)。
+                // 车机 ROM 的静音键落在 master mute 或 stream mute 隐藏层, 反射逐级探测,
+                // 全部不可达时退回 false (音量 0 红线仍由 wakeDetailed 覆盖)。
+                try {
+                    java.lang.reflect.Method m = audioManager.getClass()
+                            .getMethod("isMasterMute");
+                    Object r = m.invoke(audioManager);
+                    return r instanceof Boolean && (Boolean) r;
+                } catch (Exception ignored) {
+                }
+                try {
+                    java.lang.reflect.Method m = audioManager.getClass()
+                            .getMethod("isStreamMute", int.class);
+                    Object r = m.invoke(audioManager, AudioManager.STREAM_MUSIC);
+                    if (r instanceof Boolean) return (Boolean) r;
+                    // 某些版本的隐藏实现返回 mute 计数, >0 即静音
+                    if (r instanceof Number) return ((Number) r).intValue() > 0;
+                } catch (Exception ignored) {
+                }
+                return false;
+            }
+
+            @Override
             public void setMusicVolume(int volume) {
                 audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, volume, 0);
             }
@@ -112,7 +138,10 @@ public final class GeelyAmpWakeStrategy {
         int currentVolume = controller.getMusicVolume();
 
         // Absolute safety rule: physical/system mute is user intent and must never be undone.
-        if (maxVolume <= 0 || currentVolume <= 0) {
+        // 2026-09-08 实车复现: 用户静音后切歌音量「自动回来」——定制 ROM 的
+        // setStreamVolume 隐式解除静音标志, probe 的两次 set 恰好打掉静音。
+        // mute 探测 (isMasterMute) 与音量 0 双红线缺一不可。
+        if (maxVolume <= 0 || currentVolume <= 0 || controller.isMusicMuted()) {
             return WakeResult.SKIPPED;
         }
 
@@ -136,6 +165,12 @@ public final class GeelyAmpWakeStrategy {
 
         controller.setMusicVolume(probeVolume);
         controller.setMusicVolume(currentVolume);
+        // ROM 的 setStreamVolume 可能异步生效, 两次 set 之间竞态会让音量停在 probe 值;
+        // 读回复验不一致则补一次, 保证唤醒对用户的唯一净效果是零
+        int settled = controller.getMusicVolume();
+        if (settled != currentVolume) {
+            controller.setMusicVolume(currentVolume);
+        }
         lastWakeKey = wakeKey;
         return WakeResult.WOKEN;
     }

@@ -266,6 +266,18 @@ public class AudioPlayerService extends Service {
     }
 
     /**
+     * RCC 状态同步后立即把 media button receiver 重新压回栈顶。
+     *
+     * Android 4.3 无 MediaSession，方向盘物理键派发给 Remote Control 栈顶——而
+     * 第三方音乐 app (QQ音乐) 在后台活跃时其 RCC 会周期性刷新压过本应用，导致
+     * 用户按「下一首」反而拉起 QQ 音乐 (2026-09-08 实车复现)。注册即成为当前
+     * receiver (LIFO 栈)，因此在每次本应用播放状态变化的同一时机重注册抢占。
+     */
+    private void reassertMediaButton() {
+        registerMediaButton();
+    }
+
+    /**
      * 是否启用 v3 自研 DSP 引擎 (设置页可切换)。
      *
      * 偏好为真还要再过一道崩溃熔断：v3 连续崩过阈值次数后强制走系统引擎，
@@ -701,6 +713,7 @@ public class AudioPlayerService extends Service {
                     playbackState.getDesiredPlayback(), playbackState.getFocusState())
                     && stateChangeListener != null) {
                 if (remoteControlClient != null) remoteControlClient.setPaused();
+                reassertMediaButton();
                 stateChangeListener.onPlayStateChanged(false);
             }
             return;
@@ -721,6 +734,7 @@ public class AudioPlayerService extends Service {
                         transientPausedAtMs = SystemClock.elapsedRealtime();
                     }
                     if (remoteControlClient != null) remoteControlClient.setPaused();
+                    reassertMediaButton();
                     if (notify && stateChangeListener != null) stateChangeListener.onPlayStateChanged(false);
                 } catch (IllegalStateException e) {
                     Log.w(TAG, "Pause transition failed", e);
@@ -737,6 +751,7 @@ public class AudioPlayerService extends Service {
             playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.PLAYING);
             nudgeAmpChannel();
             if (remoteControlClient != null) remoteControlClient.setPlaying();
+            reassertMediaButton();
             float targetGain = playbackState.getFocusState() == PlaybackStateMachine.FocusState.DUCKED ? 0.2f : 1.0f;
             gainEnvelope.fadeTo(targetGain, FADE_IN_MS, null);
             if (stateChangeListener != null) stateChangeListener.onPlayStateChanged(true);

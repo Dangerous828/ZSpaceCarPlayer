@@ -20,6 +20,7 @@ public class GeelyAmpWakeStrategyTest {
     private static final class FakeAmp implements GeelyAmpWakeStrategy.AmpController {
         int maxVolume = 10;
         int currentVolume;
+        boolean muted;
         final List<Integer> writes = new ArrayList<Integer>();
 
         @Override
@@ -33,9 +34,27 @@ public class GeelyAmpWakeStrategyTest {
         }
 
         @Override
+        public boolean isMusicMuted() {
+            return muted;
+        }
+
+        @Override
         public void setMusicVolume(int volume) {
             writes.add(volume);
         }
+    }
+
+    @Test
+    public void masterMuteIsNeverUndoneByWake() {
+        FakeClock clock = new FakeClock();
+        FakeAmp amp = new FakeAmp();
+        // 实车复现形态: ROM 静音键保持音量值但置 mute 标志, setStreamVolume 会隐式解除
+        amp.currentVolume = 5;
+        amp.muted = true;
+        GeelyAmpWakeStrategy strategy = new GeelyAmpWakeStrategy(clock, amp);
+
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.SKIPPED, strategy.wakeDetailed(1L));
+        Assert.assertTrue(amp.writes.isEmpty());
     }
 
     @Test
