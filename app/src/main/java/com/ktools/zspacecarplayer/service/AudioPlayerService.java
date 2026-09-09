@@ -492,12 +492,26 @@ public class AudioPlayerService extends Service {
         streamRetryCount = 0;
         silentErrorStreak = 0;
         playbackState.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);
-        startPlaybackWithSeek(song, startMs, origin);
+        startPlaybackWithSeek(song, sanitizeSeekMs(song, startMs), origin);
+    }
+
+    /**
+     * 起播 seek 目标钳制 (2026-09-09 实车定位):
+     * song_progress 表存过超长断点 (如 234s 断点配 226s 歌曲), 越界 seek 会把
+     * currentPresentationTimeUs 锚到末尾 (进度条瞬跳末尾), native 在文件尾快速
+     * EOS 触发假 COMPLETED 乱切歌。断点贴近/越过元数据时长 (<=3s 余量) 时按
+     * 从头播处理; 时长元数据缺失时保守放行 (Jellyfin 曲目基本都带 RunTimeTicks)。
+     */
+    static int sanitizeSeekMs(SongItem song, int startMs) {
+        if (startMs < 0) return -1;
+        long durMs = song != null ? song.getDurationMs() : 0L;
+        if (durMs > 0 && startMs >= durMs - 3000L) return -1;
+        return startMs;
     }
 
     private void replayPendingSong(SongItem song, int startMs,
                                    PlaybackStateMachine.PlaybackOrigin origin) {
-        startPlaybackWithSeek(song, startMs, origin);
+        startPlaybackWithSeek(song, sanitizeSeekMs(song, startMs), origin);
     }
 
     private void startPlaybackWithSeek(SongItem song, int startMs,

@@ -525,6 +525,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         currentDisplayedSongs = (songs != null) ? songs : new ArrayList<SongItem>();
         tvSongCount.setText(currentDisplayedSongs.size() + " 首");
         songAdapter.setSongs(currentDisplayedSongs);
+        // (2026-09-09 实车反馈) 列表切换后必须立刻重算高亮: setSongs 不清 selectedIndex,
+        // 旧列表的 index 会原样落到新列表同一位置, 造成「B 列表错位高亮, 等歌播完才纠正」。
+        // 所有列表入口 (分类/全部歌曲/红心/最多播放/搜索) 都走本方法, 收口在这里最稳。
+        syncPlayingHighlight(false);
         rvSongList.scrollToPosition(0);
         btnNavPlaylist.setSelected(true);
         btnNavPlaylist.setTextColor(Color.parseColor("#30DDC2"));
@@ -532,6 +536,27 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         btnNavAllSongs.setTextColor(Color.parseColor("#A8B5C6"));
         btnNavSettings.setSelected(false);
         btnNavSettings.setTextColor(Color.parseColor("#A8B5C6"));
+    }
+
+    /**
+     * 把歌曲列表高亮同步到服务端正在播的歌。
+     * SongItem.equals 按 Id 比较, DB 异步加载的红心/最多播放列表是新对象实例也能命中;
+     * 正在播的歌不在当前列表时显式清 -1, 不残留旧 index。
+     *
+     * @param scrollToList 高亮命中后是否把列表滚动到该行 (切列表时不滚, 切歌时滚)
+     */
+    private void syncPlayingHighlight(boolean scrollToList) {
+        int index = -1;
+        if (isBound && playerService != null) {
+            SongItem current = playerService.getCurrentSong();
+            if (current != null) {
+                index = currentDisplayedSongs.indexOf(current);
+            }
+        }
+        songAdapter.setSelectedIndex(index);
+        if (index >= 0 && scrollToList) {
+            rvSongList.smoothScrollToPosition(index);
+        }
     }
 
     private void onCategorySelected(CategoryItem category) {
@@ -1011,28 +1036,6 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         return result;
     }
 
-    private void switchCategory(String categoryName) {
-        saveState(KEY_LAST_CAT, categoryName);
-        categoryAdapter.setSelectedCategoryName(categoryName);
-        this.currentDisplayedSongs = filterSongsByCategory(allSongsList, categoryName);
-        tvSongCount.setText(currentDisplayedSongs.size() + " 首");
-        tvListTitle.setText("歌曲列表");
-        songAdapter.setShowPlayCount(false);
-        songAdapter.setSongs(currentDisplayedSongs);
-
-        if (isBound && playerService != null) {
-            SongItem currentPlaying = playerService.getCurrentSong();
-            if (currentPlaying != null) {
-                int indexInNewList = currentDisplayedSongs.indexOf(currentPlaying);
-                if (indexInNewList >= 0) {
-                    songAdapter.setSelectedIndex(indexInNewList);
-                } else {
-                    songAdapter.setSelectedIndex(-1);
-                }
-            }
-        }
-    }
-
     // ---------------- 仅当存在 lastSongId 记录时才开启自动续播 ----------------
 
     private void handleAutoPlayOrResume(List<SongItem> currentSongs) {
@@ -1289,11 +1292,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         tvCurrentTime.setText("00:00");
         updateSeekFill();
 
-        int displayedIndex = currentDisplayedSongs.indexOf(song);
-        if (displayedIndex >= 0) {
-            songAdapter.setSelectedIndex(displayedIndex);
-            rvSongList.smoothScrollToPosition(displayedIndex);
-        }
+        // 歌曲不在当前列表时也要清掉旧高亮 (2026-09-09 实车反馈):
+        // 否则切列表后旧 index 位置的歌被错误点亮, 与实际播放脱节
+        syncPlayingHighlight(true);
 
         saveCurrentState();
 
@@ -1358,10 +1359,24 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             if (isBound && playerService != null && playerService.isPlaying()) {
                 SongItem current = playerService.getCurrentSong();
                 if (current != null) {
-                    SongDao.getInstance(this).saveSongProgress(current.getId(), currentMs);
+                    SongDao.getInstance(this).saveSongProgress(current.getId(),
+                            sanitizeProgressForSave(current, currentMs));
                 }
             }
         }
+    }
+
+    /**
+     * 进度落库前治理 (2026-09-09 实车定位): seek 越界/异常回调可能把 position 推过
+     * 歌曲实际时长, 脏断点入库后点歌即「进度条瞬跳末尾 + 假 COMPLETED 乱切歌」。
+     * 贴近末尾 (>= 时长-2s) 视为播完存 0, 其余夹到 [0, 时长) 内。
+     */
+    private static int sanitizeProgressForSave(SongItem song, int progressMs) {
+        if (progressMs <= 0) return 0;
+        long durMs = song != null ? song.getDurationMs() : 0L;
+        if (durMs <= 0) return progressMs;
+        if (progressMs >= durMs - 2000L) return 0;
+        return progressMs;
     }
 
     @Override

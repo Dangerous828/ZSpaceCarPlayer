@@ -63,7 +63,10 @@ public:
                 setAllGains(5, 3, -1, 3, 5);
                 break;
             case 4: // Vocal
-                setAllGains(-2, 1, 4, 3, 0);
+                // 2026-09-09 调优: 230Hz 由 +1 改 -1 (去箱声/浑浊, 这是「人声糊」的
+                // 主能量带), 60Hz 再压深到 -3 (隔绝隆隆底噪); 910Hz 身体感与
+                // 4kHz 穿透力 (行车噪声中最先被吃掉的频段) 保持, 14kHz +1 补气声
+                setAllGains(-3, -1, 4, 3, 1);
                 break;
             case 5: // Jazz
                 setAllGains(3, 2, 1, 2, 3);
