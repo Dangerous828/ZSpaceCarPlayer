@@ -119,6 +119,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 onPlayStateChanged(playerService.isPlaying());
             } else if (!currentDisplayedSongs.isEmpty()) {
                 handleAutoPlayOrResume(currentDisplayedSongs);
+                // 服务晚于 DB 就绪的时序: 恢复挂载后同样把列表定位到正在播的歌
+                syncPlayingHighlight(true);
             }
         }
 
@@ -491,6 +493,11 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         tvSongCount.setText(currentDisplayedSongs.size() + " 首");
         songAdapter.setShowPlayCount(false);
         songAdapter.setSongs(currentDisplayedSongs);
+        // 与 showSongListView 一致: 命中正在播就定位, 未命中回顶部
+        syncPlayingHighlight(true);
+        if (songAdapter.getSelectedIndex() < 0) {
+            rvSongList.scrollToPosition(0);
+        }
         btnNavAllSongs.setSelected(true);
         btnNavAllSongs.setTextColor(Color.parseColor("#30DDC2"));
         btnNavPlaylist.setSelected(false);
@@ -528,8 +535,12 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         // (2026-09-09 实车反馈) 列表切换后必须立刻重算高亮: setSongs 不清 selectedIndex,
         // 旧列表的 index 会原样落到新列表同一位置, 造成「B 列表错位高亮, 等歌播完才纠正」。
         // 所有列表入口 (分类/全部歌曲/红心/最多播放/搜索) 都走本方法, 收口在这里最稳。
-        syncPlayingHighlight(false);
-        rvSongList.scrollToPosition(0);
+        // (2026-09-10 实车反馈) 打开列表要直接定位到正在播的歌 (冷启动恢复/切列表后
+        // 都停在顶部, 用户得手动翻找); 未命中 (歌不在本列表) 时保持回顶部原行为。
+        syncPlayingHighlight(true);
+        if (songAdapter.getSelectedIndex() < 0) {
+            rvSongList.scrollToPosition(0);
+        }
         btnNavPlaylist.setSelected(true);
         btnNavPlaylist.setTextColor(Color.parseColor("#30DDC2"));
         btnNavAllSongs.setSelected(false);
@@ -750,7 +761,12 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         List<String> presets = playerService.getEqPresets();
         if (presets == null || presets.isEmpty()) {
             // 如果底层未返回预设，提供标准车载内置音效预设
-            presets = Arrays.asList("普通 (Normal)", "古典 (Classical)", "流行 (Pop)", "摇滚 (Rock)", "人声 (Vocal)", "爵士 (Jazz)", "舞曲 (Dance)");
+            presets = Arrays.asList(
+                    "原声 (Flat)", "古典 (Classical)", "流行 (Pop)", "摇滚 (Rock)", "人声 (Vocal)",
+                    "爵士 (Jazz)", "舞曲 (Dance)", "金属 (Metal)", "蓝调 (Blues)", "电子 (Electronic)",
+                    "电音舞曲 (EDM)", "嘻哈 (Hip-Hop)", "男声 (Male Vocal)", "女声 (Female Vocal)",
+                    "播客对话 (Speech)", "车载优化 (Car)", "低音增强 (Bass Boost)"
+            );
         }
 
         final Dialog dialog = new Dialog(this);
@@ -917,6 +933,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                     // 缓存就绪即触发自动续播: 公网抖动导致服务器同步失败时,
                     // 也能用缓存歌单 + 保存的断点恢复播放, 而不是永远等待同步
                     handleAutoPlayOrResume(currentDisplayedSongs);
+                    // 冷启动定位 (2026-09-10 实车反馈): 自动续播挂载后列表要滚到
+                    // 正在播的歌, 而不是停在顶部让用户自己找 (setPlaylist 同步设置
+                    // currentIndex, 此处 getCurrentSong() 已可用)
+                    syncPlayingHighlight(true);
                 }
             }
         });
@@ -1244,6 +1264,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 if (!isAutoPlayInitialized) {
                     handleAutoPlayOrResume(currentDisplayedSongs);
                 }
+                // 服务器刷新重挂列表 (SongItem 全部为新对象实例), 无论是否走到
+                // 自动续播分支都要重算高亮并定位到正在播的歌
+                syncPlayingHighlight(true);
             }
 
             @Override

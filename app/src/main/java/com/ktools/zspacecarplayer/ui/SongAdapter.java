@@ -62,6 +62,11 @@ public class SongAdapter extends RecyclerView.Adapter<SongAdapter.SongViewHolder
         if (selectedIndex >= 0 && selectedIndex < songs.size()) notifyItemChanged(selectedIndex);
     }
 
+    /** 当前高亮行下标; -1 表示正在播的歌不在本列表 (调用方据此决定是否回顶部) */
+    public int getSelectedIndex() {
+        return selectedIndex;
+    }
+
     @NonNull
     @Override
     public SongViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {

@@ -21,10 +21,12 @@ if [ -z "$ANDROID_HOME" ] && [ -d "$HOME/Library/Android/sdk" ]; then
 fi
 
 # 车机 IP 不固定 (DHCP/多网段, 2026-09-08 实测从 10.212.252.52 漂到 10.202.110.52):
-# 环境变量 CAR_IP=host:port 优先; 否则按已知候选依次探测 5555 端口, 全部不通则报错退出
+# 环境变量 CAR_IP=host:port 优先; 否则按已知候选依次用 adb connect 探测 5555 端口, 全部不通则报错退出。
+# 注意: 不要用 nc -z -G 探测 (macOS BSD nc 会间歇误报"不通": 2026-09-09 实测 nc 说 10.202.110.52
+# 不通、实际 adb connect 秒连), adb connect 直接握手 ADB 协议最可靠。
 if [ -z "$CAR_IP" ]; then
     for cand in 10.202.110.52 10.212.252.52; do
-        if nc -z -G 1 "$cand" 5555 >/dev/null 2>&1; then
+        if adb connect "$cand:5555" 2>&1 | grep -q "connected to"; then
             CAR_IP="$cand:5555"
             break
         fi

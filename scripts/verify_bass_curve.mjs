@@ -38,7 +38,7 @@ function magDb(coef, f) {
 }
 
 const OLD = configure('lowshelf', 100, 0.707, 14); // 旧: LOWSHELF@100 +14dB
-const NEW = configure('peaking', 55, 1.4, 12);     // 新: PEAKING@55 Q1.4 +12dB
+const NEW = configure('peaking', 55, 1.8, 12);     // 新: PEAKING@55 Q1.8 +12dB
 
 const freqs = [30, 40, 60, 80, 100, 120, 150, 180, 230, 300, 500];
 const notes = { 60: '低音本体', 120: '上低音', 150: '男声基频', 180: '男声基频', 230: '女声基频/箱声带' };
@@ -59,3 +59,22 @@ for (let f = 150; f <= 255; f += 1) {
 }
 console.log('\n人声基频段 150-255Hz 最大增益: old=' + worstOld.toFixed(2) +
   'dB  new=' + worstNew.toFixed(2) + 'dB');
+
+// Vocal 预设叠加 BassBoost 的总频响 (用于「人声模糊」调优验证)
+function totalMagDb(filters, f) {
+  return filters.reduce((sum, coef) => sum + magDb(coef, f), 0);
+}
+const curVocal = [configure('peaking', 60, 1.414, -3), configure('peaking', 230, 1.414, -1),
+                  configure('peaking', 910, 1.414, 4), configure('peaking', 4000, 1.414, 3),
+                  configure('peaking', 14000, 1.414, 1)];
+const newVocal = [configure('peaking', 60, 1.414, -4), configure('peaking', 230, 1.414, -3),
+                  configure('peaking', 910, 1.414, 3), configure('peaking', 4000, 1.414, 5),
+                  configure('peaking', 14000, 1.414, 2)];
+console.log('\nVocal 预设叠加 BassBoost 总频响 (dB):');
+console.log('   Hz    当前(-3,-1,4,3,1)  推荐(-4,-3,3,5,2)');
+const vocalFreqs = [60, 80, 100, 120, 150, 180, 230, 300, 500, 910, 2000, 4000, 6000, 14000];
+for (const f of vocalFreqs) {
+  const c = totalMagDb([NEW, ...curVocal], f);
+  const n = totalMagDb([NEW, ...newVocal], f);
+  console.log(String(f).padStart(6) + '        ' + c.toFixed(2).padStart(10) + '        ' + n.toFixed(2).padStart(10));
+}

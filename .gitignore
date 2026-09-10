@@ -27,4 +27,9 @@ Thumbs.db
 .v2c/
 .video_agent/
 out/
+.workbuddy/
+
+# 实车抓取的原始 logcat: 体积大且含真实 API key / 内网地址, 不进版本库
+# (本地磁盘保留供复盘, 仅从 git 移除)
+docs/field_test_*/logcat*
 

@@ -41,38 +41,74 @@ public:
 
     void setPreset(int preset) {
         currentPreset = preset;
-        // 预设对照表:
-        // 0: 普通 (Normal/Flat)
-        // 1: 古典 (Classical)
-        // 2: 流行 (Pop)
-        // 3: 摇滚 (Rock)
-        // 4: 人声 (Vocal)
-        // 5: 爵士 (Jazz)
-        // 6: 舞曲 (Dance)
+        // 预设对照表 (与 Java 层 AudioPlayerService.getEqPresets() / MainActivity fallback 严格一致):
+        // 0: 原声 (Flat)              1: 古典 (Classical)
+        // 2: 流行 (Pop)               3: 摇滚 (Rock)
+        // 4: 人声 (Vocal)             5: 爵士 (Jazz)
+        // 6: 舞曲 (Dance)             7: 金属 (Metal)
+        // 8: 蓝调 (Blues)             9: 电子 (Electronic)
+        // 10: 电音舞曲 (EDM)          11: 嘻哈 (Hip-Hop)
+        // 12: 男声 (Male Vocal)       13: 女声 (Female Vocal)
+        // 14: 播客对话 (Speech)       15: 车载优化 (Car)
+        // 16: 低音增强 (Bass Boost)
+        // 索引 4 长期保留给人声, 避免已保存用户偏好错位。
         switch (preset) {
             case 0: // Flat
                 setAllGains(0, 0, 0, 0, 0);
                 break;
             case 1: // Classical
-                setAllGains(4, 3, -2, 2, 4);
+                setAllGains(-1, 0, 1, 1, 2);
                 break;
             case 2: // Pop
-                setAllGains(-1, 2, 4, 1, -2);
+                setAllGains(0, 1, 2, 2, 1);
                 break;
             case 3: // Rock
-                setAllGains(5, 3, -1, 3, 5);
+                setAllGains(2, 0, 1, 3, 2);
                 break;
             case 4: // Vocal
-                // 2026-09-09 调优: 230Hz 由 +1 改 -1 (去箱声/浑浊, 这是「人声糊」的
-                // 主能量带), 60Hz 再压深到 -3 (隔绝隆隆底噪); 910Hz 身体感与
-                // 4kHz 穿透力 (行车噪声中最先被吃掉的频段) 保持, 14kHz +1 补气声
-                setAllGains(-3, -1, 4, 3, 1);
+                // 2026-09-09 晚二次调优: 实车反馈人声仍模糊, 进一步:
+                //   230Hz 从 -1 压到 -3 (箱声/浑浊主能量带, 去除人声"闷在箱子里")
+                //   4kHz 从 +3 提到 +5 (人声咬字/清晰度, 车噪中最先被吃掉的频段)
+                //   60Hz 从 -3 压到 -4 (进一步隔绝隆隆底噪对人声的掩蔽)
+                //   910Hz 从 +4 降到 +3 (避免鼻音过重, 与中频 clarity 平衡)
+                //   14kHz 从 +1 提到 +2 (空气感/齿音, 让人声更通透)
+                setAllGains(-4, -3, 3, 5, 2);
                 break;
             case 5: // Jazz
-                setAllGains(3, 2, 1, 2, 3);
+                setAllGains(0, 0, 1, 1, 1);
                 break;
             case 6: // Dance
-                setAllGains(6, 4, 1, 3, 2);
+                setAllGains(2, -1, 0, 2, 1);
+                break;
+            case 7: // Metal
+                setAllGains(3, -1, 0, 4, 3);
+                break;
+            case 8: // Blues
+                setAllGains(1, 0, 2, 1, 1);
+                break;
+            case 9: // Electronic
+                setAllGains(2, -1, 0, 3, 2);
+                break;
+            case 10: // EDM
+                setAllGains(4, -2, 0, 3, 2);
+                break;
+            case 11: // Hip-Hop
+                setAllGains(3, -2, 1, 2, 1);
+                break;
+            case 12: // Male Vocal
+                setAllGains(-2, -2, 2, 4, 1);
+                break;
+            case 13: // Female Vocal
+                setAllGains(-2, -3, 3, 5, 3);
+                break;
+            case 14: // Speech
+                setAllGains(-3, -2, 4, 5, 1);
+                break;
+            case 15: // Car (车载优化: 压低频轰鸣, 提中高频穿透车噪)
+                setAllGains(-2, -1, 3, 4, 2);
+                break;
+            case 16: // Bass Boost
+                setAllGains(4, 0, 0, 1, 0);
                 break;
             default:
                 setAllGains(0, 0, 0, 0, 0);

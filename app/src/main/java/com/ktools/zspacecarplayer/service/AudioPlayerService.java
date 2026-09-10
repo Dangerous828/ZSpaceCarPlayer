@@ -36,6 +36,7 @@ import com.ktools.zspacecarplayer.model.SongItem;
 import com.ktools.zspacecarplayer.ui.MainActivity;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
@@ -79,6 +80,15 @@ public class AudioPlayerService extends Service {
     private GainEnvelope gainEnvelope;
     private GeelyAmpWakeStrategy ampWakeStrategy;
     private long lastCountedGeneration = -1L;
+
+    /** 有效播放判定阈值: 累计实际出声达到该时长才算一次「播放最多」计数 (2026-09-10) */
+    private static final long VALID_PLAY_THRESHOLD_MS = 60000L;
+    /** 待计数的 generation; -1 表示当前没有待计曲目 (未起播/已计满/已切歌) */
+    private long pendingCountGeneration = -1L;
+    /** 当前待计 generation 的累计实际出声时长 (500ms tick 累加, 暂停不加) */
+    private long playAccumulatedMs = 0L;
+    /** 上次 tick 的挂钟时间, 用于计算 tick 间增量; 暂停期间持续刷新防止把暂停算进去 */
+    private long lastCountTickElapsedMs = 0L;
 
     /** Token 未就绪时挂起的待播曲目, 鉴权成功回调后自动起播 */
     private SongItem pendingAuthSong;
@@ -363,6 +373,27 @@ public class AudioPlayerService extends Service {
                     deadTicks = 0;
                     deadRetryTicks = DEAD_RETRY_TICKS_START;
 
+                    // 有效播放计数: 500ms tick 累计实际出声时长, 满 60s 落库一次。
+                    // lastCountedGeneration 已计过的 generation 走 else 持续刷新挂钟,
+                    // 保证暂停恢复后不会把暂停期误算进累计。
+                    long countNowMs = SystemClock.elapsedRealtime();
+                    if (pendingCountGeneration == playbackState.getGenerationId()) {
+                        playAccumulatedMs += countNowMs - lastCountTickElapsedMs;
+                        lastCountTickElapsedMs = countNowMs;
+                        if (playAccumulatedMs >= VALID_PLAY_THRESHOLD_MS) {
+                            pendingCountGeneration = -1L;
+                            lastCountedGeneration = playbackState.getGenerationId();
+                            SongItem counting = getCurrentSong();
+                            if (counting != null) {
+                                SongDao.getInstance(AudioPlayerService.this)
+                                        .incrementPlayCountAsync(counting.getId());
+                                Log.i(TAG, "Valid play counted (>=60s): " + counting.getName());
+                            }
+                        }
+                    } else {
+                        lastCountTickElapsedMs = countNowMs;
+                    }
+
                     if (stateChangeListener != null) {
                         stateChangeListener.onProgressUpdate(currentMs, totalMs);
                     }
@@ -404,6 +435,9 @@ public class AudioPlayerService extends Service {
                     lastTickTrackId = null;
                     preparingTicks = 0;
                     deadTicks = 0;
+                    // 非出声态 (暂停/未准备) 持续刷新计数挂钟: 恢复播放后第一个
+                    // tick 的增量才是真实的出声时长, 不会把暂停整段时间算进去
+                    lastCountTickElapsedMs = SystemClock.elapsedRealtime();
                 }
                 progressHandler.postDelayed(this, 500);
             }
@@ -770,9 +804,14 @@ public class AudioPlayerService extends Service {
             gainEnvelope.fadeTo(targetGain, FADE_IN_MS, null);
             if (stateChangeListener != null) stateChangeListener.onPlayStateChanged(true);
             if (lastCountedGeneration != generation) {
-                lastCountedGeneration = generation;
-                SongItem playing = getCurrentSong();
-                if (playing != null) SongDao.getInstance(this).incrementPlayCountAsync(playing.getId());
+                // 有效播放计数 (2026-09-10): 起播即计会把「点了就切」也 +1。
+                // 改为标记待计 generation, 由 progress tick 累计实际出声时长,
+                // 满 60s 才落库; 暂停不累计, 同 generation 暂停恢复续算。
+                if (pendingCountGeneration != generation) {
+                    pendingCountGeneration = generation;
+                    playAccumulatedMs = 0L;
+                }
+                lastCountTickElapsedMs = SystemClock.elapsedRealtime();
             }
             return true;
         } catch (IllegalStateException e) {
@@ -1257,18 +1296,27 @@ public class AudioPlayerService extends Service {
     }
 
     public List<String> getEqPresets() {
-        List<String> list = new ArrayList<>();
-        if (equalizer != null) {
-            try {
-                short numPresets = equalizer.getNumberOfPresets();
-                for (short i = 0; i < numPresets; i++) {
-                    list.add(equalizer.getPresetName(i));
-                }
-            } catch (Exception e) {
-                Log.w(TAG, "Error getting EQ presets", e);
-            }
-        }
-        return list;
+        // v3 自研 DSP 不依赖系统 Equalizer， preset 由 NativeDsp.Equalizer.h 硬编码。
+        // 顺序必须与 C++ 层 setPreset switch case 严格一致。
+        return Arrays.asList(
+                "原声 (Flat)",
+                "古典 (Classical)",
+                "流行 (Pop)",
+                "摇滚 (Rock)",
+                "人声 (Vocal)",
+                "爵士 (Jazz)",
+                "舞曲 (Dance)",
+                "金属 (Metal)",
+                "蓝调 (Blues)",
+                "电子 (Electronic)",
+                "电音舞曲 (EDM)",
+                "嘻哈 (Hip-Hop)",
+                "男声 (Male Vocal)",
+                "女声 (Female Vocal)",
+                "播客对话 (Speech)",
+                "车载优化 (Car)",
+                "低音增强 (Bass Boost)"
+        );
     }
 
     public void setEqPreset(short presetIndex) {

@@ -60,7 +60,7 @@ public class JellyfinApiClient {
     public static final String KEY_ACCESS_TOKEN = "access_token";
 
     public static final String DEFAULT_SERVER_URL = "http://your-jellyfin.example.com/music";
-    public static final String DEFAULT_USERNAME = "car";
+    public static final String DEFAULT_USERNAME = "your_username";
     public static final String DEFAULT_PASSWORD = "your_password";
 
     private static final int PAGE_SIZE = 500;

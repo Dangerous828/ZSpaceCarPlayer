@@ -154,7 +154,13 @@ ZSpaceCarPlayer/
 cd /Users/cpuser/Code/kTool/ZSpaceCarPlayer
 ./deploy_to_car.sh
 ```
-该脚本会自动调用 Android SDK 编译 Debug APK，并通过网络 ADB 自动推送到 `10.212.252.52:5555` 车机并启动应用！
+该脚本会自动调用 Android SDK 编译 Debug APK，并通过网络 ADB 推送到车机并启动应用。
+车机 IP 不固定（DHCP 多网段漂移，历史在 `10.202.110.52` 与 `10.212.252.52` 间变动），脚本按候选 IP 依次用
+`adb connect` 探测（不用 `nc -z`，macOS nc 会间歇误报「不通」）；若都不通可手动指定：
+
+```bash
+CAR_IP=10.202.110.52:5555 ./deploy_to_car.sh
+```
 
 ### 7.3 构建 JDK 要求（JDK 17 ~ 21，严禁 25）
 * **失败形态：** Gradle 8.9 在 **JDK 25** 下于 daemon 启动阶段直接崩溃（`Unsupported class file major version` 一类），`build.gradle` 根本来不及执行，因此**无法用构建脚本自检拦截**，只能靠环境约定。
