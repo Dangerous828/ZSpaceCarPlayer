@@ -2,9 +2,28 @@ plugins {
     id 'com.android.application'
 }
 
+// 本地开发凭据 (2026-09-10): 真实服务器/账号/崩溃上报地址写在项目根 local.properties,
+// 该文件已被 .gitignore 忽略、不会进版本库; 填了就编译进 APK (调试免手填),
+// 不填则 JellyfinApiClient / CrashMonitor 回退到占位默认值 (公开仓库无真实凭据)。
+// 模板见 local.properties.example。
+def localProps = new Properties()
+def localPropsFile = rootProject.file('local.properties')
+if (localPropsFile.exists()) {
+    localPropsFile.withInputStream { localProps.load(it) }
+}
+def devServerUrl = localProps.getProperty('JELLYFIN_SERVER_URL', '')
+def devUsername = localProps.getProperty('JELLYFIN_USERNAME', '')
+def devPassword = localProps.getProperty('JELLYFIN_PASSWORD', '')
+def devCrashEndpoint = localProps.getProperty('CRASH_ENDPOINT', '')
+
 android {
     namespace 'com.ktools.zspacecarplayer'
     compileSdk 34
+
+    buildFeatures {
+        // AGP 8 起 BuildConfig 默认关闭, 凭据注入依赖它
+        buildConfig = true
+    }
 
     defaultConfig {
         applicationId "com.ktools.zspacecarplayer"
@@ -12,6 +31,11 @@ android {
         targetSdk 28
         versionCode 3
         versionName "3.0.0"
+
+        buildConfigField "String", "JELLYFIN_SERVER_URL", "\"${devServerUrl}\""
+        buildConfigField "String", "JELLYFIN_USERNAME", "\"${devUsername}\""
+        buildConfigField "String", "JELLYFIN_PASSWORD", "\"${devPassword}\""
+        buildConfigField "String", "CRASH_ENDPOINT", "\"${devCrashEndpoint}\""
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         ndk {

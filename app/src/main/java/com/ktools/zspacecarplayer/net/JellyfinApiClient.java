@@ -6,6 +6,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
+import com.ktools.zspacecarplayer.BuildConfig;
+
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -59,9 +61,21 @@ public class JellyfinApiClient {
     public static final String KEY_USER_ID = "user_id";
     public static final String KEY_ACCESS_TOKEN = "access_token";
 
-    public static final String DEFAULT_SERVER_URL = "http://your-jellyfin.example.com/music";
-    public static final String DEFAULT_USERNAME = "your_username";
-    public static final String DEFAULT_PASSWORD = "your_password";
+    /**
+     * 本地开发凭据回退 (2026-09-10): BuildConfig 由项目根 local.properties 注入
+     * (该文件已 gitignore, 不进版本库)。填了就用真实值, 没填就用占位符 ——
+     * 保证公开仓库里不含任何真实凭据, 本地开发又不必每次手填。
+     */
+    private static String devOr(String buildConfigValue, String placeholder) {
+        return (buildConfigValue == null || buildConfigValue.isEmpty()) ? placeholder : buildConfigValue;
+    }
+
+    public static final String DEFAULT_SERVER_URL =
+            devOr(BuildConfig.JELLYFIN_SERVER_URL, "http://your-jellyfin.example.com/music");
+    public static final String DEFAULT_USERNAME =
+            devOr(BuildConfig.JELLYFIN_USERNAME, "your_username");
+    public static final String DEFAULT_PASSWORD =
+            devOr(BuildConfig.JELLYFIN_PASSWORD, "your_password");
 
     private static final int PAGE_SIZE = 500;
 

@@ -9,6 +9,8 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 
+import com.ktools.zspacecarplayer.BuildConfig;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -69,7 +71,16 @@ public final class CrashMonitor {
      * 否则 upload() 一律判失败，报告留在本地（{@link CrashReportStore#MAX_FILES} 份封顶），
      * 上传按 1h→24h 退避重试。宁可攒着，也不能假装送到了。
      */
-    public static final String DEFAULT_ENDPOINT = "https://your-jellyfin.example.com/crash";
+    /**
+     * 本地开发凭据回退 (2026-09-10): BuildConfig 由项目根 local.properties 注入
+     * (该文件已 gitignore, 不进版本库)。填了用真实上报地址, 没填用占位符。
+     */
+    private static String devOr(String buildConfigValue, String placeholder) {
+        return (buildConfigValue == null || buildConfigValue.isEmpty()) ? placeholder : buildConfigValue;
+    }
+
+    public static final String DEFAULT_ENDPOINT =
+            devOr(BuildConfig.CRASH_ENDPOINT, "https://your-jellyfin.example.com/crash");
 
     private static final String REPORT_DIR = "crash_reports";
     private static final String SESSION_MARKER = "crash_session_active";
