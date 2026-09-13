@@ -271,6 +271,148 @@
                     android:textSize="@dimen/mini_text" />
             </LinearLayout>
 
+            <!-- 设置分块 3: 远程升级 (2026-09-12) -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:text="关于与升级"
+                android:textColor="@color/accent"
+                android:textSize="@dimen/dialog_title"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:id="@+id/rowSettingCheckUpdate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="@drawable/bg_card_grid"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="16dp"
+                android:paddingTop="14dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="14dp">
+
+                <!-- 用文字徽标而非图标字符: 车机 API18 的系统字体缺字形会显示成方框 -->
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_badge_hi"
+                    android:paddingStart="8dp"
+                    android:paddingTop="3dp"
+                    android:paddingEnd="8dp"
+                    android:paddingBottom="3dp"
+                    android:text="OTA"
+                    android:textColor="@color/accent"
+                    android:textSize="@dimen/card_sub_size"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="14dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="检查更新"
+                        android:textColor="@color/ink"
+                        android:textSize="@dimen/card_title_size"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvSettingAppVersion"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="当前版本 3.0.0"
+                        android:textColor="@color/ink_dim"
+                        android:textSize="@dimen/card_sub_size" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnSettingCheckUpdate"
+                    android:layout_width="wrap_content"
+                    android:layout_height="@dimen/mini_h"
+                    android:background="@drawable/bg_soft_pill"
+                    android:minWidth="@dimen/font_w"
+                    android:singleLine="true"
+                    android:text="检查更新"
+                    android:textAllCaps="false"
+                    android:textColor="@color/ink_dim"
+                    android:textSize="@dimen/mini_text" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/rowSettingAutoUpdate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_card_grid"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="16dp"
+                android:paddingTop="14dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="14dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_badge_hi"
+                    android:paddingStart="8dp"
+                    android:paddingTop="3dp"
+                    android:paddingEnd="8dp"
+                    android:paddingBottom="3dp"
+                    android:text="自动"
+                    android:textColor="@color/accent"
+                    android:textSize="@dimen/card_sub_size"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="14dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="启动时自动检查更新"
+                        android:textColor="@color/ink"
+                        android:textSize="@dimen/card_title_size"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="冷启动约 20 秒后静默检查, 有新版本才提示"
+                        android:textColor="@color/ink_dim"
+                        android:textSize="@dimen/card_sub_size" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnSettingAutoUpdateValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="@dimen/mini_h"
+                    android:background="@drawable/bg_soft_pill"
+                    android:minWidth="@dimen/font_w"
+                    android:singleLine="true"
+                    android:text="开"
+                    android:textAllCaps="false"
+                    android:textColor="@color/ink_dim"
+                    android:textSize="@dimen/mini_text" />
+            </LinearLayout>
+
         </LinearLayout>
     </ScrollView>
 </LinearLayout>

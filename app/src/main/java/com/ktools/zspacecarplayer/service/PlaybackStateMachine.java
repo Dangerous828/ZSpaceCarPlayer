@@ -67,8 +67,104 @@ public final class PlaybackStateMachine {
     private static final int MEDIA_ERROR_UNKNOWN_WHAT = 1;
     /** 慢网冷启动时 start/seek 撞车产生的传输层错误 extra, 重试即可恢复。 */
     private static final String TRANSIENT_TRANSPORT_EXTRA = "-19";
-    /** 距曲尾这么近就从头重播, 避免恢复瞬间又触发 onCompletion 跳下一首。 */
-    private static final int END_OF_TRACK_GUARD_MS = 3000;
+    /** 进度 tick 周期: AudioPlayerService.progressRunnable 的自投递间隔。 */
+    public static final long PROGRESS_TICK_MS = 500L;
+    /** 进度落库节流窗口: MainActivity.onProgressUpdate 每 5s 才写一次 song_progress。 */
+    public static final long PROGRESS_SAVE_THROTTLE_MS = 5000L;
+    /**
+     * 距曲尾这么近就从头重播, 避免恢复瞬间又触发 onCompletion 跳下一首。
+     *
+     * 2026-09-12 #1「切歌之后自动跳到曲尾」的残留根因: 旧值 3000ms **小于**落库节流窗口
+     * (5000ms) + tick (500ms)。一首歌自然播完时, 最后一次落库的位置必然落在
+     * [时长-5.5s, 时长) 区间内, 其中 [时长-5.5s, 时长-3s) 这一段既能躲过保存侧清洗、
+     * 又能躲过起播侧钳制 —— 于是每首播完的歌都在 song_progress 里留下一个「合法」的
+     * 贴尾断点, 下次点它就被 seek 到曲尾, 几秒后又 COMPLETED 跳下一首。
+     * guard 必须严格大于一个完整节流窗口 (见 {@link #isEndGuardWiderThanSaveWindow()}),
+     * 这条缝隙才会真正闭合; 代价只是「最后 8 秒不可续播」, 对用户无感。
+     */
+    private static final int END_OF_TRACK_GUARD_MS = 8000;
+
+    /**
+     * 回归护栏: 曲尾 guard 必须宽于「一次落库节流 + 一个 tick」, 否则贴尾脏断点又能溜进库。
+     * 单测直接断言本方法, 防止有人日后把 guard 调回 3000 而复现 #1。
+     */
+    public static boolean isEndGuardWiderThanSaveWindow() {
+        return END_OF_TRACK_GUARD_MS > PROGRESS_SAVE_THROTTLE_MS + PROGRESS_TICK_MS;
+    }
+
+    /** 当前曲尾 guard (ms), 供日志与兜底窗口换算使用。 */
+    public static int endOfTrackGuardMs() {
+        return END_OF_TRACK_GUARD_MS;
+    }
+
+    /**
+     * 「该断点是否已等于播到尾」的唯一判定 (2026-09-10 实车定位)。
+     * 保存侧与起播侧此前各写一份 2000/3000 的阈值, 语义分叉迟早出事, 统一收口于此。
+     * 注意本判定以传入的 durationMs 为基准: 元数据 (RunTimeTicks) 缺失或偏大时会失真,
+     * 所以起播路径还要在 prepared 回调里用播放器真实时长再钳一次, 并且起播后仍有
+     * {@link #isBadResumeLanding} / {@link #shouldReplayInsteadOfAdvance} 两道非元数据依赖的兜底。
+     * 时长未知 (<=0) 时无法判定, 保守返回 false。
+     */
+    public static boolean isEffectivelyAtEnd(long durationMs, long positionMs) {
+        return durationMs > 0 && positionMs >= durationMs - END_OF_TRACK_GUARD_MS;
+    }
+
+    /**
+     * 进度落库前的清洗 (2026-09-12 #1)。
+     *
+     * realDurationMs 是播放器 tick 带回的真实时长, metaDurationMs 是 Jellyfin RunTimeTicks。
+     * 只用元数据判定有两个漏洞: 元数据缺失 (0) 时任何贴尾脏值都原样入库; 元数据比转码流
+     * 实际时长偏大时, 「已经越过真实曲尾」的位置照样被判成合法断点。故真实时长优先,
+     * 两者都未知才放行 (此时起播侧会因 seekMs &lt; durationMs 不成立而丢弃断点, 不会跳到曲尾)。
+     */
+    public static int sanitizeProgressForSave(long metaDurationMs, long realDurationMs,
+                                              int progressMs) {
+        if (progressMs <= 0) return 0;
+        long effectiveDurationMs = realDurationMs > 0 ? realDurationMs : metaDurationMs;
+        if (isEffectivelyAtEnd(effectiveDurationMs, progressMs)) return 0;
+        return progressMs;
+    }
+
+    /**
+     * 带断点起播后, 出声不足该时长就 COMPLETED ⇒ 断点其实贴在真实曲尾。
+     * 必须小于 {@link #END_OF_TRACK_GUARD_MS}, 否则合法断点 (刚过 guard 边界) 会被误判。
+     */
+    public static final long COMPLETION_TOO_FAST_MS = 6000L;
+
+    /**
+     * 起播后兜底之一: 「播完得太快」判定 (2026-09-12 #1)。
+     *
+     * 起播时真实时长可能未知 (流式/实时转码, 代理拿不到 Content-Length → MediaPlayer
+     * getDuration()==0) 或与元数据不符, 此时前两道按时长钳制的防线都会失效。这条判定
+     * 只看「本次是否带断点起播」+「实际出声了多久」, 不依赖任何时长: 断点起播后几秒内
+     * 就 COMPLETED, 只可能是断点落在贴尾, 应当从头重播本曲, 而不是当成播完跳下一首。
+     * playedMs 只累计真正出声的 tick, 暂停时长不算, 因此长暂停后恢复不会被误判。
+     * alreadyReplayedOnce 保证一次性, 不会与重播形成死循环。
+     */
+    public static boolean shouldReplayInsteadOfAdvance(boolean startedFromResumePoint,
+                                                       long playedMs,
+                                                       boolean alreadyReplayedOnce) {
+        return startedFromResumePoint
+                && !alreadyReplayedOnce
+                && playedMs >= 0
+                && playedMs < COMPLETION_TOO_FAST_MS;
+    }
+
+    /**
+     * 起播后兜底之二: 「首个 progress tick 就贴在真实曲尾」判定 (2026-09-12 #1)。
+     *
+     * prepared 回调可能报 0 时长, 而系统 MediaPlayer 对串流的时长往往在起播后若干 tick
+     * 才收敛; 这里用 tick 上的真实时长再判一次, 命中即视为坏断点, 立刻从头重播本曲,
+     * 不等它播完几秒再假 COMPLETED 乱跳。realDurationMs 未知时返回 false (交给兜底之一)。
+     */
+    public static boolean isBadResumeLanding(boolean startedFromResumePoint,
+                                             boolean alreadyCorrected,
+                                             long realDurationMs,
+                                             long positionMs) {
+        return startedFromResumePoint
+                && !alreadyCorrected
+                && isEffectivelyAtEnd(realDurationMs, positionMs);
+    }
     /**
      * 语音播报等短暂失焦暂停超过该时长后, 恢复时重建渲染路径 (seek 刷新):
      * 吉利语音助手占用音频后 DSP 路由/功放通道可能假死, 直接 start() 会出现

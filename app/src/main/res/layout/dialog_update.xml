@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  远程升级 (2026-09-12): 「发现新版本 / 下载中 / 下载失败」三态共用的一个对话框。
+
+  刻意做成一个布局而不是三个: 车机上从「有新版」到「装完」是一条不能断的动线,
+  中途换对话框会让车主以为要重新操作一遍; 同一个对话框内切文案 + 进度条最直观,
+  也保证「点了立即下载必有反应」—— 进度条就在刚才点的那个按钮下方立刻动起来。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/panel"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:id="@+id/tvUpdateTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="发现新版本"
+        android:textColor="@color/accent"
+        android:textSize="@dimen/dialog_title"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/tvUpdateVersion"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="14dp"
+        android:text="3.0.0 → 3.1.0"
+        android:textColor="@color/ink"
+        android:textSize="@dimen/dialog_text" />
+
+    <TextView
+        android:id="@+id/tvUpdateSize"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="安装包 2.9 MB"
+        android:textColor="@color/ink_dim"
+        android:textSize="@dimen/card_sub_size" />
+
+    <!-- 必须更新时的提示条: 措辞更强, 但依然由车主手动点安装 -->
+    <TextView
+        android:id="@+id/tvUpdateWarn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="此版本为必须更新, 建议立即安装"
+        android:textColor="@color/hl"
+        android:textSize="@dimen/card_sub_size"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/tvUpdateNotes"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:lineSpacingExtra="3dp"
+        android:text="本次更新说明"
+        android:textColor="@color/ink_dim"
+        android:textSize="@dimen/card_title_size" />
+
+    <ProgressBar
+        android:id="@+id/progressUpdate"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:max="100"
+        android:progress="0"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/tvUpdateProgress"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="正在下载 0%"
+        android:textColor="@color/accent"
+        android:textSize="@dimen/card_sub_size"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:gravity="end"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnUpdateLater"
+            android:layout_width="@dimen/dialog_btn_w_cancel"
+            android:layout_height="@dimen/dialog_btn_h"
+            android:background="@drawable/bg_button"
+            android:text="稍后"
+            android:textColor="@color/ink"
+            android:textSize="@dimen/dialog_text" />
+
+        <Button
+            android:id="@+id/btnUpdateAction"
+            android:layout_width="@dimen/dialog_btn_w_save"
+            android:layout_height="@dimen/dialog_btn_h"
+            android:layout_marginStart="12dp"
+            android:background="@drawable/bg_btn_accent"
+            android:text="立即下载"
+            android:textColor="#000000"
+            android:textSize="@dimen/dialog_text"
+            android:textStyle="bold" />
+    </LinearLayout>
+</LinearLayout>

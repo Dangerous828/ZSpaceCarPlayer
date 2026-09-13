@@ -21,6 +21,8 @@ public class GeelyAmpWakeStrategyTest {
         int maxVolume = 10;
         int currentVolume;
         boolean muted;
+        /** false = 模拟「这台 ROM 读不到静音标志」, 唤醒必须 fail-safe 跳过 */
+        boolean muteReadable = true;
         final List<Integer> writes = new ArrayList<Integer>();
 
         @Override
@@ -39,8 +41,35 @@ public class GeelyAmpWakeStrategyTest {
         }
 
         @Override
+        public GeelyAmpWakeStrategy.MuteState readMuteState() {
+            if (!muteReadable) {
+                return GeelyAmpWakeStrategy.MuteState.UNKNOWN;
+            }
+            return muted ? GeelyAmpWakeStrategy.MuteState.MUTED
+                    : GeelyAmpWakeStrategy.MuteState.UNMUTED;
+        }
+
+        @Override
         public void setMusicVolume(int volume) {
             writes.add(volume);
+        }
+    }
+
+    /** 可注入的用户音量意图源: lastChangeAtMs < 0 表示从未观察到用户改动。 */
+    private static final class FakeUserIntent implements GeelyAmpWakeStrategy.UserVolumeIntent {
+        long lastChangeAtMs = -1L;
+
+        @Override
+        public long lastUserChangeAtMs() {
+            return lastChangeAtMs;
+        }
+
+        @Override
+        public void notifyAppVolumeWriteStart() {
+        }
+
+        @Override
+        public void notifyAppVolumeWriteEnd(int writtenVolume) {
         }
     }
 
@@ -189,5 +218,132 @@ public class GeelyAmpWakeStrategyTest {
         clock.nowMs = 5000L;
         Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.WOKEN, strategy.wakeDetailed(3L));
         Assert.assertEquals(4, amp.writes.size());
+    }
+
+    @Test
+    public void unreadableMuteFlagFailsSafeWithoutTouchingVolume() {
+        FakeClock clock = new FakeClock();
+        FakeAmp amp = new FakeAmp();
+        // 实车 ROM 上 isMasterMute/isStreamMute 都反射不到: 旧实现回退 false 照做 probe,
+        // 结果把用户静音打掉 (#2/#3)。现在读不到 = 拿不准 = 不动系统音量。
+        amp.currentVolume = 5;
+        amp.muteReadable = false;
+        GeelyAmpWakeStrategy strategy = new GeelyAmpWakeStrategy(clock, amp);
+
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.SKIPPED, strategy.wakeDetailed(1L));
+        Assert.assertTrue(amp.writes.isEmpty());
+    }
+
+    @Test
+    public void userVolumeChangeTerminatesEpisodeNudges() {
+        FakeClock clock = new FakeClock();
+        FakeAmp amp = new FakeAmp();
+        amp.currentVolume = 5;
+        GeelyAmpWakeStrategy strategy = new GeelyAmpWakeStrategy(clock, amp);
+
+        Assert.assertTrue(strategy.wake(10L));
+        Assert.assertEquals(2, amp.writes.size());
+
+        // 用户把音量从 5 调到 3: 本 episode 剩余 nudge/重试一律终态让位 (#5)
+        amp.currentVolume = 3;
+        clock.nowMs = 6000L;
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.SKIPPED, strategy.wakeDetailed(10L));
+        Assert.assertTrue(strategy.isUserIntentBlocked());
+        Assert.assertEquals(2, amp.writes.size());
+
+        clock.nowMs = 12000L;
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.SKIPPED, strategy.wakeDetailed(10L));
+        Assert.assertEquals(2, amp.writes.size());
+    }
+
+    @Test
+    public void newEpisodeRebaselinesOnUserVolumeAndNeverRestoresOldValue() {
+        FakeClock clock = new FakeClock();
+        FakeAmp amp = new FakeAmp();
+        amp.currentVolume = 5;
+        GeelyAmpWakeStrategy strategy = new GeelyAmpWakeStrategy(clock, amp);
+
+        Assert.assertTrue(strategy.wake(10L));
+        // 用户调低到 3, 旧 episode 被封; 新 episode (切歌/恢复) 必须以 3 为基线做净零 probe,
+        // 绝不能把音量写回 App 记住的 5 —— 那正是「调低了又被抬回去」的劫持感
+        amp.currentVolume = 3;
+        clock.nowMs = 6000L;
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.SKIPPED, strategy.wakeDetailed(10L));
+
+        clock.nowMs = 12000L;
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.WOKEN, strategy.wakeDetailed(11L));
+        Assert.assertEquals(4, amp.writes.size());
+        Assert.assertEquals(Integer.valueOf(4), amp.writes.get(2));
+        Assert.assertEquals(Integer.valueOf(3), amp.writes.get(3));
+        Assert.assertFalse(strategy.isUserIntentBlocked());
+    }
+
+    @Test
+    public void nudgeYieldsWhileUserIsAdjustingVolume() {
+        FakeClock clock = new FakeClock();
+        FakeAmp amp = new FakeAmp();
+        FakeUserIntent intent = new FakeUserIntent();
+        amp.currentVolume = 5;
+        GeelyAmpWakeStrategy strategy = new GeelyAmpWakeStrategy(clock, amp);
+        strategy.setUserVolumeIntent(intent);
+
+        Assert.assertTrue(strategy.wake(20L));
+        Assert.assertEquals(2, amp.writes.size());
+
+        // 用户 500ms 前刚按过音量键 (长按连发): 静默期内绝不与用户抢旋钮
+        intent.lastChangeAtMs = 6000L;
+        clock.nowMs = 6500L;
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.SKIPPED, strategy.wakeDetailed(21L));
+        Assert.assertEquals(2, amp.writes.size());
+
+        // 静默期过后, 新 episode 恢复正常唤醒
+        clock.nowMs = 12000L;
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.WOKEN, strategy.wakeDetailed(22L));
+        Assert.assertEquals(4, amp.writes.size());
+    }
+
+    @Test
+    public void wakeResumesAfterUserReleasesMuteFlag() {
+        FakeClock clock = new FakeClock();
+        FakeAmp amp = new FakeAmp();
+        amp.currentVolume = 5;
+        GeelyAmpWakeStrategy strategy = new GeelyAmpWakeStrategy(clock, amp);
+
+        Assert.assertTrue(strategy.wake(30L));
+        Assert.assertEquals(2, amp.writes.size());
+
+        // 用户按静音键 (ROM 只置标志、不动音量值): 唤醒必须停手, 不能把标志打掉 (#3)
+        amp.muted = true;
+        clock.nowMs = 6000L;
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.SKIPPED, strategy.wakeDetailed(30L));
+        Assert.assertEquals(2, amp.writes.size());
+
+        // 用户解除静音: 车机功放媒体通道此时往往仍静默, 必须允许在同一 episode 内重新唤醒
+        amp.muted = false;
+        clock.nowMs = 12000L;
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.WOKEN, strategy.wakeDetailed(30L));
+        Assert.assertEquals(4, amp.writes.size());
+        Assert.assertEquals(Integer.valueOf(6), amp.writes.get(2));
+        Assert.assertEquals(Integer.valueOf(5), amp.writes.get(3));
+        Assert.assertFalse(strategy.isUserIntentBlocked());
+    }
+
+    @Test
+    public void wakeResumesAfterUserRaisesVolumeFromZero() {
+        FakeClock clock = new FakeClock();
+        FakeAmp amp = new FakeAmp();
+        // 起播时用户处于音量 0: 一律不动系统音量
+        amp.currentVolume = 0;
+        GeelyAmpWakeStrategy strategy = new GeelyAmpWakeStrategy(clock, amp);
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.SKIPPED, strategy.wakeDetailed(40L));
+        Assert.assertTrue(amp.writes.isEmpty());
+
+        // 用户把音量抬到 8: 这就是「解除静音后功放通道静默」的场景, 必须在 8 上做净零唤醒
+        amp.currentVolume = 8;
+        clock.nowMs = 6000L;
+        Assert.assertEquals(GeelyAmpWakeStrategy.WakeResult.WOKEN, strategy.wakeDetailed(40L));
+        Assert.assertEquals(2, amp.writes.size());
+        Assert.assertEquals(Integer.valueOf(9), amp.writes.get(0));
+        Assert.assertEquals(Integer.valueOf(8), amp.writes.get(1));
     }
 }

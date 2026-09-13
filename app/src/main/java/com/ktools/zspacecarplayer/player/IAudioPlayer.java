@@ -6,6 +6,14 @@ public interface IAudioPlayer {
         void onCompletion();
         void onError(int what, String extra);
         void onSeekComplete();
+
+        /**
+         * 缓冲进度上报（2026-09-12 缓冲/预取）。
+         *
+         * @param percent   已缓冲百分比；-1 表示总长未知（UI 显示「缓冲中…」）
+         * @param buffering true = 仍在缓冲（起播门槛 / 播放早期领先量不足）；false = 已就绪 / 稳定
+         */
+        void onBufferingUpdate(int percent, boolean buffering);
     }
 
     void setDataSource(String pathOrUrl) throws Exception;

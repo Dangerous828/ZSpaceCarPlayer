@@ -12,6 +12,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonSyntaxException;
 import com.ktools.zspacecarplayer.R;
 import com.ktools.zspacecarplayer.model.CategoryItem;
 import com.ktools.zspacecarplayer.model.SongItem;
@@ -19,6 +20,11 @@ import com.ktools.zspacecarplayer.util.TextRepair;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
+import java.net.ConnectException;
+import java.net.NoRouteToHostException;
+import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
@@ -32,6 +38,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLException;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
@@ -79,6 +86,98 @@ public class JellyfinApiClient {
 
     private static final int PAGE_SIZE = 500;
 
+    // ==================== 2026-09-12 #4: 连接失败可诊断 ====================
+    /**
+     * 错误类别常量。旧实现无论超时、地址写错、密码错还是服务器 500, 一律只吐
+     * "连接失败" 四个字, 用户在车机上下一步该做什么完全无从判断。这里把底层异常
+     * 归成有限几类, UI 据此给出短状态文案 + Toast 指引。
+     */
+    public static final int ERR_UNKNOWN = 0;
+    /** 连接/读取超时: 车机断网或服务器地址不通时最常见 */
+    public static final int ERR_TIMEOUT = 1;
+    /** 401/403: Token 失效或账号密码错误 */
+    public static final int ERR_AUTH = 2;
+    /** 5xx: Jellyfin 服务端自身故障 */
+    public static final int ERR_SERVER = 3;
+    /** 其它非 2xx (404 等): 多半是服务器地址路径填错 */
+    public static final int ERR_HTTP = 4;
+    /** 域名解析失败: 服务器地址写错或车机 DNS 不通 */
+    public static final int ERR_DNS = 5;
+    /** 网络不可达/连接被拒: 没有路由或 Jellyfin 没在监听 */
+    public static final int ERR_UNREACHABLE = 6;
+    /** TLS 证书校验失败: Android 4.3 老证书库场景需重点排查 */
+    public static final int ERR_TLS = 7;
+    /** 其它 IO 异常 (连接中途被重置等) */
+    public static final int ERR_NETWORK = 8;
+    /** 响应不是预期结构: 服务端版本不匹配或分页参数被忽略 */
+    public static final int ERR_PARSE = 9;
+
+    /** 带类别与 HTTP 状态码的网络异常, 让上层能区分「超时 / 鉴权失效 / 服务器错误」 */
+    public static class ApiException extends IOException {
+        private final int kind;
+        private final int httpCode;
+
+        public ApiException(int kind, int httpCode, String message) {
+            super(message);
+            this.kind = kind;
+            this.httpCode = httpCode;
+        }
+
+        public int getKind() {
+            return kind;
+        }
+
+        /** 无 HTTP 响应 (超时/DNS 等) 时为 -1 */
+        public int getHttpCode() {
+            return httpCode;
+        }
+    }
+
+    /**
+     * 把任意异常归类成 ERR_* 常量。纯函数, 不依赖 Android 框架, 可直接 JVM 单测。
+     * 注意判定顺序: 下面这些具体异常都是 IOException 的子类, 必须排在兜底之前。
+     */
+    public static int classifyError(Throwable t) {
+        if (t == null) return ERR_UNKNOWN;
+        if (t instanceof ApiException) return ((ApiException) t).getKind();
+        // SocketTimeoutException 继承自 InterruptedIOException, 两条都归超时
+        if (t instanceof SocketTimeoutException) return ERR_TIMEOUT;
+        if (t instanceof InterruptedIOException) return ERR_TIMEOUT;
+        if (t instanceof SSLException) return ERR_TLS;
+        if (t instanceof CertificateException) return ERR_TLS;
+        if (t instanceof UnknownHostException) return ERR_DNS;
+        if (t instanceof NoRouteToHostException) return ERR_UNREACHABLE;
+        if (t instanceof ConnectException) return ERR_UNREACHABLE;
+        if (t instanceof JsonSyntaxException) return ERR_PARSE;
+        if (t instanceof IOException) return ERR_NETWORK;
+        return ERR_UNKNOWN;
+    }
+
+    /** 按 HTTP 状态码归类: 401/403 是鉴权问题, 5xx 是服务端问题, 其余按通用 HTTP 错误 */
+    public static ApiException httpError(int code, String what) {
+        int kind;
+        if (code == 401 || code == 403) {
+            kind = ERR_AUTH;
+        } else if (code >= 500) {
+            kind = ERR_SERVER;
+        } else {
+            kind = ERR_HTTP;
+        }
+        return new ApiException(kind, code, what + " HTTP " + code);
+    }
+
+    /**
+     * 交互刷新 (用户点「刷新」按钮) 专用短超时。默认 client 的 15s 连接 / 20s 读取
+     * 是为后台拉大库保健壮性用的, 但离线时每页都要各等一次, 用户会干等十几秒还
+     * 看不到任何变化, 误判成「点了没反应」。交互链路改为快速失败。
+     */
+    private static final int INTERACTIVE_CONNECT_TIMEOUT_S = 5;
+    private static final int INTERACTIVE_READ_TIMEOUT_S = 8;
+    /** 交互刷新整轮分页的总时限: 到点立即失败回调, 不再让后续页各自去等一次超时 */
+    private static final long INTERACTIVE_TOTAL_BUDGET_MS = 12000L;
+    /** 分页兜底上限: 服务端忽略 StartIndex 时防止 while 死循环刷爆车机 */
+    private static final int MAX_PAGES = 64;
+
     private static JellyfinApiClient instance;
 
     private Context appContext;
@@ -86,6 +185,8 @@ public class JellyfinApiClient {
     private String accessToken = "";
     private String userId = "";
     private OkHttpClient httpClient;
+    /** 交互刷新专用短超时 client, 与 httpClient 共享连接池 (2026-09-12 #4) */
+    private OkHttpClient interactiveClient;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     /** 鉴权状态回调: 拿到新 Token 或登录失败时在主线程通知 (Service 用于挂起的自动起播) */
@@ -140,6 +241,13 @@ public class JellyfinApiClient {
         }
 
         httpClient = builder.build();
+        // 交互刷新专用 client (2026-09-12 #4): newBuilder() 复用同一个连接池、派发器
+        // 与上面配好的 TLS/证书链, 只覆盖超时, 因此既不影响后台正常拉取, 也不多养线程。
+        interactiveClient = httpClient.newBuilder()
+                .connectTimeout(INTERACTIVE_CONNECT_TIMEOUT_S, TimeUnit.SECONDS)
+                .readTimeout(INTERACTIVE_READ_TIMEOUT_S, TimeUnit.SECONDS)
+                .writeTimeout(INTERACTIVE_READ_TIMEOUT_S, TimeUnit.SECONDS)
+                .build();
     }
 
     private static X509TrustManager findSystemTrustManager() throws Exception {
@@ -266,6 +374,21 @@ public class JellyfinApiClient {
         return accessToken != null && !accessToken.trim().isEmpty();
     }
 
+    /**
+     * 丢弃已被服务端判死的 Token (2026-09-12 #4)。
+     * 拉库收到 401/403 说明内存里这份 Token 已失效, 不清的话用户每点一次刷新都要
+     * 先拿死 Token 撞一轮超时/401 再走重登, 白等一次; 清了以后 hasToken() 立刻为
+     * false, 下一次刷新直接进登录流程, 与既有的「空 Token 挂起等待鉴权」契约一致。
+     *
+     * 这里刻意不广播 onAuthStateChanged(false): AudioPlayerService 收到 false 会直接
+     * 判死挂起中的自动起播, 而紧随其后的重新登录本身就会广播真实结果, 无需多此一举。
+     */
+    public synchronized void clearAuth() {
+        if (!hasToken()) return;
+        accessToken = "";
+        Log.w(TAG, "clearAuth: 失效 Token 已清除, 等待重新登录");
+    }
+
     public void setOnAuthStateListener(OnAuthStateListener listener) {
         this.authStateListener = listener;
     }
@@ -309,15 +432,25 @@ public class JellyfinApiClient {
     private boolean authInProgress = false;
     private final List<ApiCallback<Boolean>> pendingAuthCallbacks = new ArrayList<ApiCallback<Boolean>>();
 
+    /** 兼容旧签名: Service 后台重鉴权走健壮超时 (2026-09-12 #4 之前的唯一入口) */
+    public void authenticate(final String url, final String username, final String password, final ApiCallback<Boolean> callback) {
+        authenticate(url, username, password, false, callback);
+    }
+
     /**
      * 登录单飞 (single-flight): 同一时刻只允许一次 AuthenticateByName 请求。
      * Jellyfin 对同一 DeviceId 的重复登录会吊销上一个 Token, 若 Activity 与 Service
      * 并发登录, 正在分页拉取媒体库的请求会因 Token 被吊销而中途 401。
      * 并发调用方一律挂到第一次登录的结果上 (车载场景单用户, 不区分凭据差异)。
+     *
+     * @param interactive true = 用户点「刷新」触发的重登, 走短超时 client 快速失败;
+     *                    false = Service 后台重鉴权, 保持原有 15s/20s 的健壮性。
      */
-    public void authenticate(final String url, final String username, final String password, final ApiCallback<Boolean> callback) {
+    public void authenticate(final String url, final String username, final String password,
+                             final boolean interactive, final ApiCallback<Boolean> callback) {
         synchronized (this) {
             if (authInProgress) {
+                Log.i(TAG, "authenticate: 已有登录在飞, 挂到同一结果上 (interactive=" + interactive + ")");
                 if (callback != null) pendingAuthCallbacks.add(callback);
                 return;
             }
@@ -339,9 +472,12 @@ public class JellyfinApiClient {
                 .post(body)
                 .build();
 
-        httpClient.newCall(request).enqueue(new Callback() {
+        OkHttpClient client = interactive ? interactiveClient : httpClient;
+        Log.i(TAG, "authenticate: start user=" + username + " interactive=" + interactive);
+        client.newCall(request).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, final IOException e) {
+                Log.w(TAG, "authenticate: 网络失败 kind=" + classifyError(e) + " " + e);
                 finishAuth(false, e);
             }
 
@@ -350,7 +486,10 @@ public class JellyfinApiClient {
                 if (!response.isSuccessful()) {
                     final int code = response.code();
                     response.close();
-                    finishAuth(false, new Exception("HTTP Auth failed: " + code));
+                    // 用带状态码的 ApiException, 上层才能把 401(账号密码错) 与 5xx(服务端故障)
+                    // 分成两条不同的用户提示, 而不是统一一句"连接失败"
+                    Log.w(TAG, "authenticate: 服务端拒绝 HTTP " + code);
+                    finishAuth(false, httpError(code, "Auth failed:"));
                     return;
                 }
 
@@ -360,8 +499,10 @@ public class JellyfinApiClient {
                     JsonObject respJson = new JsonParser().parse(respStr).getAsJsonObject();
                     accessToken = respJson.get("AccessToken").getAsString();
                     userId = respJson.getAsJsonObject("User").get("Id").getAsString();
+                    Log.i(TAG, "authenticate: 登录成功 userId=" + userId);
                     finishAuth(true, null);
                 } catch (final Exception e) {
+                    Log.w(TAG, "authenticate: 响应解析失败 " + e);
                     finishAuth(false, e);
                 } finally {
                     response.close();
@@ -419,16 +560,45 @@ public class JellyfinApiClient {
      * 分页参数必须用 StartIndex (Jellyfin 会静默忽略未知的 Start 参数, 导致第二页
      * 永远返回第一页数据, 887 首被计成 1000); URL 附带 cb 时间戳击穿 CDN 缓存,
      * 并按条目 Id 全局去重兜底。
+     *
+     * 兼容旧签名: 启动/后台拉取走健壮超时。
      */
     public void fetchMusicItems(final ApiCallback<List<SongItem>> callback) {
+        fetchMusicItems(callback, false);
+    }
+
+    /**
+     * @param interactive true = 用户点「刷新」按钮触发的交互请求: 换短超时 client,
+     *                    并对整轮分页施加 {@link #INTERACTIVE_TOTAL_BUDGET_MS} 总时限,
+     *                    让失败在数秒内可见; false = 启动/后台拉取, 保持 15s/20s 的健壮性。
+     */
+    public void fetchMusicItems(final ApiCallback<List<SongItem>> callback, final boolean interactive) {
+        // 交互刷新的整轮时限: 到点即放弃, 不让后面的页各自再去等一次连接超时
+        final long deadlineMs = interactive
+                ? System.currentTimeMillis() + INTERACTIVE_TOTAL_BUDGET_MS
+                : Long.MAX_VALUE;
+        final OkHttpClient client = interactive ? interactiveClient : httpClient;
         new Thread(new Runnable() {
             @Override
             public void run() {
                 final Map<String, SongItem> uniqueSongs = new LinkedHashMap<String, SongItem>();
+                int page = 0;
                 try {
                     int start = 0;
                     int total = -1;
                     while (true) {
+                        if (System.currentTimeMillis() > deadlineMs) {
+                            throw new ApiException(ERR_TIMEOUT, -1,
+                                    "fetchMusicItems 超出交互总时限 " + INTERACTIVE_TOTAL_BUDGET_MS
+                                            + "ms, 已拉 page=" + page);
+                        }
+                        // 兜底: 服务端若忽略 StartIndex 会永远返回同一页, pageCount 恒为 PAGE_SIZE,
+                        // 没有上限就是死循环刷爆车机流量
+                        if (page >= MAX_PAGES) {
+                            throw new ApiException(ERR_PARSE, -1,
+                                    "fetchMusicItems 分页超过上限 " + MAX_PAGES + " 页, 疑似 StartIndex 被忽略");
+                        }
+
                         String endpoint = serverUrl + "/Users/" + userId + "/Items"
                                 + "?IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources,ParentId,Path,Genres,GenreItems"
                                 + "&SortBy=SortName&SortOrder=Ascending"
@@ -441,11 +611,18 @@ public class JellyfinApiClient {
                                 .get()
                                 .build();
 
-                        Response response = httpClient.newCall(request).execute();
+                        Log.i(TAG, "fetchMusicItems page=" + page + " startIndex=" + start
+                                + " interactive=" + interactive);
+                        Response response = client.newCall(request).execute();
                         int pageCount;
                         try {
                             if (!response.isSuccessful()) {
-                                throw new IOException("Fetch items failed: " + response.code());
+                                // 任一页失败必须立刻抛出、中断整个 while 循环并回调 onError:
+                                // 否则会一页页各自再等一次 15s 连接超时, 用户点刷新后要干等
+                                // 十几秒 ×N 才看到失败, 观感就是「点了没反应」。
+                                // 用带状态码的 ApiException, 上层才能把 401 (Token 失效, 该清
+                                // Token 重登) 与 5xx (服务端故障, 只需重试) 分开处理。
+                                throw httpError(response.code(), "Fetch items failed:");
                             }
                             ResponseBody respBody = response.body();
                             String respStr = respBody != null ? respBody.string() : "";
@@ -468,6 +645,7 @@ public class JellyfinApiClient {
                             response.close();
                         }
 
+                        page++;
                         start += pageCount;
                         if (pageCount == 0) break;
                         if (total >= 0 && start >= total) break;
@@ -475,7 +653,8 @@ public class JellyfinApiClient {
                     }
 
                     final List<SongItem> songList = new ArrayList<SongItem>(uniqueSongs.values());
-                    Log.d(TAG, "fetchMusicItems done: songs=" + songList.size());
+                    Log.i(TAG, "fetchMusicItems done: songs=" + songList.size()
+                            + " pages=" + page + " interactive=" + interactive);
                     mainHandler.post(new Runnable() {
                         @Override
                         public void run() {
@@ -483,7 +662,9 @@ public class JellyfinApiClient {
                         }
                     });
                 } catch (final Exception e) {
-                    Log.e(TAG, "fetchMusicItems error", e);
+                    // 实车抓日志的关键锚点: kind 直接对应 UI 上给出的那一句失败原因
+                    Log.w(TAG, "fetchMusicItems error kind=" + classifyError(e)
+                            + " page=" + page + " interactive=" + interactive + " msg=" + e, e);
                     mainHandler.post(new Runnable() {
                         @Override
                         public void run() {
@@ -492,7 +673,7 @@ public class JellyfinApiClient {
                     });
                 }
             }
-        }).start();
+        }, "jf-fetch-items").start();
     }
 
     private SongItem parseSongItem(JsonObject itemObj) {

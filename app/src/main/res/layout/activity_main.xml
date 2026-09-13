@@ -451,6 +451,19 @@
                     android:textColor="@color/ink_mute"
                     android:textSize="@dimen/time_text" />
 
+                <!-- 缓冲指示 (2026-09-12 缓冲/预取): 缓冲时可见「缓冲 43%」/「缓冲中…」,
+                     进入稳定播放后由 MainActivity 置 GONE。放在时间轴左侧, 用户肉眼可见。 -->
+                <TextView
+                    android:id="@+id/tvBuffering"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="12dp"
+                    android:text="缓冲中…"
+                    android:textColor="@color/accent"
+                    android:textSize="@dimen/time_text"
+                    android:textStyle="bold"
+                    android:visibility="gone" />
+
                 <View
                     android:layout_width="0dp"
                     android:layout_height="1dp"

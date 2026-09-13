@@ -43,9 +43,10 @@ public final class HttpProxyServer {
 
     private static HttpProxyServer sInstance;
 
-    /** 同时保留的远端数据源上限（LRU 淘汰空闲者）。每源 2MB 环形缓冲，
-     *  主连接 + extractor 位置探测分家源 ≈ 4MB，安全契合 Android 4.3 堆空间。 */
-    private static final int MAX_SOURCES = 2;
+    /** 同时保留的远端数据源上限（LRU 淘汰空闲者）。2026-09-12 缓冲/预取：从 2 提到 3，
+     *  容纳「当前曲 8MB + 下一首预取 2MB + 1 个 slack（切歌瞬间新旧源并存）」。
+     *  淘汰逻辑保证正在播的当前源（有读者）与刚预取的下一首源都不被淘汰。 */
+    private static final int MAX_SOURCES = BufferingPolicy.maxSources();
     /** 新建数据源后最多保留的空闲（无读者）源数，超出立即关闭释放窗口 */
     private static final int MAX_IDLE_SOURCES = 0;
     /** 等待远端响应头就绪的上限（决定能否回复 Content-Length） */
@@ -155,6 +156,121 @@ public final class HttpProxyServer {
                 }
             }
             return -1;
+        }
+    }
+
+    /** 已缓冲字节数（prefill 门槛判定用）；无活动源返回 -1。（2026-09-12 缓冲/预取） */
+    public long getBufferedBytes(String remoteUrl) {
+        synchronized (sourceLock) {
+            for (BufferedHttpSource source : sources.values()) {
+                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
+                    return source.getBufferedBytes();
+                }
+            }
+            return -1L;
+        }
+    }
+
+    /** 远端资源总长（prefill 门槛估算码率用）；无活动源 / 未知返回 -1。 */
+    public long getContentLength(String remoteUrl) {
+        synchronized (sourceLock) {
+            for (BufferedHttpSource source : sources.values()) {
+                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
+                    return source.getContentLength();
+                }
+            }
+            return -1L;
+        }
+    }
+
+    /** 窗口容量（prefill 门槛按容量比例算目标用）；无活动源返回 -1。 */
+    public int getWindowCapacity(String remoteUrl) {
+        synchronized (sourceLock) {
+            for (BufferedHttpSource source : sources.values()) {
+                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
+                    return source.getCapacityBytes();
+                }
+            }
+            return -1;
+        }
+    }
+
+    /** 当前曲是否饥饿 / 断流（预取让位判定用）；无活动源返回 false。 */
+    public boolean isSourceStarving(String remoteUrl) {
+        synchronized (sourceLock) {
+            for (BufferedHttpSource source : sources.values()) {
+                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
+                    return source.isStarving();
+                }
+            }
+            return false;
+        }
+    }
+
+    /**
+     * 预取「下一首」：为 remoteUrl 建一个预取源并预热下载线程，eager 下载到
+     * {@link BufferingPolicy#prefetchCapacityBytes()}（约 2MB）即休眠，绝不 free-slide 抢当前曲带宽。
+     *
+     * 关键一：**环形数组按整窗 {@link BufferedHttpSource#DEFAULT_CAPACITY_BYTES}（8MB）分配**，
+     * 只把 <b>eager 下载目标</b>压到 2MB（见 BufferedHttpSource 5 参构造的解耦说明）。因为容量是
+     * final，若这里按 2MB 建环，将来这首晋升为当前曲就只能在 2MB 窗上滚动——重蹈「2MB 被打穿」的
+     * 卡顿。整窗分配 + 小 eager 目标 = 预取期省带宽、接管后仍有完整 8MB 抗抖余量。
+     *
+     * 关键二：**不 addRef、不占读者位**（复用「无读者也预填」特性），因此不会打乱引用计数；
+     * 将来真正播放这首时 {@link #obtainSource} 会按 URL + 窗口近邻命中同一个源，无缝起播。
+     * 已有同 URL 源（当前曲 / 已预取过）则只 touch 复用，绝不重复建源。
+     * （2026-09-12 缓冲/预取）
+     */
+    public void prefetch(String remoteUrl) {
+        if (remoteUrl == null
+                || (!remoteUrl.startsWith("http://") && !remoteUrl.startsWith("https://"))) {
+            return;
+        }
+        ensureStarted();
+        synchronized (sourceLock) {
+            for (BufferedHttpSource source : sources.values()) {
+                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
+                    source.touch(); // 已有源（当前曲或已预取）：命中复用即可
+                    return;
+                }
+            }
+            if (sources.size() >= MAX_SOURCES) {
+                evictIdleForNewSource(false); // 先淘汰非预取空闲源，保护当前曲与已预取源
+            }
+            if (sources.size() >= MAX_SOURCES) {
+                Log.w(TAG, "prefetch skipped, source table full: " + remoteUrl);
+                return;
+            }
+            BufferedHttpSource created = new BufferedHttpSource(
+                    remoteUrl, BufferedHttpSource.DEFAULT_CAPACITY_BYTES, 0L, true,
+                    BufferingPolicy.prefetchCapacityBytes());
+            sources.put(remoteUrl + "#pf" + (forkSeq++), created);
+            Log.i(TAG, "prefetch source created (full 8MB ring, eager target "
+                    + (BufferingPolicy.prefetchCapacityBytes() / 1024) + "KB): " + remoteUrl);
+            purgeIdleSources(created);
+        }
+    }
+
+    /**
+     * 作废指定 URL 的预取源（让位当前曲 / 切歌后清理不再相关的预取）。
+     * 只关闭仍在预热、无读者接管的预取源；已被真读者接管（升级为当前曲）的源不动。
+     * （2026-09-12 缓冲/预取）
+     */
+    public void abortPrefetch(String remoteUrl) {
+        if (remoteUrl == null) {
+            return;
+        }
+        synchronized (sourceLock) {
+            Iterator<Map.Entry<String, BufferedHttpSource>> it = sources.entrySet().iterator();
+            while (it.hasNext()) {
+                BufferedHttpSource source = it.next().getValue();
+                if (source.isPrefetch() && source.getRefCount() <= 0
+                        && source.getUrl().equals(remoteUrl)) {
+                    source.close();
+                    it.remove();
+                    Log.i(TAG, "prefetch aborted (yield to current song / stale): " + remoteUrl);
+                }
+            }
         }
     }
 
@@ -380,16 +496,11 @@ public final class HttpProxyServer {
             }
             // 无近邻可共享：为该读者独立建源
             if (sources.size() >= MAX_SOURCES) {
-                Iterator<Map.Entry<String, BufferedHttpSource>> evictIt = sources.entrySet().iterator();
-                while (evictIt.hasNext()) {
-                    BufferedHttpSource candidate = evictIt.next().getValue();
-                    if (candidate.getRefCount() <= 0) {
-                        candidate.close();
-                        evictIt.remove();
-                    }
-                    if (sources.size() < MAX_SOURCES) {
-                        break;
-                    }
+                // 两轮淘汰（2026-09-12 缓冲/预取）：第一轮只淘汰「无读者且非预取」的空闲源，
+                // 保护正在播的当前源（有读者）与刚预取的下一首源；仍满才动预取源（可作废重来）。
+                evictIdleForNewSource(false);
+                if (sources.size() >= MAX_SOURCES) {
+                    evictIdleForNewSource(true);
                 }
             }
             BufferedHttpSource created = new BufferedHttpSource(remoteUrl, requestStart < 0 ? 0 : requestStart);
@@ -407,12 +518,39 @@ public final class HttpProxyServer {
         }
     }
 
+    /**
+     * 建源前的 LRU 淘汰（按 LinkedHashMap 头 = 最久未用）。
+     *
+     * 正在播的当前源恒有读者（refCount&gt;0）——任何一轮都不淘汰它。
+     *
+     * @param includePrefetch false = 只淘汰非预取空闲源（保护刚预取的下一首）；
+     *                        true = 表仍满时的最后手段，允许淘汰预取源（预取可作废重来）
+     */
+    private void evictIdleForNewSource(boolean includePrefetch) {
+        Iterator<Map.Entry<String, BufferedHttpSource>> it = sources.entrySet().iterator();
+        while (it.hasNext()) {
+            BufferedHttpSource candidate = it.next().getValue();
+            if (candidate.getRefCount() > 0) {
+                continue; // 正在播的当前源：永不淘汰
+            }
+            if (!includePrefetch && candidate.isPrefetch()) {
+                continue; // 第一轮：保护刚预取的下一首源
+            }
+            candidate.close();
+            it.remove();
+            if (sources.size() < MAX_SOURCES) {
+                break;
+            }
+        }
+    }
+
     /** 新建源之后清理空闲者：最多保留 MAX_IDLE_SOURCES 个最新的空闲源（供窗口内 seek 秒开复用） */
     private void purgeIdleSources(BufferedHttpSource keep) {
-        // 找出最新的空闲源予以保留
+        // 找出最新的空闲源予以保留（预取源单列保护，不参与「最新空闲」竞选，也不被淘汰）
         BufferedHttpSource newestIdle = null;
         for (BufferedHttpSource candidate : sources.values()) {
-            if (candidate == keep || candidate.isClosed() || candidate.getRefCount() > 0) {
+            if (candidate == keep || candidate.isClosed() || candidate.getRefCount() > 0
+                    || candidate.isPrefetch()) {
                 continue;
             }
             if (newestIdle == null || candidate.getLastUsedAtMs() > newestIdle.getLastUsedAtMs()) {
@@ -424,7 +562,10 @@ public final class HttpProxyServer {
         while (it.hasNext()) {
             BufferedHttpSource candidate = it.next().getValue();
             boolean isKeptNewest = candidate == newestIdle && idleKept == 0;
-            if (candidate != keep && !candidate.isClosed() && candidate.getRefCount() <= 0) {
+            // 预取源（无读者但正在预热下一首）不在此淘汰：它是「刚预取的下一首」，
+            // 由 evictIdleForNewSource 的最后手段或 abortPrefetch 显式作废（2026-09-12 缓冲/预取）
+            if (candidate != keep && !candidate.isClosed() && candidate.getRefCount() <= 0
+                    && !candidate.isPrefetch()) {
                 if (isKeptNewest) {
                     idleKept++;
                     continue;

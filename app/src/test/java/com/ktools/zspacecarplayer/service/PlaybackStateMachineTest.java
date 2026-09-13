@@ -348,6 +348,63 @@ public class PlaybackStateMachineTest {
         Assert.assertFalse(PlaybackStateMachine.shouldRefreshOnTransientResume(0L));
     }
 
+    // ---------------- 2026-09-12 #1「切歌之后自动跳到曲尾」 ----------------
+
+    @Test
+    public void progressSavePrefersRealDurationOverMetadata() {
+        // 元数据缺失 (RunTimeTicks=0) 但播放器真实时长已知: 贴尾脏值必须清成 0,
+        // 旧实现只看元数据 → 直接放行 → 下次点歌被 seek 到曲尾
+        Assert.assertEquals(0, PlaybackStateMachine.sanitizeProgressForSave(0L, 226000L, 225600));
+        // 元数据比转码流实际时长偏大: 「已越过真实曲尾」的位置同样必须清掉
+        Assert.assertEquals(0,
+                PlaybackStateMachine.sanitizeProgressForSave(300000L, 226000L, 225600));
+        // 5s 落库节流在自然播完前留下的残留值 (曲尾前 3.5s) 也必须清掉
+        Assert.assertEquals(0,
+                PlaybackStateMachine.sanitizeProgressForSave(226000L, 226000L, 222500));
+        // 正常断点原样保留
+        Assert.assertEquals(100000,
+                PlaybackStateMachine.sanitizeProgressForSave(226000L, 226000L, 100000));
+        Assert.assertEquals(100000,
+                PlaybackStateMachine.sanitizeProgressForSave(226000L, 0L, 100000));
+        // 两个时长都未知: 无从判定, 保守放行 (起播侧 seekMs < durationMs 不成立会丢弃断点)
+        Assert.assertEquals(100000, PlaybackStateMachine.sanitizeProgressForSave(0L, 0L, 100000));
+        // 非法位置一律归零
+        Assert.assertEquals(0, PlaybackStateMachine.sanitizeProgressForSave(226000L, 226000L, -5));
+        Assert.assertEquals(0, PlaybackStateMachine.sanitizeProgressForSave(226000L, 226000L, 0));
+    }
+
+    @Test
+    public void badResumeLandingIsOnlyReportedForResumeStartsWithKnownDuration() {
+        // 带断点起播后 tick 已贴真实曲尾 ⇒ 坏断点
+        Assert.assertTrue(PlaybackStateMachine.isBadResumeLanding(true, false, 226000L, 225000L));
+        // 从头起播不算: 否则时长本来就短于 guard 的歌会被无限「纠偏」
+        Assert.assertFalse(PlaybackStateMachine.isBadResumeLanding(false, false, 226000L, 225000L));
+        // 一次性: 已纠偏过就不再触发, 不会与重播形成死循环
+        Assert.assertFalse(PlaybackStateMachine.isBadResumeLanding(true, true, 226000L, 225000L));
+        // 真实时长仍未知 ⇒ 交给「播完得太快」那道非时长依赖的兜底
+        Assert.assertFalse(PlaybackStateMachine.isBadResumeLanding(true, false, 0L, 225000L));
+        // 正常位置不误报
+        Assert.assertFalse(PlaybackStateMachine.isBadResumeLanding(true, false, 226000L, 100000L));
+    }
+
+    @Test
+    public void completionRightAfterResumeReplaysInsteadOfAdvancing() {
+        // 断点起播后几乎立刻 COMPLETED: 断点贴在曲尾, 不能当成播完跳下一首
+        Assert.assertTrue(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 0L, false));
+        Assert.assertTrue(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 5500L, false));
+        // 出声已超过兜底窗口 ⇒ 视为真播完, 正常自动下一首
+        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(
+                true, PlaybackStateMachine.COMPLETION_TOO_FAST_MS, false));
+        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 60000L, false));
+        // 不是断点起播 (用户点歌/自动切歌) ⇒ 不干预
+        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(false, 0L, false));
+        // 一次性
+        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 0L, true));
+        // 兜底窗口必须窄于曲尾 guard, 否则刚过 guard 的合法断点会被误判成坏断点
+        Assert.assertTrue(PlaybackStateMachine.COMPLETION_TOO_FAST_MS
+                < PlaybackStateMachine.endOfTrackGuardMs());
+    }
+
     private PlaybackStateMachine readyToPlayWithFocus(PlaybackStateMachine.FocusState focus) {
         PlaybackStateMachine machine = new PlaybackStateMachine();
         machine.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);

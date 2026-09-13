@@ -162,7 +162,20 @@ cd /Users/cpuser/Code/kTool/ZSpaceCarPlayer
 CAR_IP=10.202.110.52:5555 ./deploy_to_car.sh
 ```
 
-### 7.3 构建 JDK 要求（JDK 17 ~ 21，严禁 25）
+### 7.3 实车取证（断点体检 / 抓日志）
+车机 logcat 环形缓冲只有几 MB 且被系统高频日志（RPC-Server / TBox / GPS）刷爆，
+`logcat -d` 回看基本抓不到应用日志，**必须流式拉**。取证入口：
+
+```bash
+./scripts/car_diag.sh progress       # 拉 song_progress 断点表做体检（贴曲尾/越界/元数据缺失排最前）
+./scripts/car_diag.sh log 180        # 流式抓 180s logcat 到本地并自动过滤应用 tag
+CAR_IP=10.212.252.52:5555 ./scripts/car_diag.sh progress   # IP 漂移时手动指定
+```
+
+排查「切到某首歌直接到曲尾」类问题：先 `progress` 看那首歌的断点是否贴曲尾，
+再 `log` 边抓边复现，搜 `song clicked` / `resume point` 关键行。
+
+### 7.4 构建 JDK 要求（JDK 17 ~ 21，严禁 25）
 * **失败形态：** Gradle 8.9 在 **JDK 25** 下于 daemon 启动阶段直接崩溃（`Unsupported class file major version` 一类），`build.gradle` 根本来不及执行，因此**无法用构建脚本自检拦截**，只能靠环境约定。
 * **本机（macOS + Homebrew）固定 JDK 21：**
   ```bash

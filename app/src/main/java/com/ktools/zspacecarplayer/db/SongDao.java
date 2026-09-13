@@ -16,6 +16,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class SongDao {
@@ -339,9 +341,19 @@ public class SongDao {
         return null;
     }
 
+    /**
+     * song_progress 的写入必须保序 (2026-09-12 #1)。
+     *
+     * 旧实现每次 new Thread, 线程调度不保证提交顺序: 「播完把断点清零」这条写入可能被
+     * 更早提交、更晚执行的贴尾脏值覆盖 (CONFLICT_REPLACE 后到者胜), 于是库里又留下一个
+     * 曲尾断点, 下次点这首歌照样跳到末尾。改成单线程执行器后写入严格 FIFO。
+     * 写入本身极小且被 5s 节流, 队列不会堆积。
+     */
+    private final ExecutorService progressWriteExecutor = Executors.newSingleThreadExecutor();
+
     public void saveSongProgress(final String songId, final int progressMs) {
         if (songId == null || songId.isEmpty()) return;
-        new Thread(new Runnable() {
+        progressWriteExecutor.execute(new Runnable() {
             @Override
             public void run() {
                 SQLiteDatabase db = dbHelper.getWritableDatabase();
@@ -355,7 +367,7 @@ public class SongDao {
                     Log.e(TAG, "Error saving song progress", e);
                 }
             }
-        }).start();
+        });
     }
 
     public int getSongProgress(String songId) {

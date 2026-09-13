@@ -114,24 +114,67 @@ public class BufferedHttpSource {
     /** 是否曾有读者登记过：区分「从未被读（需预取元数据）」和「读者已全部离开（应休眠）」 */
     private boolean everHadReader = false;
 
+    // ---- 预取模式（2026-09-12 缓冲/预取，lock 保护）----
+    /**
+     * 预取源标志：为「下一首」预热的小窗源。true 时下载线程只把窗口填到
+     * {@link #prefetchTargetBytes} 就休眠，绝不 free-slide 继续拉完整首去和当前曲抢带宽；
+     * 一旦真读者（真正播放这首）登记进来即清零，升级为普通整窗源。
+     */
+    private boolean prefetchMode = false;
+    /** 预取模式下的填充目标字节数（= 小窗容量）；非预取为 Long.MAX_VALUE（不限制） */
+    private long prefetchTargetBytes = Long.MAX_VALUE;
+
     /** 无读者休眠判定：曾有过读者且现在全部离开。构建初期的元数据预取不受此门控。 */
     private boolean idleNoReaders() {
         return everHadReader && readPosMap.isEmpty();
     }
 
+    /** 预取已达标：预取模式、尚无读者接管、窗口已填到目标。此时下载线程应休眠让出带宽。 */
+    private boolean prefetchSatisfiedLocked() {
+        return prefetchMode && readPosMap.isEmpty() && (bufEnd - bufStart) >= prefetchTargetBytes;
+    }
+
     public BufferedHttpSource(String url) {
-        this(url, DEFAULT_CAPACITY_BYTES, 0L);
+        this(url, DEFAULT_CAPACITY_BYTES, 0L, false);
     }
 
     public BufferedHttpSource(String url, long initialPosition) {
-        this(url, DEFAULT_CAPACITY_BYTES, initialPosition);
+        this(url, DEFAULT_CAPACITY_BYTES, initialPosition, false);
     }
 
     public BufferedHttpSource(String url, int capacityBytes) {
-        this(url, capacityBytes, 0L);
+        this(url, capacityBytes, 0L, false);
     }
 
     public BufferedHttpSource(String url, int capacityBytes, long initialPosition) {
+        this(url, capacityBytes, initialPosition, false);
+    }
+
+    /**
+     * @param prefetch true = 建为「下一首」预取源：预取期只 eager 下载到
+     *                 {@code prefetchTargetBytes}（= capacity）即休眠，不 free-slide 抢带宽，
+     *                 且被登记为淘汰保护（见 HttpProxyServer 的 LRU 淘汰）。真读者接管后自动
+     *                 升级为普通整窗源。
+     */
+    public BufferedHttpSource(String url, int capacityBytes, long initialPosition, boolean prefetch) {
+        this(url, capacityBytes, initialPosition, prefetch,
+                prefetch ? capacityBytes : Long.MAX_VALUE);
+    }
+
+    /**
+     * @param prefetch                true = 建为「下一首」预取源（淘汰保护 + eager 下载限流）。
+     * @param prefetchEagerTargetBytes 预取期 eager 下载的目标字节数：填到这么多就让下载线程休眠，
+     *                                 绝不 free-slide 把整首下完去和当前曲抢带宽。
+     *                                 <b>与 {@code capacityBytes} 解耦是关键</b>（2026-09-12 修正）：
+     *                                 环形数组容量 {@code capacity} 是 final，无法在被读者接管后
+     *                                 再扩大。若预取源用小 capacity（如 2MB），一旦它晋升为正在播的
+     *                                 当前曲，整首就只能在 2MB 窗口上滚动——正是当初 2MB「被打穿」
+     *                                 才升到 8MB 的那个卡顿。所以预取源要按<b>整窗 8MB 分配</b>，
+     *                                 只把 <b>eager 下载目标</b>压到小值（如 2MB）来省带宽；读者接管、
+     *                                 prefetchMode 清零后，下载线程会继续把窗口填到完整 8MB 余量。
+     */
+    public BufferedHttpSource(String url, int capacityBytes, long initialPosition, boolean prefetch,
+                              long prefetchEagerTargetBytes) {
         this.url = url;
         this.capacity = Math.max(CHUNK_SIZE * 2, capacityBytes);
         this.ring = new byte[this.capacity];
@@ -140,6 +183,10 @@ public class BufferedHttpSource {
             this.bufStart = initPos;
             this.bufEnd = initPos;
             this.lastProgressAtMs = SystemClock.elapsedRealtime();
+            this.prefetchMode = prefetch;
+            this.prefetchTargetBytes = prefetch
+                    ? Math.min(Math.max(CHUNK_SIZE, prefetchEagerTargetBytes), this.capacity)
+                    : Long.MAX_VALUE;
         }
         ensureDownloader();
     }
@@ -338,6 +385,13 @@ public class BufferedHttpSource {
         synchronized (lock) {
             readPosMap.put(token, pos);
             everHadReader = true;
+            // 预取源被真读者接管（这首真的要播了）：解除预取限制，升级为普通整窗源，
+            // 下载线程恢复「随读者推进持续填充」，不再受小目标封顶（2026-09-12 缓冲/预取）
+            if (prefetchMode) {
+                prefetchMode = false;
+                prefetchTargetBytes = Long.MAX_VALUE;
+                Log.i(TAG, "prefetch source taken over by reader, promote to full window: " + url);
+            }
             lock.notifyAll();
         }
         ensureDownloader(); // 读者就位：拉起（可能已休眠的）下载线程
@@ -461,6 +515,28 @@ public class BufferedHttpSource {
 
     public boolean isClosed() {
         return closed;
+    }
+
+    /** 窗口容量（字节）。prefill 门槛按容量比例算目标时需要（2026-09-12 缓冲/预取）。 */
+    public int getCapacityBytes() {
+        return capacity;
+    }
+
+    /** 是否为仍在预热、尚无读者接管的预取源（淘汰保护 / 主动作废判定用）。 */
+    public boolean isPrefetch() {
+        synchronized (lock) {
+            return prefetchMode;
+        }
+    }
+
+    /**
+     * 当前是否处于「饥饿 / 断流」：已进 fatal，或此刻有读者停在窗口尾等下载推进。
+     * 预取让位判定用它——当前曲一旦饥饿就立即暂停 / 放弃下一首预取（2026-09-12 缓冲/预取）。
+     */
+    public boolean isStarving() {
+        synchronized (lock) {
+            return fatalError != null || starvedSinceMs >= 0;
+        }
     }
 
     /**
@@ -608,8 +684,10 @@ public class BufferedHttpSource {
                 synchronized (lock) {
                     if (epoch == downloadEpoch) {
                         retry = 0; // 干净完成（eof 或被新 reset 接管）
-                        if (idleNoReaders()) {
-                            return; // 读者已全部离开：下载线程休眠，新读者 addReadPos 时再拉起
+                        if (idleNoReaders() || prefetchSatisfiedLocked()) {
+                            // 读者已全部离开，或预取小窗已填达标：下载线程休眠让出带宽，
+                            // 新读者 addReadPos（接管）时再拉起（2026-09-12 缓冲/预取）
+                            return;
                         }
                     }
                 }
@@ -725,6 +803,10 @@ public class BufferedHttpSource {
                 if (idleNoReaders()) {
                     return; // 无读者：暂停下载，避免分家后的源在后台空耗带宽
                 }
+                if (prefetchSatisfiedLocked()) {
+                    // 预取小窗已填达标：停止拉流，绝不 free-slide 把整首下完去和当前曲抢带宽
+                    return;
+                }
             }
             int n;
             try {
@@ -785,6 +867,11 @@ public class BufferedHttpSource {
                     break;
                 }
                 long minPos = minReadPosLocked();
+                if (prefetchMode && minPos == Long.MAX_VALUE) {
+                    // 预取模式且尚无读者接管：窗口填不下就停，绝不 free-slide 把整首下完
+                    // （否则会持续和当前曲抢带宽，违背「预取只预热小窗」的设计）
+                    return -1;
+                }
                 long hardNeed = bufEnd - capacity + n; // 放下 n 字节至少要滑到的位置
                 long target;
                 if (minPos == Long.MAX_VALUE) {

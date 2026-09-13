@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  远程升级 (2026-09-12): FileProvider 的可共享路径白名单。
+
+  只开放 getCacheDir()/updates 这一个子目录 —— APK 就下载在那里 (见 ApkDownloader.UPDATE_DIR)。
+  刻意不开放 cache 根目录(即 path 取 . 的写法): 那等于把崩溃报告、数据库快照等一并允许
+  通过 content:// 被外部应用读走。name 必须与 path 一一对应, 系统安装器拿到的
+  URI 形如 content://com.ktools.zspacecarplayer.fileprovider/updates/xxx.apk。
+-->
+<paths>
+    <cache-path
+        name="updates"
+        path="updates/" />
+</paths>

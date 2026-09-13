@@ -26,6 +26,26 @@ cp app/build/outputs/apk/debug/app-debug.apk \
    /Users/cpuser/Code/kTool/ZSpaceCarPlayer/apks/release/ZSpaceCarPlayer-2.3.0-code2-debug.apk
 ```
 
+## ZSpaceCarPlayer-3.1.0-code4-debug.apk — 当前 OTA 分发版
+
+| 项 | 值 |
+|:---|:---|
+| 版本 | `3.1.0` / versionCode `4` |
+| 大小 | 3,101,460 B |
+| SHA-256 | `03c548308092a185e5c3c8dfcc6f7b5027eb245d46276089058192e6031a5507` |
+| 来源 | `feat/v3-native-dsp-pipeline` 工作区构建（远程升级 + 缓冲/预取 + 音量意图等，见 `changelogs/3.1.0.md`） |
+| 构建时间 | 2026-09-13 |
+| 构建类型 | **debug** —— 与车机已装包同签名，可 `adb install -r` 覆盖安装 |
+| 分发 | 已托管 `https://web.kentonnie.top/zspace/update/`（清单 `latest.json` + 同名 APK），车机 vc≤3 启动静默检查即发现新版 |
+
+重建命令：
+
+```bash
+cd /Users/cpuser/Code/kTool/ZSpaceCarPlayer
+./gradlew assembleDebug   # JDK 17~21
+cp app/build/outputs/apk/debug/app-debug.apk apks/release/ZSpaceCarPlayer-3.1.0-code4-debug.apk
+```
+
 ## 回滚操作
 
 versionCode 不可降级安装，必须先卸载 3.0.0：

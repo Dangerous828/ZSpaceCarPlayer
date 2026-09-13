@@ -5,6 +5,7 @@
 # 填入真实值后编译，app/build.gradle 会把它们注入 BuildConfig：
 #   JellyfinApiClient    读 BuildConfig.JELLYFIN_SERVER_URL / USERNAME / PASSWORD
 #   CrashMonitor         读 BuildConfig.CRASH_ENDPOINT
+#   UpdateChecker        读 BuildConfig.UPDATE_MANIFEST_URL (远程升级版本清单地址)
 # 不填时上述常量回退占位符，保证公开仓库不含任何真实凭据。
 #
 # 注意：填了真实值编译出的 APK 内嵌凭据，请勿对外分发。
@@ -13,3 +14,4 @@
 # JELLYFIN_USERNAME=your_username
 # JELLYFIN_PASSWORD=your_password
 # CRASH_ENDPOINT=https://your-jellyfin.example.com/crash
+# UPDATE_MANIFEST_URL=https://web.kentonnie.top/zspace/update/latest.json

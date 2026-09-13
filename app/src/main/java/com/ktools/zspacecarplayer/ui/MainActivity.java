@@ -3,9 +3,12 @@ package com.ktools.zspacecarplayer.ui;
 import android.app.Dialog;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.media.AudioManager;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.graphics.Color;
@@ -13,6 +16,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.KeyEvent;
@@ -25,6 +29,7 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
+import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -46,9 +51,15 @@ import com.ktools.zspacecarplayer.model.LyricLine;
 import com.ktools.zspacecarplayer.model.SongItem;
 import com.ktools.zspacecarplayer.net.JellyfinApiClient;
 import com.ktools.zspacecarplayer.service.AudioPlayerService;
+import com.ktools.zspacecarplayer.service.MediaButtonReceiver;
 import com.ktools.zspacecarplayer.service.PlaybackStateMachine;
 import com.ktools.zspacecarplayer.util.CacheSizeManager;
+import com.ktools.zspacecarplayer.update.ApkDownloader;
+import com.ktools.zspacecarplayer.update.UpdateChecker;
+import com.ktools.zspacecarplayer.update.UpdateInstaller;
+import com.ktools.zspacecarplayer.update.UpdateManifest;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -83,6 +94,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     private TextView tvCurrentTitle, tvCurrentArtist, tvCurrentTime, tvTotalTime, tvSongCount, tvServerStatus, tvListTitle;
     private TextView tvBadgeFolder;
     private TextView tvLyricsEmpty;
+    /** 缓冲指示 (2026-09-12 缓冲/预取): 缓冲时可见「缓冲 43%」/「缓冲中…」, 稳定播放后隐藏 */
+    private TextView tvBuffering;
     private View seekFill;
     private EditText etSearch;
     private SeekBar seekBarProgress;
@@ -92,15 +105,74 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
     private boolean isUserSeeking = false;
     private boolean autoReloginAttempted = false;
+    /**
+     * 连接/刷新链是否正在进行 (2026-09-12 #4)。
+     * 旧实现点一次刷新就 new 一个线程发一整轮分页请求, 且点击后不改任何文案、不禁用
+     * 按钮; 离线时要干等 15s 连接超时才有回调, 用户看到的就是「点了没反应」, 于是连点,
+     * 于是几套回调互相覆盖状态文案。现在链进行中一律合并, 且点击瞬间就有可见反馈。
+     */
+    private boolean isRefreshing = false;
+    /** 当前链是否由用户点「刷新」触发: 决定用短超时 client 与看门狗时长 */
+    private boolean refreshInteractive = false;
+    /**
+     * 连接链代号, 每次开链自增。所有网络回调都带着开链时的代号回来, 失配即丢弃 ——
+     * 防止上一轮的迟到回调把新一轮的状态文案与按钮可用性搅乱。
+     */
+    private int refreshEpoch = 0;
+    /**
+     * 本条链内是否已经因「手上没 Token」直接进过登录环节。
+     * 单独立这个标记而不去占用 autoReloginAttempted, 是为了两全: 既挡住「登录回调说
+     * 成功却仍没拿到 Token」时的自我递归死循环, 又保留 autoReloginAttempted 给
+     * 「登录成功但拉库时网络抖了一下」的那次宝贵重试 (车上网络不稳, 这次重试很值)。
+     */
+    private boolean noTokenLoginDone = false;
     private boolean isAutoPlayInitialized = false;
 
     private List<SongItem> allSongsList = new ArrayList<>();
     private List<SongItem> currentDisplayedSongs = new ArrayList<>();
     private long lastBackPressTime = 0;
     private long lastProgressSaveTime = 0;
+    /** 上一次落库的曲目 id 与进度值: 用于识别「同一首歌进度倒退」的过期 tick (2026-09-12 #1) */
+    private String lastProgressSaveTrackId;
+    private int lastProgressSaveMs = -1;
+    /**
+     * 允许的正常倒退容差。切歌竞态里可能读到上一首贴尾的 position 却挂到新一首的 id 上,
+     * 也可能在 seek 未完成时读到旧位置; 超过该容差的倒退一律视为脏值不落库。
+     * 用户手动 seek 造成的倒退由 onStopTrackingTouch 清空追踪器放行。
+     */
+    private static final int PROGRESS_BACKWARD_TOLERANCE_MS = 2000;
+    /** 静音键当暂停用的去抖窗口: ROM 可能对同一次按键重复投递, 双触发会变成「暂停又播放」。 */
+    private static final long MUTE_KEY_TOGGLE_DEBOUNCE_MS = 500L;
+    private long lastMuteKeyToggleAtMs = 0L;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable searchRunnable;
+
+    /**
+     * 看门狗时长 (2026-09-12 #4)。交互链最坏 = 12s 整轮时限 + 短超时重登 + 再拉一轮,
+     * 45s 足够; 启动链走健壮超时, 大库分页可能 15s×N, 给到 120s 免得误报。
+     */
+    private static final long REFRESH_WATCHDOG_INTERACTIVE_MS = 45000L;
+    private static final long REFRESH_WATCHDOG_ROBUST_MS = 120000L;
+
+    /**
+     * 刷新看门狗: 万一某条回调彻底没回来 (ROM 冻结进程、OkHttp 派发异常等),
+     * 绝不能让刷新按钮永久卡在禁用态 —— 那才是真正不可恢复的「点了没反应」。
+     * 到点强制解锁并明确告知超时; 若真实回调随后才到, 只是补一次状态文案与列表刷新。
+     */
+    private final Runnable refreshWatchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (!isRefreshing) return;
+            Log.w(TAG, "refresh watchdog fired, force unlock (interactive=" + refreshInteractive + ")");
+            CrashMonitor.breadcrumb("net", "refresh watchdog fired interactive=" + refreshInteractive);
+            isRefreshing = false;
+            btnNavRefresh.setEnabled(true);
+            btnNavRefresh.setText("刷新");
+            tvServerStatus.setText("连接超时");
+            Toast.makeText(MainActivity.this, "连接超时, 请检查网络后重试", Toast.LENGTH_LONG).show();
+        }
+    };
 
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override
@@ -137,6 +209,11 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         ensureSystemUiVisible();
         setContentView(R.layout.activity_main);
 
+        // 音量键锁定到媒体流 (#5)。AOSP 在没有活跃播放时把音量键指向 suggested stream
+        // (可能是 RING/VOICE_CALL), 用户在前台按音量键调的其实不是音乐流, 观感就是
+        // 「调低了但效果不明显」。API 1 方法, 只影响按键目标流, App 不接管音量值本身。
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
+
         JellyfinApiClient.getInstance().init(getApplicationContext());
 
         initViews();
@@ -156,6 +233,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
         // 4. 车机音频路由调试入口 (实车 HAL 绑卡错乱修复工具, adb 广播触发)
         registerDebugRouteReceiver();
+
+        // 5. 远程升级 (2026-09-12): 偏好开启时, 冷启动后延迟静默检查一次
+        scheduleAutoUpdateCheck();
     }
 
     @Override
@@ -187,6 +267,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         tvSongCount = findViewById(R.id.tvSongCount);
         tvServerStatus = findViewById(R.id.tvServerStatus);
         tvListTitle = findViewById(R.id.tvListTitle);
+        tvBuffering = findViewById(R.id.tvBuffering);
         seekFill = findViewById(R.id.seekFill);
         tvLyricsEmpty = findViewById(R.id.tvLyricsEmpty);
         tvBadgeFolder = findViewById(R.id.tvBadgeFolder);
@@ -243,7 +324,15 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             public void onSongClick(SongItem song, int position) {
                 hideSoftKeyboard();
                 if (isBound && playerService != null) {
-                    int exactMs = SongDao.getInstance(MainActivity.this).getSongProgress(song.getId());
+                    // 取出的断点必须先按「这首歌自己的时长」清洗再交给播放服务 (#1):
+                    // 服务侧 sanitizeSeekMs 与 prepared 回调还会各钳一次, 多这一道是为了
+                    // 让点歌路径的 decision 在 UI 日志里就能看到
+                    int exactMs = resumePointForPlayback(song,
+                            SongDao.getInstance(MainActivity.this).getSongProgress(song.getId()),
+                            "song clicked");
+                    Log.i(TAG, "song clicked pos=" + position + " " + song.getName()
+                            + " id=" + song.getId() + " savedProgress=" + exactMs
+                            + "ms metaDuration=" + song.getDurationMs() + "ms");
                     CrashMonitor.breadcrumb("ui", "song clicked pos=" + position
                             + " " + song.getName() + " resumeMs=" + exactMs);
                     playerService.setPlaylist(currentDisplayedSongs, position, exactMs,
@@ -436,8 +525,25 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             @Override
             public void onClick(View v) {
                 hideSoftKeyboard();
+                // 2026-09-12 #4: 点了必有反应。进行中再点击一律合并, 不再叠线程。
+                // 按钮此时已禁用, 这条分支只是兜底 (个别 ROM 上禁用态仍会派发点击)。
+                if (isRefreshing) {
+                    Log.i(TAG, "refresh clicked while chain in flight, merged");
+                    Toast.makeText(MainActivity.this, "正在连接中, 请稍候…", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                // 车机整体断网时不必再去撞连接超时, 立刻给出可诊断结论
+                if (!isNetworkAvailable()) {
+                    Log.w(TAG, "refresh clicked but no active network");
+                    CrashMonitor.breadcrumb("net", "refresh blocked: no active network");
+                    tvServerStatus.setText("无网络");
+                    Toast.makeText(MainActivity.this,
+                            "车机当前无网络连接, 请检查网络设置后重试", Toast.LENGTH_LONG).show();
+                    return;
+                }
                 autoReloginAttempted = false;
-                refreshMediaLibrary();
+                if (!beginRefreshChain("user tap", true)) return;
+                fetchLibrary(true, refreshEpoch);
             }
         });
 
@@ -470,6 +576,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             public void onStopTrackingTouch(SeekBar seekBar) {
                 if (isBound && playerService != null) {
                     playerService.seekTo(seekBar.getProgress());
+                    // 用户手动往回拖是合法的进度倒退, 清空追踪器, 否则随后的正常落库
+                    // 会被「同曲进度倒退 = 脏 tick」这道防线误拦 (2026-09-12 #1)
+                    lastProgressSaveTrackId = null;
+                    lastProgressSaveMs = -1;
                 }
                 isUserSeeking = false;
             }
@@ -681,6 +791,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         }
 
         setupEngineToggle();
+        // 远程升级 (2026-09-12): 「关于与升级」分块 (检查更新 + 启动时自动检查开关)
+        setupUpdateSection();
     }
 
     /** v3 自研 DSP 引擎开关: 写偏好即可, 引擎在下一首歌起播时惰性重建 (不打断当前播放) */
@@ -1092,7 +1204,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         if (targetIndex >= 0) {
             // 匹配到上次的歌曲记录: 自动开播并跳回精确断点!
             isAutoPlayInitialized = true;
-            int exactMs = SongDao.getInstance(this).getSongProgress(lastSongId);
+            SongItem target = currentSongs.get(targetIndex);
+            int exactMs = resumePointForPlayback(target,
+                    SongDao.getInstance(this).getSongProgress(lastSongId), "auto-resume");
             playerService.setPlaylist(currentSongs, targetIndex, exactMs,
                     PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
         } else {
@@ -1103,7 +1217,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 for (int i = 0; i < fallback.size(); i++) {
                     if (lastSongId.equals(fallback.get(i).getId())) {
                         isAutoPlayInitialized = true;
-                        int exactMs = SongDao.getInstance(this).getSongProgress(lastSongId);
+                        int exactMs = resumePointForPlayback(fallback.get(i),
+                                SongDao.getInstance(this).getSongProgress(lastSongId),
+                                "auto-resume-fallback");
                         playerService.setPlaylist(fallback, i, exactMs,
                                 PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
                         Log.i(TAG, "auto-resume: last song not in category '"
@@ -1132,28 +1248,53 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     private void loadSavedServerConfig() {
         SharedPreferences sp = getSharedPreferences(JellyfinApiClient.PREF_NAME, MODE_PRIVATE);
         String serverUrl = sp.getString(JellyfinApiClient.KEY_SERVER_URL, JellyfinApiClient.DEFAULT_SERVER_URL);
-        String username = sp.getString(JellyfinApiClient.KEY_USERNAME, JellyfinApiClient.DEFAULT_USERNAME);
-        String password = sp.getString(JellyfinApiClient.KEY_PASSWORD, JellyfinApiClient.DEFAULT_PASSWORD);
         String userId = sp.getString(JellyfinApiClient.KEY_USER_ID, "");
         String token = sp.getString(JellyfinApiClient.KEY_ACCESS_TOKEN, "");
 
         JellyfinApiClient.getInstance().setServerUrl(serverUrl);
         JellyfinApiClient.getInstance().setAuthInfo(userId, token);
 
-        tvServerStatus.setText("连接中...");
-
-        if (token.isEmpty()) {
-            autoSilentLogin(serverUrl, username, password);
-        } else {
-            refreshMediaLibrary();
+        // 冷启动就没网时不要开链 (2026-09-12 #4): 否则刷新按钮会被 "同步" 禁用态
+        // 卡住几十秒 (拉库超时 + 重登超时各一轮), 而本地库其实已经能看能播。
+        // 这里只置一句短状态, 按钮保持可点, 等用户网通后自己点刷新。
+        if (!isNetworkAvailable()) {
+            Log.w(TAG, "startup: no active network, skip connect chain (local library only)");
+            CrashMonitor.breadcrumb("net", "startup skipped: no active network");
+            tvServerStatus.setText("无网络");
+            return;
         }
+
+        // 启动即开链 (2026-09-12 #4): "连接中..." 由 beginRefreshChain 统一置上。
+        // 开链后用户若在启动拉库期间手点刷新, 会被合并而不是再叠一套线程与回调。
+        if (!beginRefreshChain("startup", false)) return;
+        int epoch = refreshEpoch;
+
+        // 无 Token 时 fetchLibrary 会自己转进静默登录环节 (并挂上防递归标记),
+        // 这里不必再分岔, 一条路径一套守卫
+        Log.i(TAG, "startup: hasToken=" + JellyfinApiClient.getInstance().hasToken());
+        fetchLibrary(false, epoch);
     }
 
-    private void autoSilentLogin(final String url, final String username, final String password) {
-        tvServerStatus.setText("连接中...");
-        JellyfinApiClient.getInstance().authenticate(url, username, password, new JellyfinApiClient.ApiCallback<Boolean>() {
+    /**
+     * 静默重登。必须在 beginRefreshChain 之后调用 —— 它是同一条链的中间环节,
+     * 链锁由调用方持有, 成功后接着拉库, 失败才终结整条链。
+     *
+     * @param interactive true 时走短超时 client, 让用户点刷新触发的重登也能快速失败
+     * @param epoch       所属链代号, 回调失配即丢弃
+     */
+    private void autoSilentLogin(final String url, final String username, final String password,
+                                 final boolean interactive, final int epoch) {
+        tvServerStatus.setText("登录中...");
+        Log.i(TAG, "autoSilentLogin: start interactive=" + interactive + " epoch=" + epoch);
+        JellyfinApiClient.getInstance().authenticate(url, username, password, interactive,
+                new JellyfinApiClient.ApiCallback<Boolean>() {
             @Override
             public void onSuccess(Boolean result) {
+                if (epoch != refreshEpoch) {
+                    Log.w(TAG, "autoSilentLogin onSuccess stale, dropped (epoch=" + epoch
+                            + " current=" + refreshEpoch + ")");
+                    return;
+                }
                 SharedPreferences sp = getSharedPreferences(JellyfinApiClient.PREF_NAME, MODE_PRIVATE);
                 sp.edit()
                         .putString(JellyfinApiClient.KEY_SERVER_URL, url)
@@ -1163,13 +1304,24 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                         .putString(JellyfinApiClient.KEY_ACCESS_TOKEN, JellyfinApiClient.getInstance().getAccessToken())
                         .apply();
 
-                tvServerStatus.setText("已连接");
-                refreshMediaLibrary();
+                // 拿到新 Token, 同一条链继续去拉库 (不重新开链, 否则会自己把自己挡住)
+                tvServerStatus.setText("同步中...");
+                fetchLibrary(interactive, epoch);
             }
 
             @Override
             public void onError(Exception e) {
-                tvServerStatus.setText("连接失败");
+                if (epoch != refreshEpoch) {
+                    Log.w(TAG, "autoSilentLogin onError stale, dropped (epoch=" + epoch
+                            + " current=" + refreshEpoch + ")");
+                    return;
+                }
+                // 旧实现这里只有一句 "连接失败": 用户既不知道是密码错还是断网,
+                // 也不知道该去设置页改什么 (2026-09-12 #4)
+                Log.w(TAG, "autoSilentLogin failed kind=" + JellyfinApiClient.classifyError(e)
+                        + " msg=" + e);
+                showConnectFailure(e, interactive);
+                endRefreshChain(epoch, "login failed");
             }
         });
     }
@@ -1206,7 +1358,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                     return;
                 }
 
-                JellyfinApiClient.getInstance().authenticate(url, username, password, new JellyfinApiClient.ApiCallback<Boolean>() {
+                // 用户正盯着弹窗等结果, 走短超时 client, 别让他干等 15s (2026-09-12 #4)
+                JellyfinApiClient.getInstance().authenticate(url, username, password, true,
+                        new JellyfinApiClient.ApiCallback<Boolean>() {
                     @Override
                     public void onSuccess(Boolean result) {
                         Toast.makeText(MainActivity.this, "Jellyfin 认证成功！", Toast.LENGTH_SHORT).show();
@@ -1218,14 +1372,19 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                         editor.putString(JellyfinApiClient.KEY_ACCESS_TOKEN, JellyfinApiClient.getInstance().getAccessToken());
                         editor.apply();
 
-                        tvServerStatus.setText("已连接");
                         dialog.dismiss();
-                        refreshMediaLibrary();
+                        autoReloginAttempted = false;
+                        // 新凭据已落库: 打断可能在飞的旧链重开, 否则旧 Token 那轮结果
+                        // 还会把状态文案改回去, 新凭据要等下次刷新才生效
+                        restartLibraryRefresh("settings saved");
                     }
 
                     @Override
                     public void onError(Exception e) {
-                        Toast.makeText(MainActivity.this, "登录失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                        // 原来只吐 e.getMessage() (英文 HTTP 码), 车主看不懂
+                        Log.w(TAG, "settings auth failed kind=" + JellyfinApiClient.classifyError(e)
+                                + " msg=" + e);
+                        showConnectFailure(e, true);
                     }
                 });
             }
@@ -1234,13 +1393,118 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         dialog.show();
     }
 
+    /**
+     * 媒体库刷新入口 (2026-09-12 #4 重构): 自行开一条健壮链, 已有链在飞时合并。
+     */
     private void refreshMediaLibrary() {
+        if (!beginRefreshChain("refreshMediaLibrary", false)) return;
+        fetchLibrary(false, refreshEpoch);
+    }
+
+    /**
+     * 开启一次「登录 → 拉库」链。
+     *
+     * @return false 表示已有链在飞, 本次请求被合并 (调用方必须就此打住, 不得再发请求)
+     */
+    private boolean beginRefreshChain(String reason, boolean interactive) {
+        if (isRefreshing) {
+            Log.i(TAG, "refresh chain busy, merged: " + reason);
+            return false;
+        }
+        isRefreshing = true;
+        refreshInteractive = interactive;
+        refreshEpoch++;
+        noTokenLoginDone = false;
+        // 点击瞬间的三件可见反馈: 状态文案、按钮文字、按钮禁用。
+        // bg_nav_tab 没有 state_enabled=false 的图样, 光 setEnabled(false) 车主看不出
+        // 任何区别, 所以必须同时改按钮文字, 否则观感仍然是「点了没反应」。
+        // 进行中用 "同步" 而非 "同步中": 导航组是 wrap_content 且靠右对齐, 按钮变宽
+        // 会把「全部歌曲/歌单」往左顶, 每次刷新都抖一下。等宽两字则完全不动版。
+        tvServerStatus.setText("连接中...");
+        btnNavRefresh.setText("同步");
+        btnNavRefresh.setEnabled(false);
+        Log.i(TAG, "refresh chain begin: " + reason + " interactive=" + interactive
+                + " epoch=" + refreshEpoch);
+        CrashMonitor.breadcrumb("net", "refresh begin " + reason + " interactive=" + interactive);
+        armRefreshWatchdog();
+        return true;
+    }
+
+    /** 链终结 (成功或最终失败): 丢弃过期回调, 解锁并恢复按钮可点 */
+    private void endRefreshChain(int epoch, String reason) {
+        if (epoch != refreshEpoch) {
+            Log.w(TAG, "stale refresh settle ignored: epoch=" + epoch
+                    + " current=" + refreshEpoch + " (" + reason + ")");
+            return;
+        }
+        isRefreshing = false;
+        mainHandler.removeCallbacks(refreshWatchdog);
+        btnNavRefresh.setEnabled(true);
+        btnNavRefresh.setText("刷新");
+        Log.i(TAG, "refresh chain end: " + reason);
+    }
+
+    private void armRefreshWatchdog() {
+        mainHandler.removeCallbacks(refreshWatchdog);
+        mainHandler.postDelayed(refreshWatchdog,
+                refreshInteractive ? REFRESH_WATCHDOG_INTERACTIVE_MS : REFRESH_WATCHDOG_ROBUST_MS);
+    }
+
+    /**
+     * 强制拆掉在飞的链后重开。设置页存了新凭据就得走这里: 旧 Token 那轮结果已无意义,
+     * 且它的迟到回调会把状态文案改回去。拆链会让 refreshEpoch 前的回调全部失配作废。
+     */
+    private void restartLibraryRefresh(String reason) {
+        if (isRefreshing) {
+            Log.i(TAG, "refresh chain dropped for restart: " + reason);
+            isRefreshing = false;
+            mainHandler.removeCallbacks(refreshWatchdog);
+        }
+        refreshMediaLibrary();
+    }
+
+    /**
+     * 拉库环节。调用方必须已持有链锁 (beginRefreshChain 返回 true), 本方法负责终结。
+     */
+    private void fetchLibrary(final boolean interactive, final int epoch) {
+        // 手上没 Token 就别再去撞一次必然的 401 (2026-09-12 #4): 那等于白等一轮
+        // 超时/往返。直接在同一条链里进登录环节, 拿到 Token 再回来拉库。
+        if (!JellyfinApiClient.getInstance().hasToken()) {
+            if (noTokenLoginDone) {
+                // 登录回调说成功却还是没 Token: 再递归下去就是死循环, 就此终结并给出结论
+                Log.w(TAG, "fetchLibrary: 登录后仍无 Token, 终止本链 epoch=" + epoch);
+                showConnectFailure(new JellyfinApiClient.ApiException(
+                        JellyfinApiClient.ERR_AUTH, -1, "login succeeded but token empty"), interactive);
+                endRefreshChain(epoch, "empty token after login");
+                return;
+            }
+            noTokenLoginDone = true;
+            SharedPreferences spNoToken = getSharedPreferences(JellyfinApiClient.PREF_NAME, MODE_PRIVATE);
+            Log.i(TAG, "fetchLibrary: no token in hand, go straight to silent login");
+            tvServerStatus.setText("登录中...");
+            autoSilentLogin(
+                    spNoToken.getString(JellyfinApiClient.KEY_SERVER_URL, JellyfinApiClient.DEFAULT_SERVER_URL),
+                    spNoToken.getString(JellyfinApiClient.KEY_USERNAME, JellyfinApiClient.DEFAULT_USERNAME),
+                    spNoToken.getString(JellyfinApiClient.KEY_PASSWORD, JellyfinApiClient.DEFAULT_PASSWORD),
+                    interactive, epoch);
+            return;
+        }
+
         JellyfinApiClient.getInstance().fetchMusicItems(new JellyfinApiClient.ApiCallback<List<SongItem>>() {
             @Override
             public void onSuccess(List<SongItem> songs) {
+                if (epoch != refreshEpoch) {
+                    Log.w(TAG, "fetchLibrary onSuccess stale, dropped (epoch=" + epoch
+                            + " current=" + refreshEpoch + ")");
+                    return;
+                }
                 autoReloginAttempted = false;
                 tvServerStatus.setText("已连接");
-                if (songs == null || songs.isEmpty()) return;
+                endRefreshChain(epoch, "ok songs=" + (songs == null ? 0 : songs.size()));
+                if (songs == null || songs.isEmpty()) {
+                    Log.i(TAG, "fetchLibrary: 服务器返回空库, 保留现有列表");
+                    return;
+                }
 
                 allSongsList = new ArrayList<>(songs);
                 SongDao.getInstance(MainActivity.this).saveSongs(allSongsList);
@@ -1271,19 +1535,123 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
             @Override
             public void onError(Exception e) {
+                if (epoch != refreshEpoch) {
+                    Log.w(TAG, "fetchLibrary onError stale, dropped (epoch=" + epoch
+                            + " current=" + refreshEpoch + ")");
+                    return;
+                }
+                int kind = JellyfinApiClient.classifyError(e);
+                Log.w(TAG, "fetchLibrary failed kind=" + kind + " epoch=" + epoch + " msg=" + e);
+
+                // 401/403 = 手里这份 Token 已被服务端判死。必须同时清掉内存与持久化的
+                // Token: 不清的话用户每点一次刷新都要先拿死 Token 撞一轮 401 再重登,
+                // 白等一次往返; 而持久化那份不清, 下次冷启动又是同一个死循环 (2026-09-12 #4)
+                if (kind == JellyfinApiClient.ERR_AUTH) {
+                    JellyfinApiClient.getInstance().clearAuth();
+                    getSharedPreferences(JellyfinApiClient.PREF_NAME, MODE_PRIVATE)
+                            .edit().remove(JellyfinApiClient.KEY_ACCESS_TOKEN).apply();
+                    Log.w(TAG, "stale token dropped from memory and prefs");
+                }
+
                 if (!autoReloginAttempted) {
                     autoReloginAttempted = true;
                     SharedPreferences sp = getSharedPreferences(JellyfinApiClient.PREF_NAME, MODE_PRIVATE);
                     tvServerStatus.setText("重登中...");
+                    // 同一条链内重登, 链锁继续持有, 不重新开链
                     autoSilentLogin(
                             sp.getString(JellyfinApiClient.KEY_SERVER_URL, JellyfinApiClient.DEFAULT_SERVER_URL),
                             sp.getString(JellyfinApiClient.KEY_USERNAME, JellyfinApiClient.DEFAULT_USERNAME),
-                            sp.getString(JellyfinApiClient.KEY_PASSWORD, JellyfinApiClient.DEFAULT_PASSWORD));
+                            sp.getString(JellyfinApiClient.KEY_PASSWORD, JellyfinApiClient.DEFAULT_PASSWORD),
+                            interactive, epoch);
                 } else {
-                    tvServerStatus.setText("同步失败");
+                    // 重登也没救回来: 给出可诊断结论并终结, 让按钮恢复可点
+                    showConnectFailure(e, interactive);
+                    endRefreshChain(epoch, "fetch failed after relogin");
                 }
             }
-        });
+        }, interactive);
+    }
+
+    /**
+     * 把底层异常翻译成「为什么失败 + 下一步做什么」(2026-09-12 #4)。
+     * tvServerStatus 只有 160dp 宽、单行且 ellipsize=end, 所以那里只放极短结论,
+     * 具体指引一律走 Toast。
+     *
+     * @param toast 用户主动触发的链才弹 Toast; 冷启动失败不打扰车主
+     */
+    private void showConnectFailure(Exception e, boolean toast) {
+        int kind = JellyfinApiClient.classifyError(e);
+        String status;
+        String hint;
+        switch (kind) {
+            case JellyfinApiClient.ERR_TIMEOUT:
+                status = "连接超时";
+                hint = "连接超时, 请检查车机网络或服务器地址";
+                break;
+            case JellyfinApiClient.ERR_DNS:
+                status = "地址解析失败";
+                hint = "服务器地址无法解析, 请到设置里核对地址";
+                break;
+            case JellyfinApiClient.ERR_UNREACHABLE:
+                status = "网络不可达";
+                hint = "连不上服务器, 请检查车机网络或确认 Jellyfin 已启动";
+                break;
+            case JellyfinApiClient.ERR_TLS:
+                status = "证书校验失败";
+                hint = "HTTPS 证书校验失败, 请检查服务器证书链";
+                break;
+            case JellyfinApiClient.ERR_AUTH:
+                status = "登录失效";
+                hint = "账号或密码不正确, 请到设置里重新填写";
+                break;
+            case JellyfinApiClient.ERR_SERVER:
+                status = "服务器错误";
+                hint = "Jellyfin 服务器内部错误, 请稍后重试";
+                break;
+            case JellyfinApiClient.ERR_HTTP:
+                status = "接口异常";
+                hint = "服务器返回异常, 请到设置里核对地址是否为 Jellyfin 根地址";
+                break;
+            case JellyfinApiClient.ERR_PARSE:
+                status = "数据异常";
+                hint = "服务器返回的数据无法解析, 请确认 Jellyfin 版本兼容";
+                break;
+            default:
+                status = "同步失败";
+                hint = "同步失败: " + (e != null && e.getMessage() != null ? e.getMessage() : "未知错误");
+                break;
+        }
+        if (e instanceof JellyfinApiClient.ApiException) {
+            int code = ((JellyfinApiClient.ApiException) e).getHttpCode();
+            if (code > 0) hint = hint + " (HTTP " + code + ")";
+        }
+
+        tvServerStatus.setText(status);
+        Log.w(TAG, "connect failure surfaced: kind=" + kind + " status=" + status
+                + " raw=" + e);
+        CrashMonitor.breadcrumb("net", "connect failed kind=" + kind + " " + e);
+        if (toast) {
+            Toast.makeText(this, hint, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /**
+     * 车机整体断网时短路, 不必再去撞 OkHttp 的连接超时 (2026-09-12 #4)。
+     * 只用 API 1 就有的 getActiveNetworkInfo(), 不碰 API 21+/23+ 的
+     * NetworkCapabilities 那套, 以守住 minSdk 18。判定不出来时一律放行,
+     * 绝不能因为探测失败把正常车主挡在门外。
+     */
+    private boolean isNetworkAvailable() {
+        try {
+            ConnectivityManager cm =
+                    (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return true;
+            NetworkInfo info = cm.getActiveNetworkInfo();
+            return info != null && info.isConnected();
+        } catch (Exception e) {
+            Log.w(TAG, "isNetworkAvailable probe failed, assume online: " + e);
+            return true;
+        }
     }
 
     // ---------------- 播放回调与歌词先显后同 ----------------
@@ -1314,6 +1682,16 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         seekBarProgress.setProgress(0);
         tvCurrentTime.setText("00:00");
         updateSeekFill();
+        // 切歌即给出缓冲反馈 (2026-09-12 缓冲/预取): 起播门槛 / 加载期间先显「缓冲中…」,
+        // 后续 onBufferingUpdate 会刷新百分比并在稳定后隐藏
+        if (tvBuffering != null) {
+            tvBuffering.setText("缓冲中…");
+            tvBuffering.setVisibility(View.VISIBLE);
+        }
+        // 换曲后上一首的进度基准作废: 不清掉的话, 新一首第一个 tick 会被「同曲倒退」
+        // 防线误判 (id 相同但基准来自上一轮 generation 的情况尤其危险) (2026-09-12 #1)
+        lastProgressSaveTrackId = null;
+        lastProgressSaveMs = -1;
 
         // 歌曲不在当前列表时也要清掉旧高亮 (2026-09-09 实车反馈):
         // 否则切列表后旧 index 位置的歌被错误点亮, 与实际播放脱节
@@ -1353,6 +1731,25 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         saveCurrentState();
     }
 
+    /**
+     * 缓冲 % 上 UI (2026-09-12 缓冲/预取): 缓冲时显示「缓冲 43%」, 总长未知显示「缓冲中…」,
+     * 进入稳定播放 (buffering=false) 即隐藏。回调已在主线程, 直接操作控件。
+     */
+    @Override
+    public void onBufferingUpdate(int percent, boolean buffering) {
+        if (tvBuffering == null) return;
+        if (!buffering) {
+            if (tvBuffering.getVisibility() != View.GONE) {
+                tvBuffering.setVisibility(View.GONE);
+            }
+            return;
+        }
+        tvBuffering.setText(percent < 0 ? "缓冲中…" : "缓冲 " + percent + "%");
+        if (tvBuffering.getVisibility() != View.VISIBLE) {
+            tvBuffering.setVisibility(View.VISIBLE);
+        }
+    }
+
     @Override
     public void onProgressUpdate(int currentMs, int totalMs) {
         if (!isUserSeeking) {
@@ -1377,29 +1774,86 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
         // 5秒节流异步写入进度
         long now = System.currentTimeMillis();
-        if (now - lastProgressSaveTime > 5000) {
+        if (now - lastProgressSaveTime > PlaybackStateMachine.PROGRESS_SAVE_THROTTLE_MS) {
             lastProgressSaveTime = now;
             if (isBound && playerService != null && playerService.isPlaying()) {
                 SongItem current = playerService.getCurrentSong();
                 if (current != null) {
-                    SongDao.getInstance(this).saveSongProgress(current.getId(),
-                            sanitizeProgressForSave(current, currentMs));
+                    saveProgressForSong(current, totalMs, currentMs, "tick");
                 }
             }
         }
     }
 
     /**
-     * 进度落库前治理 (2026-09-09 实车定位): seek 越界/异常回调可能把 position 推过
-     * 歌曲实际时长, 脏断点入库后点歌即「进度条瞬跳末尾 + 假 COMPLETED 乱切歌」。
-     * 贴近末尾 (>= 时长-2s) 视为播完存 0, 其余夹到 [0, 时长) 内。
+     * 进度落库前的治理 (2026-09-09 起, 2026-09-12 #1 加强): seek 越界/异常回调/切歌竞态
+     * 都可能把接近曲尾甚至等于时长的脏值写进 song_progress, 下次点这首歌就直接被 seek 到
+     * 曲尾 (观感: 切歌后跳到末尾, 几秒后又 COMPLETED 跳下一首)。
+     *
+     * 两道防线:
+     *  1) 清洗按「播放器真实时长优先, Jellyfin 元数据兜底」判定贴尾 —— 元数据缺失或比
+     *     转码流偏大时, 只用元数据判定会放过脏值;
+     *  2) 同一首歌的进度明显倒退则不写 —— 切歌竞态里可能读到上一首贴尾的 position 却挂在
+     *     新一首的 id 上, 或把已存的大断点覆盖成小值。用户手动 seek 造成的倒退是合法的,
+     *     由 onStopTrackingTouch 清空追踪器放行。
+     *
+     * @param realDurationMs 播放器上报的真实时长, <=0 表示未知
      */
-    private static int sanitizeProgressForSave(SongItem song, int progressMs) {
-        if (progressMs <= 0) return 0;
-        long durMs = song != null ? song.getDurationMs() : 0L;
-        if (durMs <= 0) return progressMs;
-        if (progressMs >= durMs - 2000L) return 0;
-        return progressMs;
+    private void saveProgressForSong(SongItem song, int realDurationMs, int progressMs,
+                                     String reason) {
+        if (song == null || song.getId() == null) return;
+        int cleanMs = sanitizeProgressForSave(song, realDurationMs, progressMs);
+        boolean backward = lastProgressSaveTrackId != null
+                && lastProgressSaveTrackId.equals(song.getId())
+                && lastProgressSaveMs > 0 && cleanMs > 0
+                && cleanMs < lastProgressSaveMs - PROGRESS_BACKWARD_TOLERANCE_MS;
+        if (backward) {
+            Log.w(TAG, "Skip backward progress save (" + reason + "): id=" + song.getId()
+                    + " name=" + song.getName() + " saved=" + cleanMs
+                    + "ms lastSaved=" + lastProgressSaveMs
+                    + "ms metaDuration=" + song.getDurationMs()
+                    + "ms realDuration=" + realDurationMs + "ms decision=skip-stale-tick");
+            return;
+        }
+        if (cleanMs != progressMs) {
+            Log.i(TAG, "Sanitized progress before save (" + reason + "): id=" + song.getId()
+                    + " name=" + song.getName() + " saved=" + progressMs + "->" + cleanMs
+                    + "ms metaDuration=" + song.getDurationMs()
+                    + "ms realDuration=" + realDurationMs + "ms decision=progress->" + cleanMs);
+        }
+        SongDao.getInstance(this).saveSongProgress(song.getId(), cleanMs);
+        lastProgressSaveTrackId = song.getId();
+        lastProgressSaveMs = cleanMs;
+    }
+
+    /**
+     * 贴尾/越界断点清洗, 判定逻辑收口在 {@link PlaybackStateMachine#sanitizeProgressForSave}
+     * 以便与起播侧共用同一阈值并做单测 (2026-09-12 #1)。
+     */
+    private static int sanitizeProgressForSave(SongItem song, int realDurationMs, int progressMs) {
+        long metaMs = song != null ? song.getDurationMs() : 0L;
+        return PlaybackStateMachine.sanitizeProgressForSave(metaMs, realDurationMs, progressMs);
+    }
+
+    /**
+     * 从 song_progress 取出的断点在交给播放服务前先清洗一次 (2026-09-12 #1)。
+     *
+     * 点歌 / 冷启动自动续播三条路径共用。此刻还没有播放器实例, 真实时长未知, 只能按
+     * 这首歌自己的元数据时长判定; 服务侧 sanitizeSeekMs 会再按元数据钳一次,
+     * prepared 回调再按播放器真实时长钳一次, 起播后还有 tick 兜底 —— 这一道的价值是
+     * 让「贴尾断点被丢弃」的 decision 在 UI 日志里就能看到, 便于实车对时间线。
+     */
+    private int resumePointForPlayback(SongItem song, int savedMs, String reason) {
+        int cleanMs = sanitizeProgressForSave(song, 0, savedMs);
+        if (cleanMs != savedMs) {
+            Log.w(TAG, "Drop end-of-track resume point before playback (" + reason + "): id="
+                    + (song != null ? song.getId() : null)
+                    + " name=" + (song != null ? song.getName() : null)
+                    + " saved=" + savedMs + "->" + cleanMs
+                    + "ms metaDuration=" + (song != null ? song.getDurationMs() : 0L)
+                    + "ms realDuration=unknown decision=replay-from-start");
+        }
+        return cleanMs;
     }
 
     @Override
@@ -1467,7 +1921,18 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             SongItem current = playerService.getCurrentSong();
             if (current != null) {
                 saveState(KEY_LAST_SONG_ID, current.getId());
-                SongDao.getInstance(this).saveSongProgress(current.getId(), playerService.getCurrentPositionMs());
+                // 与 5s 节流落库走同一套治理 (2026-09-10), 并按播放器真实时长判定贴尾 (#1)
+                int positionMs = playerService.getCurrentPositionMs();
+                if (positionMs > 0 || playerService.isPlaying()) {
+                    saveProgressForSong(current, playerService.getCurrentRealDurationMs(),
+                            positionMs, "state");
+                } else {
+                    // 起播中/尚未出声: position 恒为 0, 落库会把正要用的断点抹成 0
+                    // (点歌 → onSongChanged → saveCurrentState 正好踩这条)。真播完的清零
+                    // 已由服务侧 onCompletion 负责, 这里跳过不会留下脏断点。
+                    Log.i(TAG, "Skip progress save before playback starts: id=" + current.getId()
+                            + " name=" + current.getName() + " decision=keep-existing");
+                }
             }
             CategoryItem currentCat = categoryAdapter.getSelectedCategory();
             if (currentCat != null) {
@@ -1527,6 +1992,62 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         finish();
     }
 
+    /**
+     * 车机「静音键」= 暂停/播放 (2026-09-11 实车 #6)。
+     *
+     * 为什么用 dispatchKeyEvent 而不是 onKeyDown: 音量/静音类按键在 AOSP 上由
+     * PhoneWindowManager 在入队前就截走交给 AudioService, 根本走不到 Activity.onKeyDown;
+     * dispatchKeyEvent 是窗口拿到 KeyEvent 的第一站, 只有这里有机会拦住 KEYCODE_VOLUME_MUTE
+     * 并阻止系统继续处理 (否则车机会在暂停的同时把媒体流也静音)。
+     * 只拦静音键, VOLUME_UP/DOWN 一律原样放行 —— App 绝不接管音量调节 (#5)。
+     * 刻意不含 KEYCODE_MEDIA_PLAY_PAUSE: 那条路由 RemoteControlClient/MediaButtonReceiver
+     * 处理 (方向盘键现网可用), 窗口里再拦一次有双重触发变成「暂停又播放」的风险。
+     * App 在后台/无焦点时这里收不到事件, 只能靠 MediaButtonReceiver 的媒体键通路,
+     * 静音键是否会产生 MEDIA_BUTTON 广播取决于 ROM (局限见交付说明)。
+     */
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event == null) {
+            return super.dispatchKeyEvent(event);
+        }
+        int keyCode = event.getKeyCode();
+        if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+            // 实车抓真实 keyCode: 车厂可能用自定义键值, 这行能把所有物理按键打出来
+            // (adb logcat -s MainActivity | grep "key down")
+            Log.i(TAG, "Activity key down: keyCode=" + keyCode + " scanCode=" + event.getScanCode());
+        }
+        if (MediaButtonReceiver.isMuteKey(keyCode)) {
+            if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                Log.i(TAG, "Mute key intercepted as pause toggle: keyCode=" + keyCode);
+                handleMuteKeyPauseToggle();
+            }
+            // DOWN 与 UP 都要吞掉, 否则系统会收到不成对的 UP 而补做静音动作
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    /** 静音键 → 暂停/播放切换。服务未绑定时退回 startService, 与媒体键走同一条 action。 */
+    private void handleMuteKeyPauseToggle() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastMuteKeyToggleAtMs < MUTE_KEY_TOGGLE_DEBOUNCE_MS) {
+            Log.i(TAG, "Mute key toggle debounced (" + (now - lastMuteKeyToggleAtMs) + "ms)");
+            return;
+        }
+        lastMuteKeyToggleAtMs = now;
+        if (isBound && playerService != null) {
+            playerService.togglePause();
+            return;
+        }
+        Intent intent = new Intent(this, AudioPlayerService.class);
+        intent.setAction(MediaButtonReceiver.ACTION_TOGGLE_PAUSE);
+        try {
+            startService(intent);
+        } catch (Exception e) {
+            Log.w(TAG, "Mute key toggle failed, service not startable", e);
+        }
+    }
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
@@ -1545,6 +2066,11 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     @Override
     protected void onDestroy() {
         saveCurrentState();
+        // 摘掉刷新看门狗: 否则它会在 Activity 销毁后触发, 往死掉的 Context 上弹 Toast
+        mainHandler.removeCallbacks(refreshWatchdog);
+        // 远程升级收尾 (2026-09-12): 停在飞的清单请求与 APK 下载、摘看门狗、关对话框。
+        // 不收的话下载会在后台继续吃车机流量, 回调还会往已销毁的 Activity 上弹 Toast。
+        cancelUpdateWork();
         if (debugRouteReceiver != null) {
             try { unregisterReceiver(debugRouteReceiver); } catch (Exception ignored) {}
             debugRouteReceiver = null;
@@ -1604,5 +2130,438 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         } catch (Exception e) {
             Log.w(TAG, "debug route receiver register failed", e);
         }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  远程升级 OTA (2026-09-12)
+    //
+    //  入口在设置页「关于与升级」分块: 手动「检查更新」按钮 + 「启动时自动检查」开关。
+    //  动线: 拉版本清单 → 比对 versionCode → 带进度下载 APK → SHA-256/大小双校验 →
+    //        拉起系统安装界面, 由车主亲手点「安装」。车机没有静默安装权限, 也不该有。
+    //
+    //  三条硬要求 (与本项目刷新链的验收标准一致):
+    //   1. 点了必有反应: 点击瞬间就改按钮文案 + 禁用 + Toast, 并挂 45s 看门狗,
+    //      万一回调彻底没回来 (ROM 冻结进程/派发异常) 也不会把按钮永久卡死;
+    //   2. 校验失败绝不安装: 交给 UpdateInstaller 的文件必然已通过 sha256,
+    //      校验失败时 ApkDownloader 已把文件删掉, 这里只负责把原因讲给车主;
+    //   3. 绝不阻塞主线程: 网络全在 OkHttp 派发线程, 回调经 mainHandler 切回来。
+    // ------------------------------------------------------------------ //
+
+    private UpdateChecker updateChecker;
+    private ApkDownloader apkDownloader;
+    /** 更新对话框: 同一个实例承载「发现新版 / 下载中 / 下载失败可重试」三态 */
+    private Dialog updateDialog;
+    private Button btnSettingCheckUpdate;
+    private Button btnSettingAutoUpdateValue;
+    /** 检查是否在飞: 与 isRefreshing 同理, 进行中再点一律合并, 不叠请求 */
+    private boolean updateCheckInFlight = false;
+    /** 本进程是否已排过自动检查: 防止配置变更重建 Activity 时重复排队 */
+    private boolean autoUpdateCheckScheduled = false;
+
+    /**
+     * 自动检查的延迟。冷启动这条线上依次是: 鉴权 → 拉媒体库(大库可能几十秒) →
+     * 崩溃报告上传(CrashMonitor 的 12s)。更新检查排在最后, 免得三方一起抢车机
+     * 那条本就窄的上行带宽 —— 清单只有几百字节, 晚 20 秒毫无体感差别。
+     */
+    private static final long AUTO_UPDATE_CHECK_DELAY_MS = 20_000L;
+    /** 检查看门狗: 清单请求最坏 = 8s 连接 + 12s 读, 45s 富余 (与刷新链口径一致) */
+    private static final long UPDATE_CHECK_WATCHDOG_MS = 45_000L;
+
+    private final Runnable updateCheckWatchdog = new Runnable() {
+        @Override
+        public void run() {
+            if (!updateCheckInFlight) return;
+            Log.w(TAG, "update check watchdog fired, force unlock");
+            CrashMonitor.breadcrumb("update", "check watchdog fired");
+            settleUpdateCheck();
+            Toast.makeText(MainActivity.this, "检查更新超时, 请确认车机网络后重试",
+                    Toast.LENGTH_LONG).show();
+        }
+    };
+
+    private final Runnable autoUpdateCheckRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (isFinishing()) return;
+            Log.i(TAG, "auto update check fired");
+            checkForUpdate(true);
+        }
+    };
+
+    private UpdateChecker updateChecker() {
+        if (updateChecker == null) {
+            updateChecker = new UpdateChecker(getApplicationContext());
+        }
+        return updateChecker;
+    }
+
+    private ApkDownloader apkDownloader() {
+        if (apkDownloader == null) {
+            apkDownloader = new ApkDownloader(getApplicationContext());
+        }
+        return apkDownloader;
+    }
+
+    /** 设置页「关于与升级」两行的挂载 (由 setupSettingsPageListeners 调用) */
+    private void setupUpdateSection() {
+        if (layoutSettingsPage == null) return;
+
+        View rowCheck = layoutSettingsPage.findViewById(R.id.rowSettingCheckUpdate);
+        btnSettingCheckUpdate = layoutSettingsPage.findViewById(R.id.btnSettingCheckUpdate);
+        View rowAuto = layoutSettingsPage.findViewById(R.id.rowSettingAutoUpdate);
+        btnSettingAutoUpdateValue = layoutSettingsPage.findViewById(R.id.btnSettingAutoUpdateValue);
+        TextView tvVersion = layoutSettingsPage.findViewById(R.id.tvSettingAppVersion);
+
+        if (tvVersion != null) {
+            tvVersion.setText("当前版本 " + UpdateChecker.currentVersionName(this)
+                    + " (内部号 " + UpdateChecker.currentVersionCode(this) + ")");
+        }
+        updateAutoCheckLabel();
+
+        // 与引擎开关同理: 整行和右侧药丸都挂同一个监听。药丸是 Button, 默认 clickable=true,
+        // 只挂行不挂药丸的话, 落在药丸上的触点会被它自己吞掉 —— 那正是最显眼的可点目标。
+        final View.OnClickListener checkListener = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                CrashMonitor.breadcrumb("update", "check update clicked");
+                checkForUpdate(false);
+            }
+        };
+        if (rowCheck != null) rowCheck.setOnClickListener(checkListener);
+        if (btnSettingCheckUpdate != null) btnSettingCheckUpdate.setOnClickListener(checkListener);
+
+        final View.OnClickListener autoListener = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                toggleAutoUpdateCheck();
+            }
+        };
+        if (rowAuto != null) rowAuto.setOnClickListener(autoListener);
+        if (btnSettingAutoUpdateValue != null) btnSettingAutoUpdateValue.setOnClickListener(autoListener);
+
+        // 顺手清掉上次被打断的半截下载 (后台线程执行, 不碰主线程)
+        apkDownloader().purgePartialDownloads();
+    }
+
+    /** 「启动时自动检查更新」开关: 翻转偏好 → 落盘 → 改药丸文案 → Toast */
+    private void toggleAutoUpdateCheck() {
+        SharedPreferences sp = getSharedPreferences(UpdateChecker.PREF_NAME, MODE_PRIVATE);
+        boolean next = !sp.getBoolean(UpdateChecker.PREF_KEY_AUTO_CHECK,
+                UpdateChecker.DEFAULT_AUTO_CHECK);
+        sp.edit().putBoolean(UpdateChecker.PREF_KEY_AUTO_CHECK, next).apply();
+        updateAutoCheckLabel();
+        Log.i(TAG, "auto update check pref -> " + next);
+        Toast.makeText(this, next
+                ? "已开启: 每次启动约 20 秒后静默检查, 有新版本才提示"
+                : "已关闭启动时自动检查更新", Toast.LENGTH_LONG).show();
+    }
+
+    private void updateAutoCheckLabel() {
+        if (btnSettingAutoUpdateValue == null) return;
+        boolean on = getSharedPreferences(UpdateChecker.PREF_NAME, MODE_PRIVATE)
+                .getBoolean(UpdateChecker.PREF_KEY_AUTO_CHECK, UpdateChecker.DEFAULT_AUTO_CHECK);
+        btnSettingAutoUpdateValue.setText(on ? "开" : "关");
+    }
+
+    /** 冷启动后排一次静默检查 (由 onCreate 调用) */
+    private void scheduleAutoUpdateCheck() {
+        boolean enabled = getSharedPreferences(UpdateChecker.PREF_NAME, MODE_PRIVATE)
+                .getBoolean(UpdateChecker.PREF_KEY_AUTO_CHECK, UpdateChecker.DEFAULT_AUTO_CHECK);
+        if (!enabled) {
+            Log.i(TAG, "auto update check disabled by preference");
+            return;
+        }
+        if (autoUpdateCheckScheduled) return;
+        autoUpdateCheckScheduled = true;
+        mainHandler.postDelayed(autoUpdateCheckRunnable, AUTO_UPDATE_CHECK_DELAY_MS);
+        Log.i(TAG, "auto update check scheduled in " + AUTO_UPDATE_CHECK_DELAY_MS + "ms");
+    }
+
+    /**
+     * 检查更新。
+     *
+     * @param silent true = 启动时自动检查: 失败与「已是最新」都不出声, 只有真有新版才弹框,
+     *               不打扰正在开车的人; false = 车主手点, 任何结果都必须给可见反馈。
+     */
+    private void checkForUpdate(final boolean silent) {
+        if (updateCheckInFlight) {
+            Log.i(TAG, "update check clicked while in flight, merged");
+            if (!silent) {
+                Toast.makeText(this, "正在检查更新, 请稍候…", Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
+        if (!isNetworkAvailable()) {
+            // 整体断网时不必再去撞 8s 连接超时, 立刻给出可诊断结论
+            Log.w(TAG, "update check blocked: no active network");
+            CrashMonitor.breadcrumb("update", "check blocked: no active network");
+            if (!silent) {
+                Toast.makeText(this, "车机当前无网络连接, 无法检查更新", Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+
+        updateCheckInFlight = true;
+        setCheckUpdateBusy(true);
+        if (!silent) {
+            // 点击瞬间就先给一句反馈: 清单请求最坏要 20 秒, 静默等待就是「点了没反应」
+            Toast.makeText(this, "正在检查更新…", Toast.LENGTH_SHORT).show();
+        }
+
+        final int currentVc = UpdateChecker.currentVersionCode(this);
+        final String currentVn = UpdateChecker.currentVersionName(this);
+        Log.i(TAG, "check update begin silent=" + silent + " currentVc=" + currentVc
+                + " url=" + UpdateChecker.manifestUrlOrDefault());
+        CrashMonitor.breadcrumb("update", "check begin silent=" + silent + " vc=" + currentVc);
+        mainHandler.removeCallbacks(updateCheckWatchdog);
+        mainHandler.postDelayed(updateCheckWatchdog, UPDATE_CHECK_WATCHDOG_MS);
+
+        updateChecker().check(UpdateChecker.manifestUrlOrDefault(),
+                new UpdateChecker.ResultCallback() {
+            @Override
+            public void onManifest(UpdateManifest manifest) {
+                settleUpdateCheck();
+                if (isFinishing()) return;
+                boolean newer = UpdateChecker.isUpdateAvailable(manifest, currentVc);
+                boolean forced = UpdateChecker.shouldForceUpdate(manifest, currentVc);
+                Log.i(TAG, "manifest vc=" + manifest.getVersionCode()
+                        + " vn=" + manifest.getVersionName() + " current=" + currentVc
+                        + " newer=" + newer + " forced=" + forced);
+                CrashMonitor.breadcrumb("update", "manifest vc=" + manifest.getVersionCode()
+                        + " newer=" + newer + " forced=" + forced);
+                if (newer || forced) {
+                    showUpdateDialog(manifest, currentVn, currentVc, forced);
+                } else if (!silent) {
+                    Toast.makeText(MainActivity.this, "已是最新版本 (" + currentVn + ")",
+                            Toast.LENGTH_LONG).show();
+                }
+            }
+
+            @Override
+            public void onError(Exception e) {
+                settleUpdateCheck();
+                String msg = (e == null || e.getMessage() == null) ? "检查更新失败" : e.getMessage();
+                Log.w(TAG, "check update failed silent=" + silent + ": " + msg);
+                CrashMonitor.breadcrumb("update", "check failed: " + msg);
+                if (!silent && !isFinishing()) {
+                    Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+    }
+
+    /** 检查终结 (成功/失败/看门狗): 解锁按钮并撤看门狗 */
+    private void settleUpdateCheck() {
+        updateCheckInFlight = false;
+        mainHandler.removeCallbacks(updateCheckWatchdog);
+        setCheckUpdateBusy(false);
+    }
+
+    private void setCheckUpdateBusy(boolean busy) {
+        Button btn = resolveCheckUpdateButton();
+        if (btn == null) return;
+        // bg_soft_pill 没有 state_enabled=false 的图样, 光 setEnabled(false) 车主看不出任何
+        // 区别, 必须同时改文案 —— 与刷新按钮同一个教训。
+        btn.setText(busy ? "检查中" : "检查更新");
+        btn.setEnabled(!busy);
+    }
+
+    /** 自动检查可能先于车主打开设置页触发, 此时按钮还没被 setupUpdateSection 赋值 */
+    private Button resolveCheckUpdateButton() {
+        if (btnSettingCheckUpdate == null && layoutSettingsPage != null) {
+            btnSettingCheckUpdate = layoutSettingsPage.findViewById(R.id.btnSettingCheckUpdate);
+        }
+        return btnSettingCheckUpdate;
+    }
+
+    /**
+     * 弹出更新对话框。三态共用一个布局 (dialog_update): 车机上从「有新版」到「装完」是
+     * 一条不该断的动线, 中途换弹窗会让车主以为要从头再来一遍。
+     */
+    private void showUpdateDialog(final UpdateManifest manifest, String currentVn,
+                                  int currentVc, boolean forced) {
+        if (isFinishing()) return;
+        // 自动检查与手动点击可能前后脚都命中: 只保留一个对话框
+        dismissUpdateDialog();
+
+        final Dialog dialog = new Dialog(this);
+        dialog.setContentView(R.layout.dialog_update);
+
+        TextView tvTitle = dialog.findViewById(R.id.tvUpdateTitle);
+        TextView tvVersion = dialog.findViewById(R.id.tvUpdateVersion);
+        TextView tvSize = dialog.findViewById(R.id.tvUpdateSize);
+        TextView tvWarn = dialog.findViewById(R.id.tvUpdateWarn);
+        TextView tvNotes = dialog.findViewById(R.id.tvUpdateNotes);
+        final ProgressBar progressBar = dialog.findViewById(R.id.progressUpdate);
+        final TextView tvProgress = dialog.findViewById(R.id.tvUpdateProgress);
+        final Button btnAction = dialog.findViewById(R.id.btnUpdateAction);
+        final Button btnLater = dialog.findViewById(R.id.btnUpdateLater);
+
+        tvTitle.setText(forced ? "需要更新" : "发现新版本");
+        String newVn = manifest.getVersionName();
+        tvVersion.setText(currentVn + " (" + currentVc + ")  →  "
+                + (newVn == null || newVn.length() == 0 ? "新版本" : newVn)
+                + " (" + manifest.getVersionCode() + ")");
+        tvSize.setText("安装包 " + ApkDownloader.humanSize(manifest.getSizeBytes())
+                + " · 下载后自动校验 SHA-256");
+        if (forced) {
+            // 措辞更强, 但依然由车主手动确认安装: 车机上没有静默安装这条路
+            tvWarn.setVisibility(View.VISIBLE);
+            tvWarn.setText(manifest.isMandatory()
+                    ? "服务端标记为必须更新, 建议立即安装"
+                    : "当前版本已低于服务端要求的最低版本, 需要更新后才能正常使用");
+        }
+        String notes = manifest.getNotes();
+        if (notes == null || notes.trim().length() == 0) {
+            tvNotes.setVisibility(View.GONE);
+        } else {
+            tvNotes.setText("更新说明:\n" + notes.trim());
+        }
+
+        progressBar.setVisibility(View.GONE);
+        progressBar.setProgress(0);
+        tvProgress.setVisibility(View.GONE);
+        btnAction.setText("立即下载");
+        btnAction.setEnabled(true);
+        btnLater.setText("稍后");
+        btnLater.setEnabled(true);
+
+        btnLater.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dialog.dismiss();
+            }
+        });
+        btnAction.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startUpdateDownload(manifest, dialog, progressBar, tvProgress, btnAction, btnLater);
+            }
+        });
+        // 关窗即表示「现在不装」: 顺手停掉在飞的下载, 别让它在后台白吃车机流量
+        dialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(DialogInterface d) {
+                if (updateDialog == d) updateDialog = null;
+                if (apkDownloader != null && apkDownloader.isRunning()) {
+                    Log.i(TAG, "update dialog dismissed while downloading, cancelling");
+                    apkDownloader.cancel();
+                }
+            }
+        });
+
+        updateDialog = dialog;
+        dialog.show();
+        Log.i(TAG, "update dialog shown: " + manifest.describe());
+    }
+
+    /** 开始/重试下载。进度与结果回调都由 ApkDownloader 切到主线程后才到这里 */
+    private void startUpdateDownload(final UpdateManifest manifest, final Dialog dialog,
+                                     final ProgressBar progressBar, final TextView tvProgress,
+                                     final Button btnAction, final Button btnLater) {
+        if (apkDownloader().isRunning()) {
+            Toast.makeText(this, "安装包正在下载中, 请稍候", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        // 点击瞬间的可见反馈: 按钮改文案并禁用, 进度条立刻出现并停在 0%
+        btnAction.setText("下载中");
+        btnAction.setEnabled(false);
+        btnLater.setEnabled(false);
+        progressBar.setVisibility(View.VISIBLE);
+        progressBar.setProgress(0);
+        tvProgress.setVisibility(View.VISIBLE);
+        tvProgress.setTextColor(Color.parseColor("#30DDC2"));
+        tvProgress.setText("正在下载 0%");
+        Log.i(TAG, "apk download requested url=" + manifest.getApkUrl()
+                + " size=" + manifest.getSizeBytes());
+        CrashMonitor.breadcrumb("update", "download begin " + manifest.getFileName());
+
+        apkDownloader().download(manifest, new ApkDownloader.Listener() {
+            @Override
+            public void onProgress(long downloadedBytes, long totalBytes) {
+                if (!isUiAlive(dialog)) return;
+                int percent = totalBytes > 0
+                        ? (int) Math.min(100L, downloadedBytes * 100L / totalBytes) : 0;
+                progressBar.setProgress(percent);
+                tvProgress.setText(totalBytes > 0
+                        ? "正在下载 " + percent + "%  (" + ApkDownloader.humanSize(downloadedBytes)
+                          + " / " + ApkDownloader.humanSize(totalBytes) + ")"
+                        : "正在下载 " + ApkDownloader.humanSize(downloadedBytes));
+            }
+
+            @Override
+            public void onSuccess(File apkFile) {
+                Log.i(TAG, "apk ready, launching system installer: " + apkFile);
+                CrashMonitor.breadcrumb("update", "apk verified " + apkFile.length() + "B");
+                if (!isUiAlive(dialog)) {
+                    // 车主已关窗: 包留在 cache 里, 下次点「立即下载」会重新校验后再拉起
+                    Log.w(TAG, "apk ready but dialog gone, installer not launched");
+                    return;
+                }
+                progressBar.setProgress(100);
+                tvProgress.setText("下载完成, SHA-256 校验通过, 正在打开安装界面…");
+                int result = UpdateInstaller.install(MainActivity.this, apkFile);
+                Log.i(TAG, "installer result=" + result);
+                CrashMonitor.breadcrumb("update", "installer result=" + result);
+                // 先收掉自己的对话框再提示: 系统安装界面盖上来时不该还压着我们的弹窗
+                dialog.dismiss();
+                Toast.makeText(MainActivity.this, UpdateInstaller.describeResult(result),
+                        Toast.LENGTH_LONG).show();
+            }
+
+            @Override
+            public void onError(Exception e) {
+                if (e instanceof ApkDownloader.CancelledException) {
+                    Log.i(TAG, "apk download cancelled, ui left untouched");
+                    return;
+                }
+                String msg = (e == null || e.getMessage() == null) ? "下载失败" : e.getMessage();
+                Log.w(TAG, "apk download failed: " + msg);
+                CrashMonitor.breadcrumb("update", "download failed: " + msg);
+                if (!isUiAlive(dialog)) {
+                    if (!isFinishing()) {
+                        Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                    }
+                    return;
+                }
+                // 失败留在同一个对话框里: 原因写清楚, 按钮变「重试」, 车主可以直接再来一次。
+                // 校验失败的包 ApkDownloader 已经删掉了, 这里绝不会再碰安装器。
+                progressBar.setVisibility(View.GONE);
+                tvProgress.setTextColor(Color.parseColor("#F3B34C"));
+                tvProgress.setText(msg);
+                btnAction.setText("重试");
+                btnAction.setEnabled(true);
+                btnLater.setEnabled(true);
+                btnLater.setText("取消");
+            }
+        });
+    }
+
+    /** 对话框还能不能安全地改: Activity 将死或窗已关时一律不动 UI */
+    private boolean isUiAlive(Dialog dialog) {
+        return !isFinishing() && dialog != null && dialog.isShowing();
+    }
+
+    private void dismissUpdateDialog() {
+        Dialog d = updateDialog;
+        updateDialog = null;
+        if (d != null && d.isShowing()) {
+            try {
+                d.dismiss();
+            } catch (Throwable ignored) {}
+        }
+    }
+
+    /** 退出收尾 (由 onDestroy 调用) */
+    private void cancelUpdateWork() {
+        mainHandler.removeCallbacks(updateCheckWatchdog);
+        mainHandler.removeCallbacks(autoUpdateCheckRunnable);
+        if (updateChecker != null) {
+            updateChecker.cancel();
+        }
+        if (apkDownloader != null) {
+            apkDownloader.cancel();
+        }
+        dismissUpdateDialog();
     }
 }

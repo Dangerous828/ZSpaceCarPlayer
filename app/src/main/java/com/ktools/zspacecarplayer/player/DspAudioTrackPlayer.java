@@ -17,6 +17,7 @@ import com.ktools.zspacecarplayer.crash.CrashMonitor;
 import com.ktools.zspacecarplayer.dsp.NativeDsp;
 import com.ktools.zspacecarplayer.dsp.NativeLosslessDecoder;
 import com.ktools.zspacecarplayer.player.stream.BufferedHttpSource;
+import com.ktools.zspacecarplayer.player.stream.BufferingPolicy;
 import com.ktools.zspacecarplayer.player.stream.HttpProxyServer;
 
 import java.io.File;
@@ -54,6 +55,12 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     private volatile boolean isPlaying = false;
     private volatile boolean isPrepared = false;
     private volatile boolean isReleased = false;
+    /**
+     * prefill 门槛等待期间的外部中止标志（2026-09-12 缓冲/预取）。
+     * reset()/release() 置位，doPrepare() 起始清零；门槛轮询每 {@link BufferingPolicy#PREFILL_POLL_MS}
+     * 检查一次，命中即让位切歌 / 释放，把解码后台线程的占用收敛到一个轮询周期内。
+     */
+    private volatile boolean abortPrepare = false;
 
     private volatile int currentDurationMs = 0;
     private volatile long currentPresentationTimeUs = 0;
@@ -130,6 +137,7 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         synchronized (stateLock) {
             if (isReleased) return;
         }
+        abortPrepare = false; // 新一轮 prepare：清除上一首遗留的门槛中止标志
 
         // 这条同时是解码线程的存活证明：报告里有 prepareAsync 却没有 doPrepare begin，
         // 说明解码线程被上一次 open 占死，消息根本没排上队
@@ -368,6 +376,15 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     }
 
     private void onPrepareSuccess() {
+        // 起播预缓冲门槛（2026-09-12 缓冲/预取）：出声前先让环形缓冲建立足够领先量，
+        // 消除「首字节一到就 play、开头几秒最易被抽干」的卡顿。运行在解码后台线程，
+        // 绝不阻塞主线程 / UI；有上限的等待，弱网超时也起播。
+        awaitPrefillGate();
+        if (abortPrepare || isReleased) {
+            // 门槛等待期间发生切歌 / 释放：放弃本次起播，交由后续 MSG_TEARDOWN / 新 prepare 收尾
+            Log.i(TAG, "prepare aborted during prefill gate, skip start");
+            return;
+        }
         synchronized (stateLock) {
             isPrepared = true;
         }
@@ -377,6 +394,80 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             public void run() {
                 if (eventListener != null) {
                     eventListener.onPrepared(currentDurationMs);
+                }
+            }
+        });
+    }
+
+    /**
+     * prefill 门槛：轮询当前曲环形缓冲，直到达到起播领先量或超时。
+     *
+     * 字节 / 秒双判据由 {@link BufferingPolicy} 裁定；门槛期间以 ≥{@link BufferingPolicy#PREFILL_REPORT_INTERVAL_MS}
+     * 的节流向上层上报「缓冲中 + 百分比」，达标 / 超时各留一行日志便于实车抓取。
+     * 本地文件（非 http）没有缓冲窗口，直接放行。
+     */
+    private void awaitPrefillGate() {
+        final String path = dataSourcePath;
+        if (path == null) return;
+        if (!path.startsWith("http://") && !path.startsWith("https://")) return; // 本地曲库无需门槛
+        final String realUrl = HttpProxyServer.extractRemoteUrl(path);
+        if (realUrl == null || realUrl.length() == 0) return;
+        final HttpProxyServer proxy = HttpProxyServer.getInstance();
+
+        final long startMs = SystemClock.elapsedRealtime();
+        Log.i(TAG, "prefill gate begin: url=" + realUrl);
+        long lastReportMs = 0L;
+        int lastReportedPercent = Integer.MIN_VALUE;
+        while (!abortPrepare && !isReleased) {
+            long bufferedBytes = proxy.getBufferedBytes(realUrl);
+            int percent = proxy.getBufferedPercent(realUrl);
+            boolean totalKnown = percent >= 0;
+            long contentLength = proxy.getContentLength(realUrl);
+            int capacity = proxy.getWindowCapacity(realUrl);
+            if (capacity <= 0) capacity = BufferedHttpSource.DEFAULT_CAPACITY_BYTES;
+            long target = BufferingPolicy.prefillTargetBytes(capacity, contentLength, currentDurationMs);
+
+            if (BufferingPolicy.shouldPrefillStart(bufferedBytes, percent, totalKnown, target)) {
+                Log.i(TAG, "prefill gate reached: buffered=" + bufferedBytes + "B target=" + target
+                        + "B percent=" + percent + " waited="
+                        + (SystemClock.elapsedRealtime() - startMs) + "ms");
+                reportBuffering(percent, false); // 门槛达标：缓冲指示转「就绪」
+                return;
+            }
+            long waited = SystemClock.elapsedRealtime() - startMs;
+            if (waited >= BufferingPolicy.PREFILL_MAX_WAIT_MS) {
+                Log.w(TAG, "prefill gate timeout after " + waited + "ms, start anyway: buffered="
+                        + bufferedBytes + "B target=" + target + "B percent=" + percent
+                        + " (weak link, do not block forever)");
+                reportBuffering(percent, true);
+                return;
+            }
+            // 节流上报，避免刷屏抖动
+            long now = SystemClock.elapsedRealtime();
+            if (percent != lastReportedPercent
+                    || now - lastReportMs >= BufferingPolicy.PREFILL_REPORT_INTERVAL_MS) {
+                reportBuffering(percent, true);
+                lastReportMs = now;
+                lastReportedPercent = percent;
+            }
+            // 可中断短睡：本方法在解码后台线程，绝不 Thread.sleep 卡 UI；被打断即让位
+            try {
+                Thread.sleep(BufferingPolicy.PREFILL_POLL_MS);
+            } catch (InterruptedException e) {
+                return;
+            }
+        }
+        Log.i(TAG, "prefill gate aborted (song switch / release) after "
+                + (SystemClock.elapsedRealtime() - startMs) + "ms");
+    }
+
+    /** 缓冲进度上报，统一切回主线程回调（与其它事件一致，服务侧再转发给 UI）。 */
+    private void reportBuffering(final int percent, final boolean buffering) {
+        mainHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (eventListener != null) {
+                    eventListener.onBufferingUpdate(percent, buffering);
                 }
             }
         });
@@ -833,6 +924,7 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             isPlaying = false;
             isPrepared = false;
         }
+        abortPrepare = true; // 打断可能正在进行的 prefill 门槛等待，让位释放
         if (decodeHandler != null) {
             decodeHandler.obtainMessage(MSG_RELEASE).sendToTarget();
         }
@@ -866,6 +958,7 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             currentPresentationFrame = 0;
             pendingSeekMs = -1;
         }
+        abortPrepare = true; // 切歌 / 重建：打断正在进行的 prefill 门槛等待
         NativeDsp.reset();
         // 拆机绝不能在调用方线程做：stopRenderingThread 里的 join(3000) 会挂住调用方，
         // 而 reset 是 AudioPlayerService 在主线程（含 500ms 看门狗 tick）直接调的

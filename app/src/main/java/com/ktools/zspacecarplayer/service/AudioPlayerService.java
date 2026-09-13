@@ -31,6 +31,7 @@ import com.ktools.zspacecarplayer.net.JellyfinApiClient;
 import com.ktools.zspacecarplayer.player.DspAudioTrackPlayer;
 import com.ktools.zspacecarplayer.player.AndroidMediaPlayerWrapper;
 import com.ktools.zspacecarplayer.player.IAudioPlayer;
+import com.ktools.zspacecarplayer.player.stream.BufferingPolicy;
 import com.ktools.zspacecarplayer.player.stream.HttpProxyServer;
 import com.ktools.zspacecarplayer.model.SongItem;
 import com.ktools.zspacecarplayer.ui.MainActivity;
@@ -103,6 +104,20 @@ public class AudioPlayerService extends Service {
     private int lastTickPositionMs = -1;
     /** lastTickPositionMs 属于哪首歌, 防止把上一首的断点带到新曲目上 */
     private String lastTickTrackId;
+    /**
+     * 本次 generation 的「断点起播」目标 (2026-09-12 #1 兜底纠偏的武装条件)。
+     * >0 表示这一轮是带着 song_progress 断点起播的 —— 只有这种情况才可能在起播后
+     * 直接落到曲尾; 用户从头点播/自动切下一首 (startMs=-1) 一律不武装, 避免误纠偏。
+     */
+    private int startedWithResumeMs = -1;
+    /**
+     * 断点起播后累计的「真正出声」tick 数; -1 = 兜底未武装/窗口已过。
+     * 只在 isPlaying() 的 tick 里自增, 所以暂停时长不计入, 长暂停后恢复不会被误判成
+     * 「播完得太快」。换算成 ms 用 {@link PlaybackStateMachine#PROGRESS_TICK_MS}。
+     */
+    private int resumeGuardTicks = -1;
+    /** 本次 generation 是否已经因坏断点纠偏过一次 (一次性, 防止重播↔纠偏死循环) */
+    private boolean badResumeCorrected = false;
     private int stallTicks = 0;
     private boolean stallRecovering = false;
     /** 假播放看门狗: 用户意图在播但播放器已死 (重试链耗尽/起播挂死) 时指数退避自动续播 */
@@ -121,6 +136,17 @@ public class AudioPlayerService extends Service {
     private long transientPausedAtMs = -1L;
     /** 已排程的功放唤醒重试所属 episode key, -1 表示无排程 */
     private long scheduledAmpRetryKey = -1L;
+
+    // ---- 缓冲 / 预取状态 (2026-09-12 缓冲/预取) ----
+    /** 当前曲的远端直连 URL (与真正播放 / 预取命中同一个代理源用); 每轮起播刷新 */
+    private volatile String currentRemoteUrl = null;
+    /** 是否处于起播 prefill 门槛期间: prepareTransition 置真, handlePrepared 置假;
+     *  v3 播放器也会经 onBufferingUpdate 校正。门槛期间不预取、不由 progress 重复上报缓冲。 */
+    private volatile boolean prefillInProgress = false;
+    /** 缓冲指示是否已上报过「稳定/隐藏」: 避免稳定后每 tick 重复回调刷屏 */
+    private boolean bufferingReportedStable = false;
+    /** 已预取的下一首曲目 id: 同一首只预取一次; 让位/切歌时清空以便恢复健康后重试 */
+    private volatile String prefetchedNextSongId = null;
 
     /**
      * 二分排查开关: false = 完全旁路本轮新增的全景/混响代码。
@@ -187,6 +213,14 @@ public class AudioPlayerService extends Service {
         void onPlayStateChanged(boolean isPlaying);
         void onProgressUpdate(int currentMs, int totalMs);
         void onError(String message);
+
+        /**
+         * 缓冲进度上报（2026-09-12 缓冲/预取）。
+         *
+         * @param percent   已缓冲百分比；-1 表示总长未知（UI 显示「缓冲中…」）
+         * @param buffering true = 仍在缓冲（应显示指示）；false = 稳定播放（应隐藏指示）
+         */
+        void onBufferingUpdate(int percent, boolean buffering);
     }
 
     public class LocalBinder extends Binder {
@@ -254,7 +288,7 @@ public class AudioPlayerService extends Service {
                 stopAndReleaseAllAudioResources();
                 return START_NOT_STICKY;
             } else if (MediaButtonReceiver.ACTION_TOGGLE_PAUSE.equals(action)) {
-                playOrPause(PlaybackStateMachine.PlaybackOrigin.MEDIA_BUTTON);
+                togglePause();
             } else if (MediaButtonReceiver.ACTION_PLAY.equals(action)) {
                 play(PlaybackStateMachine.PlaybackOrigin.MEDIA_BUTTON);
             } else if (MediaButtonReceiver.ACTION_PAUSE.equals(action)) {
@@ -343,7 +377,10 @@ public class AudioPlayerService extends Service {
             }
         }, progressHandler);
         if (audioManager != null) {
-            ampWakeStrategy = new GeelyAmpWakeStrategy(audioManager);
+            // 唤醒手法要短暂改动系统 STREAM_MUSIC 音量, 所以必须同时知道「用户是否正在/刚刚
+            // 动过音量或静音」, 否则 App 会与用户抢音量并解除用户静音 (2026-09-11 实车
+            // #2/#3/#5)。观察器挂在主线程 handler 上, 服务销毁时在 release 里反注册。
+            ampWakeStrategy = new GeelyAmpWakeStrategy(this, audioManager, progressHandler);
         }
     }
 
@@ -354,6 +391,26 @@ public class AudioPlayerService extends Service {
                 if (player != null && playbackState.isPrepared() && isPlaying()) {
                     int currentMs = player.getCurrentPosition();
                     int totalMs = player.getDuration();
+
+                    // 起播后兜底纠偏 (2026-09-12 #1): prepared 回调可能报 0 时长 (流式/
+                    // 实时转码拿不到 Content-Length), 系统 MediaPlayer 的真实时长也常在起播
+                    // 后几个 tick 才收敛 —— 那两道按时长钳制的防线此时全都拦不住, 断点会
+                    // 直接落到曲尾并在几秒后假 COMPLETED 跳下一首。这里用 tick 上的真实时长
+                    // 再判一次, 命中即认定断点是坏的, 立刻从头重播本曲 (一次性, 不会死循环)。
+                    if (resumeGuardTicks >= 0) {
+                        resumeGuardTicks++;
+                        if (PlaybackStateMachine.isBadResumeLanding(startedWithResumeMs > 0,
+                                badResumeCorrected, totalMs, currentMs)) {
+                            correctBadResumePoint("tick landed at tail", currentMs, totalMs);
+                            progressHandler.postDelayed(this, PlaybackStateMachine.PROGRESS_TICK_MS);
+                            return;
+                        }
+                        if (resumeGuardTicks * PlaybackStateMachine.PROGRESS_TICK_MS
+                                > PlaybackStateMachine.COMPLETION_TOO_FAST_MS) {
+                            // 已经正常出声超过兜底窗口: 断点是好的, 解除武装, 此后播完就算真播完
+                            resumeGuardTicks = -1;
+                        }
+                    }
 
                     // 卡死检测: 进度零位移累计 10 秒 (公网断流时 NuPlayer 保持 playing
                     // 状态但无数据, AudioFlinger standby 无声), 从断点重启当前曲目
@@ -397,6 +454,11 @@ public class AudioPlayerService extends Service {
                     if (stateChangeListener != null) {
                         stateChangeListener.onProgressUpdate(currentMs, totalMs);
                     }
+
+                    // 缓冲 / 预取 (2026-09-12)：跟着 500ms tick 驱动缓冲 % 上报与下一首预取判定。
+                    // 均为只读 + 自愈式调用，不影响上面的进度 / 断点 / 看门狗治理。
+                    maybeReportBuffering(currentMs, totalMs);
+                    maybePrefetchNext(currentMs, totalMs);
                 } else if (watchdogAction() == PlaybackStateMachine.WatchdogAction.REBUILD_STREAM
                         && !playbackState.isPreparing()) {
                     // 假播放兜底: onError 重试链耗尽或长时间无网络后播放器已死,
@@ -439,10 +501,112 @@ public class AudioPlayerService extends Service {
                     // tick 的增量才是真实的出声时长, 不会把暂停整段时间算进去
                     lastCountTickElapsedMs = SystemClock.elapsedRealtime();
                 }
-                progressHandler.postDelayed(this, 500);
+                // tick 周期必须与状态机里的常量一致: 兜底窗口按 tick 数换算成 ms
+                progressHandler.postDelayed(this, PlaybackStateMachine.PROGRESS_TICK_MS);
             }
         };
         progressHandler.post(progressRunnable);
+    }
+
+    // ---------------- 缓冲 % 上报 / 下一首预取 (2026-09-12 缓冲/预取) ----------------
+
+    /**
+     * 播放早期驱动缓冲 % 上报：prefill 门槛由播放器上报，进入播放后由本方法接管，
+     * 直到领先量稳定（{@link BufferingPolicy#isBufferingStable}）再上报一次「隐藏」并停手，
+     * 避免稳定后每 tick 刷屏。跟着 500ms tick 走，频率天然不密。
+     */
+    private void maybeReportBuffering(int currentMs, int totalMs) {
+        if (stateChangeListener == null) return;
+        if (prefillInProgress) return; // 门槛期间由播放器上报，避免双报
+        String url = currentRemoteUrl;
+        if (url == null || url.length() == 0) return;
+        HttpProxyServer proxy = HttpProxyServer.getInstance();
+        int percent = proxy.getBufferedPercent(url);
+        long remainingSeconds = totalMs > 0 ? Math.max(0, (totalMs - currentMs) / 1000) : -1L;
+        long leadSeconds = computeLeadSeconds(percent, currentMs, totalMs);
+        if (BufferingPolicy.isBufferingStable(percent, leadSeconds, remainingSeconds)) {
+            if (!bufferingReportedStable) {
+                bufferingReportedStable = true;
+                stateChangeListener.onBufferingUpdate(percent, false); // 稳定：隐藏指示
+            }
+            return;
+        }
+        bufferingReportedStable = false;
+        stateChangeListener.onBufferingUpdate(percent, true);
+    }
+
+    /**
+     * 领先秒数 = (已下载百分比 - 已播百分比) × 总时长。用现成的 getBufferedPercent（整首已下载比例）
+     * 减去播放进度比例即得当前曲「领先播放头多少秒」，总长 / 百分比未知时返回 -1。
+     */
+    private long computeLeadSeconds(int percent, int currentMs, int totalMs) {
+        if (percent < 0 || totalMs <= 0) return -1L;
+        int playedPct = (int) (currentMs * 100L / totalMs);
+        int leadPct = Math.max(0, percent - playedPct);
+        return (long) leadPct * (totalMs / 1000) / 100L;
+    }
+
+    /**
+     * 带宽防御式预取下一首：仅顺序模式下、当前曲缓冲健康或接近结尾时触发；一旦当前曲饥饿 /
+     * 正处于起播门槛，立即作废在跑的预取并让位（当前曲永远优先）。同一首只预取一次。
+     * 预取走 {@link HttpProxyServer#prefetch}（小窗、不 addRef），将来真正播放时命中同一个源。
+     */
+    private void maybePrefetchNext(int currentMs, int totalMs) {
+        if (playlist == null || playlist.size() < 2) return;
+        if (currentPlayMode != MODE_SEQUENCE) return; // 随机 / 单曲重复预取意义不大（后者下一首=当前曲）
+        if (currentIndex < 0 || currentIndex >= playlist.size()) return;
+        SongItem current = getCurrentSong();
+        if (current == null) return;
+
+        String url = currentRemoteUrl;
+        HttpProxyServer proxy = HttpProxyServer.getInstance();
+        int percent = (url != null && url.length() > 0) ? proxy.getBufferedPercent(url) : -1;
+        boolean starving = (url != null && url.length() > 0) && proxy.isSourceStarving(url);
+        long remainingSeconds = totalMs > 0 ? Math.max(0, (totalMs - currentMs) / 1000) : -1L;
+        long leadSeconds = computeLeadSeconds(percent, currentMs, totalMs);
+
+        // 让位当前曲：饥饿 / 断流 / 正在 prefill 时，作废在跑的预取（恢复健康后可重试）
+        if ((starving || prefillInProgress) && prefetchedNextSongId != null) {
+            abortPrefetchById(prefetchedNextSongId);
+            Log.w(TAG, "prefetch yielded to current song (starving=" + starving
+                    + " prefill=" + prefillInProgress + ")");
+            prefetchedNextSongId = null;
+            return;
+        }
+
+        int nextIndex = (currentIndex + 1) % playlist.size();
+        SongItem next = playlist.get(nextIndex);
+        if (next == null || next.getId() == null) return;
+        boolean already = next.getId().equals(prefetchedNextSongId);
+        if (!BufferingPolicy.shouldPrefetchNext(percent, leadSeconds, remainingSeconds,
+                starving, prefillInProgress, already)) {
+            return;
+        }
+        String nextUrl = JellyfinApiClient.getInstance().getStreamUrl(next.getId(), true);
+        if (nextUrl == null || nextUrl.length() == 0) return;
+        proxy.prefetch(nextUrl);
+        prefetchedNextSongId = next.getId();
+        Log.i(TAG, "prefetch next triggered: " + next.getName() + " percent=" + percent
+                + " lead=" + leadSeconds + "s remaining=" + remainingSeconds + "s");
+    }
+
+    /** 切歌 / 换列表 / 手动跳歌：作废与新一首无关的旧预取源，避免留着占内存 / 带宽。 */
+    private void invalidateStalePrefetch(SongItem newSong) {
+        String pfId = prefetchedNextSongId;
+        prefetchedNextSongId = null;
+        if (pfId == null) return;
+        if (newSong != null && pfId.equals(newSong.getId())) {
+            return; // 预取的正是这首：保留，obtainSource 会命中复用，无缝起播
+        }
+        abortPrefetchById(pfId);
+    }
+
+    private void abortPrefetchById(String songId) {
+        if (songId == null) return;
+        String pfUrl = JellyfinApiClient.getInstance().getStreamUrl(songId, true);
+        if (pfUrl != null && pfUrl.length() > 0) {
+            HttpProxyServer.getInstance().abortPrefetch(pfUrl);
+        }
     }
 
     private void startForegroundServiceNotification(String title, String content) {
@@ -539,7 +703,12 @@ public class AudioPlayerService extends Service {
     static int sanitizeSeekMs(SongItem song, int startMs) {
         if (startMs < 0) return -1;
         long durMs = song != null ? song.getDurationMs() : 0L;
-        if (durMs > 0 && startMs >= durMs - 3000L) return -1;
+        if (PlaybackStateMachine.isEffectivelyAtEnd(durMs, startMs)) {
+            Log.w(TAG, "Drop end-of-track resume point: id=" + (song != null ? song.getId() : null)
+                    + " name=" + (song != null ? song.getName() : null)
+                    + " saved=" + startMs + "ms metaDuration=" + durMs + "ms -> replay from start");
+            return -1;
+        }
         return startMs;
     }
 
@@ -578,6 +747,11 @@ public class AudioPlayerService extends Service {
         queuedSeekOperationId = -1L;
         queuedSeekMs = -1;
         transientPausedAtMs = -1L;
+        // 坏断点兜底纠偏跟着 generation 走 (2026-09-12 #1): 新一轮起播一律先解除武装,
+        // 只有 handlePrepared 真的下发了断点 seek 才重新武装, 上一首的纠偏状态不得外溢
+        startedWithResumeMs = -1;
+        resumeGuardTicks = -1;
+        badResumeCorrected = false;
 
         JellyfinApiClient client = JellyfinApiClient.getInstance();
         if (!client.hasToken()) {
@@ -612,6 +786,12 @@ public class AudioPlayerService extends Service {
                     // 双引擎均支持原码率直传无损 (static=true)：v3 经原生 dr_* 软解出 PCM 送 NativeDsp，系统引擎走系统 MediaPlayer
                     String urlToPlay = client.getStreamUrl(song.getId());
                     CrashMonitor.putContext("streamUrl", urlToPlay);
+                    // 缓冲 / 预取 (2026-09-12)：记录当前曲远端 URL 供 percent 查询与预取命中；
+                    // 作废与新一首无关的旧预取源；重新武装起播门槛态
+                    currentRemoteUrl = urlToPlay;
+                    invalidateStalePrefetch(song);
+                    prefillInProgress = true;
+                    bufferingReportedStable = false;
                     // v3: 本地回环代理 + 环形缓冲，抵御公网串流抖动（消除“播 2s 停 1s”式 underrun）
                     player.setDataSource(HttpProxyServer.getInstance().getProxyUrl(urlToPlay));
                     playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.PREPARING);
@@ -658,8 +838,36 @@ public class AudioPlayerService extends Service {
             public void onCompletion() {
                 if (!playbackState.isCurrentGeneration(generation)) return;
                 playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.READY);
+                final SongItem finishedSong = getCurrentSong();
+                final int realDurationMs = safePlayerDurationMs();
+                // 兜底之一 (2026-09-12 #1): 带断点起播后没出声几秒就 COMPLETED ——
+                // 断点其实贴在真实曲尾, 而 prepared 时真实时长未知/与元数据不符,
+                // 让保存侧清洗与起播侧钳制这两道「按时长」的防线全部失效。
+                // 这不是「播完了」, 绝不能自动跳下一首 (用户观感就是切歌后直接到曲尾、
+                // 甚至立刻又跳一首), 必须清掉脏断点并从头重播本曲。一次性, 不会死循环。
+                long playedMs = resumeGuardTicks >= 0
+                        ? resumeGuardTicks * PlaybackStateMachine.PROGRESS_TICK_MS
+                        : Long.MAX_VALUE;
+                if (PlaybackStateMachine.shouldReplayInsteadOfAdvance(
+                        startedWithResumeMs > 0, playedMs, badResumeCorrected)) {
+                    correctBadResumePoint("completed too fast after resume",
+                            safePlayerPositionMs(), realDurationMs);
+                    return;
+                }
+                // 真播完: 该曲断点必须清零 (2026-09-12 #1 残留根因)。落库是 5s 节流的,
+                // 自然播完时库里必然残留一个 [时长-5.5s, 时长) 的贴尾位置; 不清零的话
+                // 下次点这首歌就会被 seek 到曲尾。放在服务侧是为了后台播放 (UI 未绑定)
+                // 时同样生效, 不依赖 MainActivity 的节流写入。
+                if (finishedSong != null && finishedSong.getId() != null) {
+                    Log.i(TAG, "Track completed, clear resume point: id=" + finishedSong.getId()
+                            + " name=" + finishedSong.getName()
+                            + " metaDuration=" + finishedSong.getDurationMs()
+                            + "ms realDuration=" + realDurationMs + "ms decision=progress->0");
+                    SongDao.getInstance(AudioPlayerService.this)
+                            .saveSongProgress(finishedSong.getId(), 0);
+                }
                 if (currentPlayMode == MODE_SINGLE_REPEAT) {
-                    startPlaybackWithSeek(getCurrentSong(), -1,
+                    startPlaybackWithSeek(finishedSong, -1,
                             PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
                 } else {
                     playNext(PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
@@ -675,7 +883,27 @@ public class AudioPlayerService extends Service {
             public void onSeekComplete() {
                 handleSeekComplete(generation);
             }
+
+            @Override
+            public void onBufferingUpdate(int percent, boolean buffering) {
+                handleBufferingUpdate(percent, buffering, generation);
+            }
         });
+    }
+
+    /**
+     * 播放器（v3 prefill 门槛）上报的缓冲进度转发给 UI，并校正 prefill 状态。
+     * 回调已由播放器切回主线程，这里直接转发（2026-09-12 缓冲/预取）。
+     */
+    private void handleBufferingUpdate(int percent, boolean buffering, long generation) {
+        if (!playbackState.isCurrentGeneration(generation)) return;
+        prefillInProgress = buffering;
+        if (buffering) {
+            bufferingReportedStable = false; // 重新进入缓冲，允许下次稳定时再上报一次隐藏
+        }
+        if (stateChangeListener != null) {
+            stateChangeListener.onBufferingUpdate(percent, buffering);
+        }
     }
 
     private void waitForAuthThenPlay(final SongItem song, final long generation) {
@@ -708,6 +936,17 @@ public class AudioPlayerService extends Service {
 
     public void playOrPause() {
         playOrPause(PlaybackStateMachine.PlaybackOrigin.USER_UI);
+    }
+
+    /**
+     * 车机「静音键」绑定的播放/暂停切换入口 (2026-09-11 实车 #6)。
+     * 前台由 MainActivity.dispatchKeyEvent 直接调, 后台由 MediaButtonReceiver 经
+     * ACTION_TOGGLE_PAUSE 走 onStartCommand —— 两条路最终都落到同一个 playOrPause 判定,
+     * 不另造状态机分支, 语义与方向盘 PLAY_PAUSE 完全一致。
+     */
+    public void togglePause() {
+        Log.i(TAG, "togglePause from mute/media key");
+        playOrPause(PlaybackStateMachine.PlaybackOrigin.MEDIA_BUTTON);
     }
 
     private void playOrPause(PlaybackStateMachine.PlaybackOrigin origin) {
@@ -912,10 +1151,15 @@ public class AudioPlayerService extends Service {
             GeelyAmpWakeStrategy.WakeResult result = ampWakeStrategy.wakeDetailed(wakeKey);
             if (result == GeelyAmpWakeStrategy.WakeResult.WOKEN) {
                 Log.d(TAG, "Amp wake nudged, key=" + wakeKey);
+            } else if (result == GeelyAmpWakeStrategy.WakeResult.SKIPPED
+                    && ampWakeStrategy.isUserIntentBlocked()) {
+                // 用户静音/改过音量: 唤醒让位是设计要求, 但实车必须能从日志确认这条路走到了
+                Log.i(TAG, "Amp wake yielded to user volume/mute intent, key=" + wakeKey);
             }
             // WOKEN 也要安排跟进重试: 冷启动/install 后功放 DSP 可能晚于首次 nudge 才就绪,
             // 只唤醒一次会让同一 episode 内永远无声 (2026-09-03 实车部署复现)。
-            // 终态 SKIPPED (音量 0 红线 / 重试窗口已过) 才停止, 防无限重试由 strategy 窗口兜底。
+            // 终态 SKIPPED (音量 0 红线 / 静音标志已置位或读不到 / 用户改过音量 / 重试窗口已过)
+            // 才停止, 防无限重试由 strategy 窗口兜底。
             if (result != GeelyAmpWakeStrategy.WakeResult.SKIPPED) {
                 scheduleAmpWakeRetry(wakeKey, 0);
             }
@@ -930,6 +1174,8 @@ public class AudioPlayerService extends Service {
     /**
      * 功放唤醒后的延迟重试。重试前复验 episode key 仍当前且仍在播放 ——
      * 切歌/暂停后的旧重试不得误唤醒。音量 0 红线由 wake() 内部复验。
+     * 用户在此期间改过音量或按了静音则立刻放弃整条重试链 (#5: 唤醒重试必须让位于用户意图,
+     * 否则用户调低音量后 App 又把音量写回旧值)。
      * 若重试仍返回非终态结果则续排下一跳, 直至 {@link #AMP_WAKE_MAX_RETRIES};
      * strategy 的 20s 重试窗口保证最终收敛。
      */
@@ -944,6 +1190,10 @@ public class AudioPlayerService extends Service {
                 if (ampWakeStrategy == null) return;
                 if (playbackState.getAmplifierWakeKey() != wakeKey) return;
                 if (!playbackState.expectsPlayback() || !isPlaying()) return;
+                if (ampWakeStrategy.isUserIntentBlocked()) {
+                    Log.i(TAG, "Amp wake retry dropped, user owns volume/mute now, key=" + wakeKey);
+                    return;
+                }
                 try {
                     GeelyAmpWakeStrategy.WakeResult result = ampWakeStrategy.wakeDetailed(wakeKey);
                     if (result == GeelyAmpWakeStrategy.WakeResult.WOKEN) {
@@ -994,6 +1244,10 @@ public class AudioPlayerService extends Service {
     }
 
     public void seekTo(final int ms) {
+        // 用户手动 seek 后解除坏断点兜底 (2026-09-12 #1): 落点由用户负责, 他刻意拖到
+        // 曲尾时不能被判成「断点坏了」而从零重播 —— 兜底只针对自动断点续播
+        startedWithResumeMs = -1;
+        resumeGuardTicks = -1;
         if (player != null && playbackState.isPrepared()) {
             final long generation = playbackState.getGenerationId();
             final long seekOperation = playbackState.beginSeekOperation();
@@ -1018,7 +1272,11 @@ public class AudioPlayerService extends Service {
         SongItem song = getCurrentSong();
         if (song != null && pendingAuthSong == null) {
             playbackState.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);
-            startPlaybackWithSeek(song, ms, PlaybackStateMachine.PlaybackOrigin.USER_UI);
+            // 未准备时的 seek 会转成「带位置重新起播」, 必须与点歌路径走同一道清洗:
+            // 这里的 ms 可能来自上一首遗留的 SeekBar 值 (切歌瞬间 max 还是旧曲时长),
+            // 越过新曲时长就是「切歌直接到曲尾」(2026-09-12 #1)
+            startPlaybackWithSeek(song, sanitizeSeekMs(song, ms),
+                    PlaybackStateMachine.PlaybackOrigin.USER_UI);
         }
     }
 
@@ -1122,6 +1380,66 @@ public class AudioPlayerService extends Service {
             }
         }
         return 0;
+    }
+
+    /**
+     * 播放器当前的真实时长 (ms), 未知/异常返回 0 (2026-09-12 #1)。
+     * 落库清洗必须优先用它而不是 Jellyfin 元数据: 元数据缺失或比转码流偏大时,
+     * 贴尾脏值会被判成合法断点存进 song_progress。
+     */
+    public int getCurrentRealDurationMs() {
+        return safePlayerDurationMs();
+    }
+
+    /** onCompletion 时引擎状态已切到 READY, 不能走 isPrepared() 门槛, 单独安全读取。 */
+    private int safePlayerPositionMs() {
+        if (player == null) return 0;
+        try {
+            return player.getCurrentPosition();
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    private int safePlayerDurationMs() {
+        if (player == null) return 0;
+        try {
+            return player.getDuration();
+        } catch (Exception ignored) {
+            return 0;
+        }
+    }
+
+    /**
+     * 坏断点的最后一道兜底 (2026-09-12 #1): 起播后发现自己落在贴尾, 就清库 + 从头重播本曲。
+     *
+     * 前面所有防线都要靠「时长」判定, 而流式/实时转码源在起播瞬间时长可能是 0 或与元数据
+     * 不符 —— 这条兜底只认「实际发生了什么」(tick 已贴尾 / 断点起播后几秒就 COMPLETED),
+     * 因此时长完全未知时也有效。必须同时把库里的脏断点清零, 否则下次点这首歌会再踩一次。
+     * 一次性 (badResumeCorrected), 且重播时不带断点 ⇒ 新一轮不会再次武装, 不可能死循环。
+     */
+    private void correctBadResumePoint(String reason, int positionMs, int realDurationMs) {
+        SongItem song = getCurrentSong();
+        int badResumeMs = startedWithResumeMs;
+        badResumeCorrected = true;
+        startedWithResumeMs = -1;
+        resumeGuardTicks = -1;
+        if (song == null) return;
+        Log.w(TAG, "Bad resume point corrected (" + reason + "): id=" + song.getId()
+                + " name=" + song.getName()
+                + " saved=" + badResumeMs + "ms position=" + positionMs
+                + "ms metaDuration=" + song.getDurationMs()
+                + "ms realDuration=" + realDurationMs + "ms decision=replay-from-start");
+        CrashMonitor.breadcrumb("play", "bad resume corrected reason=" + reason
+                + " saved=" + badResumeMs + " pos=" + positionMs
+                + " realDur=" + realDurationMs + " song=" + song.getName());
+        // 脏断点必须同步清掉: 它是这次「切歌就到曲尾」的源头, 留着下次点歌必然复现
+        if (song.getId() != null) {
+            SongDao.getInstance(this).saveSongProgress(song.getId(), 0);
+        }
+        lastTickTrackId = song.getId();
+        lastTickPositionMs = 0;
+        startPlaybackWithSeek(song, -1, PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
     }
 
     /** 是否至少完成过一次 prepare (EQ 引擎随首次 prepare 创建) */
@@ -1448,6 +1766,9 @@ public class AudioPlayerService extends Service {
     private void handlePrepared(int durationMs, long generation) {
         if (!playbackState.isCurrentGeneration(generation)) return;
         CrashMonitor.breadcrumb("play", "prepared dur=" + durationMs + "ms v3=" + playerIsV3);
+        // 起播 prefill 门槛已通过（或超时放行）：解除门槛态，此后缓冲上报交给 progress tick
+        prefillInProgress = false;
+        bufferingReportedStable = false;
         playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.READY);
         everPrepared = true;
         streamRetryCount = 0;
@@ -1466,12 +1787,48 @@ public class AudioPlayerService extends Service {
         if (!playerIsV3 && ENABLE_PANORAMA_REVERB) applyAuxEffect();
         int seekMs = pendingSeekMs;
         pendingSeekMs = -1;
+        SongItem preparedSong = getCurrentSong();
+        // prepared 回调带回的是播放器真实时长, 用它再钳一次 (2026-09-10 实车定位):
+        // Jellyfin 的 RunTimeTicks 元数据与转码流的实际时长可能不符, 只按元数据判定的
+        // 断点照样会落在真实曲尾 —— 观感即「切过去直接到歌曲尾部」并假 COMPLETED 切歌。
+        if (seekMs > 0 && PlaybackStateMachine.isEffectivelyAtEnd(durationMs, seekMs)) {
+            Log.w(TAG, "Clamp resume point by real duration: id="
+                    + (preparedSong != null ? preparedSong.getId() : null)
+                    + " name=" + (preparedSong != null ? preparedSong.getName() : null)
+                    + " saved=" + seekMs + "ms metaDuration="
+                    + (preparedSong != null ? preparedSong.getDurationMs() : 0L)
+                    + "ms realDuration=" + durationMs + "ms -> replay from start");
+            seekMs = -1;
+        }
         // 恢复锚点跟着当前曲目走: 若起播后立刻再次断流 (还没跑到第一个 tick),
         // 仍应从本次的断点续播, 而不是回到 0 或继承上一首的进度
-        SongItem preparedSong = getCurrentSong();
         lastTickTrackId = preparedSong != null ? preparedSong.getId() : null;
         lastTickPositionMs = Math.max(seekMs, 0);
+        if (seekMs > 0 && durationMs <= 0) {
+            // 真实时长未知 (2026-09-12 #1): Jellyfin 实时转码时代理拿不到 Content-Length,
+            // 回的是关闭定界流, 系统 MediaPlayer 的 getDuration() 就是 0, v3 的
+            // MediaFormat 也没有 KEY_DURATION。此时盲 seek 会被底层钳到最后一个采样点,
+            // 观感与「切歌直接到曲尾 + 立刻假 COMPLETED 跳下一首」完全一致, 所以宁可
+            // 丢弃断点从 0 起播, 并留日志 (实车可据此判断是元数据缺失还是脏断点)。
+            Log.w(TAG, "Drop resume point, real duration unknown at prepare: id="
+                    + (preparedSong != null ? preparedSong.getId() : null)
+                    + " name=" + (preparedSong != null ? preparedSong.getName() : null)
+                    + " saved=" + seekMs + "ms metaDuration="
+                    + (preparedSong != null ? preparedSong.getDurationMs() : 0L)
+                    + "ms realDuration=0ms decision=replay-from-start");
+        } else if (seekMs >= durationMs && seekMs > 0) {
+            // seek 目标恰好等于/越过真实时长: 某些播放器会立刻回调 COMPLETED, 一律按从头播
+            Log.w(TAG, "Drop resume point at/over real duration: id="
+                    + (preparedSong != null ? preparedSong.getId() : null)
+                    + " saved=" + seekMs + "ms realDuration=" + durationMs
+                    + "ms decision=replay-from-start");
+        }
         if (seekMs > 0 && seekMs < durationMs) {
+            // 武装起播后兜底纠偏: 只有真的下发了断点 seek 才可能落到曲尾; 从头播不武装,
+            // 否则会把「歌本来就短」误判成坏断点
+            startedWithResumeMs = seekMs;
+            resumeGuardTicks = 0;
+            badResumeCorrected = false;
             long seekOperation = playbackState.beginSeekOperation();
             performSeek(seekMs, generation, seekOperation);
             return;
@@ -1578,6 +1935,11 @@ public class AudioPlayerService extends Service {
         cancelSeekTimeout();
         if (gainEnvelope != null) {
             try { gainEnvelope.hardMute(); } catch (Exception ignored) {}
+        }
+        if (ampWakeStrategy != null) {
+            // 反注册音量意图观察器: 它会连带持有 Context, 服务停了必须摘掉
+            try { ampWakeStrategy.release(); } catch (Exception ignored) {}
+            ampWakeStrategy = null;
         }
         playbackState.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.STOP);
         playbackState.beginGeneration(PlaybackStateMachine.EngineState.RELEASED);

@@ -6,6 +6,7 @@ plugins {
 // 该文件已被 .gitignore 忽略、不会进版本库; 填了就编译进 APK (调试免手填),
 // 不填则 JellyfinApiClient / CrashMonitor 回退到占位默认值 (公开仓库无真实凭据)。
 // 模板见 local.properties.example。
+// 远程升级 (2026-09-12): UPDATE_MANIFEST_URL 同理, 不填则 UpdateChecker 回退到线上默认清单。
 def localProps = new Properties()
 def localPropsFile = rootProject.file('local.properties')
 if (localPropsFile.exists()) {
@@ -15,6 +16,8 @@ def devServerUrl = localProps.getProperty('JELLYFIN_SERVER_URL', '')
 def devUsername = localProps.getProperty('JELLYFIN_USERNAME', '')
 def devPassword = localProps.getProperty('JELLYFIN_PASSWORD', '')
 def devCrashEndpoint = localProps.getProperty('CRASH_ENDPOINT', '')
+// 远程升级 (2026-09-12): 版本清单地址同样走 local.properties, 便于本地指向测试清单
+def devUpdateManifestUrl = localProps.getProperty('UPDATE_MANIFEST_URL', '')
 
 android {
     namespace 'com.ktools.zspacecarplayer'
@@ -29,13 +32,14 @@ android {
         applicationId "com.ktools.zspacecarplayer"
         minSdk 18
         targetSdk 28
-        versionCode 3
-        versionName "3.0.0"
+        versionCode 4
+        versionName "3.1.0"
 
         buildConfigField "String", "JELLYFIN_SERVER_URL", "\"${devServerUrl}\""
         buildConfigField "String", "JELLYFIN_USERNAME", "\"${devUsername}\""
         buildConfigField "String", "JELLYFIN_PASSWORD", "\"${devPassword}\""
         buildConfigField "String", "CRASH_ENDPOINT", "\"${devCrashEndpoint}\""
+        buildConfigField "String", "UPDATE_MANIFEST_URL", "\"${devUpdateManifestUrl}\""
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         ndk {
