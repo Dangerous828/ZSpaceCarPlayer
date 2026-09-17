@@ -73,7 +73,10 @@ public final class UpdateInstaller {
                 uri = FileProvider.getUriForFile(context,
                         fileProviderAuthority(context.getPackageName()), apk);
             } else {
-                // API < 24 (车机 API 18 走这条): file:// 尚未被 FileUriExposedException 禁止
+                // API < 24 (车机 API 18 走这条): file:// 尚未被 FileUriExposedException 禁止。
+                // 必须放开目录与文件权限为全局可读, 否则 PackageInstaller (独立 UID)
+                // 读取 apk 文件时会遭遇 EACCES 权限被拒, 在系统界面报「解析程序包时出现问题」!
+                makeReadableForInstaller(apk);
                 uri = Uri.fromFile(apk);
             }
         } catch (Throwable t) {
@@ -180,6 +183,23 @@ public final class UpdateInstaller {
             // 总比在这里返回 false 把升级路径彻底堵死要好
             Log.w(TAG, "canRequestPackageInstalls probe failed, assume granted: " + t);
             return true;
+        }
+    }
+
+    /**
+     * 将 updates 目录与 apk 设为全局可读, 供低版本 Android 系统安装器跨 UID 读取。
+     */
+    static void makeReadableForInstaller(File apk) {
+        if (apk == null) return;
+        try {
+            apk.setReadable(true, false);
+            File parent = apk.getParentFile();
+            if (parent != null) {
+                parent.setReadable(true, false);
+                parent.setExecutable(true, false);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "makeReadableForInstaller failed: " + t);
         }
     }
 }

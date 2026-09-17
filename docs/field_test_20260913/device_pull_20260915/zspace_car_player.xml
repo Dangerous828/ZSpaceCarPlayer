@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <int name="dsp_virtualizer_percent" value="19" />
+    <int name="dsp_eq_preset" value="4" />
+    <int name="dsp_reverb_mode" value="0" />
+    <int name="dsp_bass_percent" value="0" />
+    <boolean name="play_engine_v3" value="true" />
+</map>

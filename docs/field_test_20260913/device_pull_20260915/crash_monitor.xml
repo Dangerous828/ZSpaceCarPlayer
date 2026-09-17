@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <string name="crash_device_id">1a07e73da2bfa98f40b</string>
+    <int name="engine_v3_crash_count" value="0" />
+    <long name="engine_v3_auto_disabled_at" value="0" />
+    <long name="crash_upload_next_attempt_at" value="1789469306464" />
+    <int name="crash_upload_failure_streak" value="13" />
+    <long name="crash_last_blocked_report_at" value="1789431574985" />
+    <boolean name="engine_v3_auto_disabled" value="false" />
+</map>

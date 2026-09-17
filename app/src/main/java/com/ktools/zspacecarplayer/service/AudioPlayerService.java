@@ -80,6 +80,10 @@ public class AudioPlayerService extends Service {
     private final PlaybackStateMachine playbackState = new PlaybackStateMachine();
     private GainEnvelope gainEnvelope;
     private GeelyAmpWakeStrategy ampWakeStrategy;
+    /** 系统静音监听 (2026-09-15): 车机静音键不进 App, 靠监听系统静音跳变触发暂停/恢复。 */
+    private SystemMuteMonitor muteMonitor;
+    /** 本次暂停是否由"系统静音"触发; 用户解除静音时据此自动恢复播放。 */
+    private boolean pausedByMute = false;
     private long lastCountedGeneration = -1L;
 
     /** 有效播放判定阈值: 累计实际出声达到该时长才算一次「播放最多」计数 (2026-09-10) */
@@ -143,8 +147,11 @@ public class AudioPlayerService extends Service {
     /** 是否处于起播 prefill 门槛期间: prepareTransition 置真, handlePrepared 置假;
      *  v3 播放器也会经 onBufferingUpdate 校正。门槛期间不预取、不由 progress 重复上报缓冲。 */
     private volatile boolean prefillInProgress = false;
-    /** 缓冲指示是否已上报过「稳定/隐藏」: 避免稳定后每 tick 重复回调刷屏 */
-    private boolean bufferingReportedStable = false;
+    /** 上次 tick 上报的缓冲 percent / 状态 (2026-09-13 双进度条调查): 变化时打一行诊断日志 */
+    private int lastReportedBufferPercent = Integer.MIN_VALUE;
+    private boolean lastReportedBuffering = false;
+    /** 缓冲卡死心跳落盘的上次时刻: percent 长期不动时也要每 30s 留一行证据 (2026-09-15)。 */
+    private long lastBufferDiagAtMs = 0L;
     /** 已预取的下一首曲目 id: 同一首只预取一次; 让位/切歌时清空以便恢复健康后重试 */
     private volatile String prefetchedNextSongId = null;
 
@@ -245,6 +252,54 @@ public class AudioPlayerService extends Service {
         remoteControlClient = CarRemoteControlClient.register(this, audioManager, MediaButtonReceiver.class);
         registerAuthStateListener();
         startForegroundServiceNotification("ZSpace Car Player 运行中", "准备播放");
+        setupSystemMuteMonitor();
+    }
+
+    /**
+     * 装配系统静音监听 (2026-09-15 实车需求: 按静音键 = 暂停歌曲 + 系统静音)。
+     * 这台 GEELY/Neusoft 车机的硬件静音键经 ROM 自定义 AIDL 通道被系统 App 接走并直接
+     * setStreamMute, 不进本 App 的 dispatchKeyEvent, 所以只能监听系统静音状态跳变:
+     * 未静音→静音 时暂停播放; 静音→未静音 且此前是因静音而暂停时自动恢复。
+     * 系统静音本身由 ROM 完成, 无需 App 再写; 仅"用户按播放键但系统仍静音"时主动解静音。
+     */
+    private void setupSystemMuteMonitor() {
+        if (muteMonitor != null) return;
+        try {
+            muteMonitor = new SystemMuteMonitor(this, audioManager, progressHandler,
+                    new SystemMuteMonitor.Listener() {
+                        @Override
+                        public void onSystemMuted() {
+                            handleSystemMuted();
+                        }
+
+                        @Override
+                        public void onSystemUnmuted() {
+                            handleSystemUnmuted();
+                        }
+                    });
+            muteMonitor.register();
+        } catch (Throwable t) {
+            Log.w(TAG, "SystemMuteMonitor setup failed, mute-key pause disabled: " + t);
+            muteMonitor = null;
+        }
+    }
+
+    /** 系统被静音 (用户按了静音键): 若正在播/期望播放则暂停, 并记住是"因静音而暂停"。 */
+    private void handleSystemMuted() {
+        boolean active = isPlaying() || playbackState.expectsPlayback();
+        Log.i(TAG, "mute-key: system muted, active=" + active
+                + " isPlaying=" + isPlaying() + " -> pause");
+        if (!active) return;
+        pausedByMute = true;
+        pause();
+    }
+
+    /** 系统解除静音: 仅当此前是"因静音而暂停"时自动恢复, 避免用户手动暂停后被误恢复。 */
+    private void handleSystemUnmuted() {
+        Log.i(TAG, "mute-key: system unmuted, pausedByMute=" + pausedByMute);
+        if (!pausedByMute) return;
+        pausedByMute = false;
+        play(PlaybackStateMachine.PlaybackOrigin.MEDIA_BUTTON);
     }
 
     /**
@@ -511,9 +566,9 @@ public class AudioPlayerService extends Service {
     // ---------------- 缓冲 % 上报 / 下一首预取 (2026-09-12 缓冲/预取) ----------------
 
     /**
-     * 播放早期驱动缓冲 % 上报：prefill 门槛由播放器上报，进入播放后由本方法接管，
-     * 直到领先量稳定（{@link BufferingPolicy#isBufferingStable}）再上报一次「隐藏」并停手，
-     * 避免稳定后每 tick 刷屏。跟着 500ms tick 走，频率天然不密。
+     * 播放期间持续驱动缓冲 % 上报：prefill 门槛由播放器上报，进入播放后由本方法接管，
+     * 每 tick 上报一次 percent + 是否仍处缓冲（稳定后 buffering=false，但 percent 照报，
+     * 供 UI 双进度条的缓冲层持续推进）。跟着 500ms tick 走，频率天然不密。
      */
     private void maybeReportBuffering(int currentMs, int totalMs) {
         if (stateChangeListener == null) return;
@@ -524,15 +579,34 @@ public class AudioPlayerService extends Service {
         int percent = proxy.getBufferedPercent(url);
         long remainingSeconds = totalMs > 0 ? Math.max(0, (totalMs - currentMs) / 1000) : -1L;
         long leadSeconds = computeLeadSeconds(percent, currentMs, totalMs);
-        if (BufferingPolicy.isBufferingStable(percent, leadSeconds, remainingSeconds)) {
-            if (!bufferingReportedStable) {
-                bufferingReportedStable = true;
-                stateChangeListener.onBufferingUpdate(percent, false); // 稳定：隐藏指示
+        // 稳定后仍持续上报 (2026-09-13 双进度条): UI 文字指示靠 visibility 幂等隐藏,
+        // 不会反复闪烁; 而缓冲进度层需要每 tick 的 percent 跟随下载头持续推进,
+        // 像「视频加载」一样长条推进。跟着 500ms tick 走, 频率依然不密。
+        boolean buffering = !BufferingPolicy.isBufferingStable(percent, leadSeconds, remainingSeconds);
+        // 变化时打一行 (2026-09-13 双进度条实车调查): 实测 UI 偶现「缓冲 0%」卡住,
+        // 用这行日志钉死 tick 查询到的 percent / lead 值, 定位是源查询错还是阈值判定错
+        if (percent != lastReportedBufferPercent || buffering != lastReportedBuffering) {
+            Log.i(TAG, "buffering report: percent=" + percent + " buffering=" + buffering
+                    + " lead=" + leadSeconds + "s remaining=" + remainingSeconds + "s");
+            // 落盘: 缓冲状态跳变是关键时间线, 重启后仍可 adb pull 取证 (2026-09-15)
+            CrashMonitor.breadcrumb("buffer", "report percent=" + percent
+                    + " buffering=" + buffering + " lead=" + leadSeconds
+                    + "s remaining=" + remainingSeconds + "s");
+            lastReportedBufferPercent = percent;
+            lastReportedBuffering = buffering;
+            lastBufferDiagAtMs = SystemClock.elapsedRealtime();
+        } else if (buffering) {
+            // percent 卡住不动时 (最典型的"一直缓冲中"现场) 也要每 30s 留一行心跳,
+            // 否则变化检测会让最需要证据的时段一行日志都没有 (2026-09-15 缓冲失败调查)
+            long now = SystemClock.elapsedRealtime();
+            if (now - lastBufferDiagAtMs >= 30000L) {
+                lastBufferDiagAtMs = now;
+                CrashMonitor.breadcrumb("buffer", "STUCK heartbeat percent=" + percent
+                        + " lead=" + leadSeconds + "s remaining=" + remainingSeconds
+                        + "s pos=" + currentMs + "ms");
             }
-            return;
         }
-        bufferingReportedStable = false;
-        stateChangeListener.onBufferingUpdate(percent, true);
+        stateChangeListener.onBufferingUpdate(percent, buffering);
     }
 
     /**
@@ -791,7 +865,6 @@ public class AudioPlayerService extends Service {
                     currentRemoteUrl = urlToPlay;
                     invalidateStalePrefetch(song);
                     prefillInProgress = true;
-                    bufferingReportedStable = false;
                     // v3: 本地回环代理 + 环形缓冲，抵御公网串流抖动（消除“播 2s 停 1s”式 underrun）
                     player.setDataSource(HttpProxyServer.getInstance().getProxyUrl(urlToPlay));
                     playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.PREPARING);
@@ -898,9 +971,6 @@ public class AudioPlayerService extends Service {
     private void handleBufferingUpdate(int percent, boolean buffering, long generation) {
         if (!playbackState.isCurrentGeneration(generation)) return;
         prefillInProgress = buffering;
-        if (buffering) {
-            bufferingReportedStable = false; // 重新进入缓冲，允许下次稳定时再上报一次隐藏
-        }
         if (stateChangeListener != null) {
             stateChangeListener.onBufferingUpdate(percent, buffering);
         }
@@ -963,6 +1033,14 @@ public class AudioPlayerService extends Service {
     }
 
     private void play(PlaybackStateMachine.PlaybackOrigin origin) {
+        // 用户/媒体键主动播放: 清除"因静音暂停"标记; 若系统仍处于静音则主动解静音,
+        // 否则会出现"恢复播放却无声"(静音是 ROM 置的, 播放键不会自动解除)。
+        pausedByMute = false;
+        if (muteMonitor != null
+                && muteMonitor.readMuteState() == GeelyAmpWakeStrategy.MuteState.MUTED) {
+            Log.i(TAG, "play while system muted -> unmute STREAM_MUSIC");
+            muteMonitor.setMusicMuted(false);
+        }
         PlaybackStateMachine.DesiredPlayback previousDesired = playbackState.getDesiredPlayback();
         playbackState.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);
         playbackState.setPlaybackOrigin(origin);
@@ -1071,6 +1149,7 @@ public class AudioPlayerService extends Service {
         lastTickPositionMs = Math.max(posMs, 0);
         pendingSeekMs = posMs;
         Log.w(TAG, "Stream stalled at " + posMs + "ms, rebuilding connection for " + song.getName());
+        CrashMonitor.breadcrumb("buffer", "stall recover pos=" + posMs + "ms song=" + song.getName());
         if (stateChangeListener != null) {
             stateChangeListener.onError("网络波动, 正在恢复播放 " + song.getName());
         }
@@ -1768,7 +1847,6 @@ public class AudioPlayerService extends Service {
         CrashMonitor.breadcrumb("play", "prepared dur=" + durationMs + "ms v3=" + playerIsV3);
         // 起播 prefill 门槛已通过（或超时放行）：解除门槛态，此后缓冲上报交给 progress tick
         prefillInProgress = false;
-        bufferingReportedStable = false;
         playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.READY);
         everPrepared = true;
         streamRetryCount = 0;
@@ -1940,6 +2018,11 @@ public class AudioPlayerService extends Service {
             // 反注册音量意图观察器: 它会连带持有 Context, 服务停了必须摘掉
             try { ampWakeStrategy.release(); } catch (Exception ignored) {}
             ampWakeStrategy = null;
+        }
+        if (muteMonitor != null) {
+            // 反注册静音监听 (ContentObserver/广播/轮询都持有 Context), 服务停了必须摘掉
+            try { muteMonitor.unregister(); } catch (Exception ignored) {}
+            muteMonitor = null;
         }
         playbackState.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.STOP);
         playbackState.beginGeneration(PlaybackStateMachine.EngineState.RELEASED);

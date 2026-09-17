@@ -62,6 +62,7 @@ import com.ktools.zspacecarplayer.update.UpdateManifest;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -74,6 +75,13 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
     private static final String KEY_LAST_SONG_ID = "last_song_id";
     private static final String KEY_LAST_CAT = "last_cat";
+    // 播放队列持久化 (2026-09-15 实车): 只存"分类名"无法还原红心/播放最多/搜索等
+    // 无法按分类反查的队列, 冷启动会退回全库顺序。这里额外存"队列来源标题 + 队列内
+    // 歌曲 id 的有序列表", 冷启动按 id 顺序 1:1 还原用户当时的播放队列与顺序。
+    private static final String KEY_LAST_QUEUE_TITLE = "last_queue_title";
+    private static final String KEY_LAST_QUEUE_IDS = "last_queue_ids";
+    /** 全库队列不存 id (直接用库顺序), 避免每次点歌都写 887 个 id 的大字符串。 */
+    private static final String FULL_LIBRARY_TITLE = "全部歌曲";
 
     private AudioPlayerService playerService;
     private boolean isBound = false;
@@ -97,9 +105,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     /** 缓冲指示 (2026-09-12 缓冲/预取): 缓冲时可见「缓冲 43%」/「缓冲中…」, 稳定播放后隐藏 */
     private TextView tvBuffering;
     private View seekFill;
+    private View seekBufferFill;
     private EditText etSearch;
     private SeekBar seekBarProgress;
-    private Button btnPlayPause, btnPrev, btnNext, btnPlayMode, btnCurrentFav;
+    private Button btnPlayPause, btnPrev, btnNext, btnPlayMode, btnCurrentFav, btnReportStall;
     private Button btnNavAllSongs, btnNavPlaylist, btnNavRefresh, btnNavSettings, btnBackToPlaylist;
     private Button btnSearchToggle, btnCloseSearch;
 
@@ -130,6 +139,13 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
     private List<SongItem> allSongsList = new ArrayList<>();
     private List<SongItem> currentDisplayedSongs = new ArrayList<>();
+    /** 当前左侧列表的准确语境标题 (2026-09-13 播放跟随): 与 tvListTitle 不同,
+     *  它始终记录「此刻列表内容对应哪个歌单/视图」, 供播放队列来源记录用 */
+    private String currentListTitle = "全部歌曲";
+    /** 播放队列来源歌单 (2026-09-13 播放跟随): setPlaylist 挂载/点歌时记录,
+     *  切歌回调时用它把左侧列表切回「正在播的歌单」并定位到当前曲位置 */
+    private List<SongItem> playbackSourceSongs = null;
+    private String playbackSourceTitle = null;
     private long lastBackPressTime = 0;
     private long lastProgressSaveTime = 0;
     /** 上一次落库的曲目 id 与进度值: 用于识别「同一首歌进度倒退」的过期 tick (2026-09-12 #1) */
@@ -269,6 +285,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         tvListTitle = findViewById(R.id.tvListTitle);
         tvBuffering = findViewById(R.id.tvBuffering);
         seekFill = findViewById(R.id.seekFill);
+        seekBufferFill = findViewById(R.id.seekBufferFill);
         tvLyricsEmpty = findViewById(R.id.tvLyricsEmpty);
         tvBadgeFolder = findViewById(R.id.tvBadgeFolder);
         layoutSettingsPage = findViewById(R.id.layoutSettingsPage);
@@ -280,6 +297,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         btnNext = findViewById(R.id.btnNext);
         btnPlayMode = findViewById(R.id.btnPlayMode);
         btnCurrentFav = findViewById(R.id.btnCurrentFav);
+        btnReportStall = findViewById(R.id.btnReportStall);
 
         btnNavAllSongs = findViewById(R.id.btnNavAllSongs);
         btnNavPlaylist = findViewById(R.id.btnNavPlaylist);
@@ -335,6 +353,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                             + "ms metaDuration=" + song.getDurationMs() + "ms");
                     CrashMonitor.breadcrumb("ui", "song clicked pos=" + position
                             + " " + song.getName() + " resumeMs=" + exactMs);
+                    // 必须先记来源再挂载: setPlaylist 内部同步回调 onSongChanged,
+                    // 跟随逻辑要读到本轮的歌单语境 (2026-09-13 播放跟随)
+                    notePlaybackSource(currentListTitle, currentDisplayedSongs);
                     playerService.setPlaylist(currentDisplayedSongs, position, exactMs,
                             PlaybackStateMachine.PlaybackOrigin.USER_UI);
                 } else {
@@ -434,6 +455,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 hideSoftKeyboard();
                 if (isBound && playerService != null) {
                     if (playerService.getCurrentSong() == null && !currentDisplayedSongs.isEmpty()) {
+                        notePlaybackSource(currentListTitle, currentDisplayedSongs);
                         playerService.setPlaylist(currentDisplayedSongs, 0, -1,
                                 PlaybackStateMachine.PlaybackOrigin.USER_UI);
                     } else {
@@ -496,6 +518,17 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 JellyfinApiClient.getInstance().toggleFavorite(current.getId(), newFav, null);
             }
         });
+
+        // 上报播放卡住 (2026-09-16): 播控栏最左侧, 卡顿时一键采集现场上报给开发者。
+        // 与设置页「立即上报诊断日志」同一链路, 仅来源标识不同。
+        if (btnReportStall != null) {
+            btnReportStall.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    uploadDiagnosticsNow("playback_bar");
+                }
+            });
+        }
 
         btnBackToPlaylist.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -600,6 +633,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         btnSearchToggle.setVisibility(View.VISIBLE);
         tvListTitle.setText("全部歌曲");
         currentDisplayedSongs = new ArrayList<>(allSongsList);
+        currentListTitle = "全部歌曲";
         tvSongCount.setText(currentDisplayedSongs.size() + " 首");
         songAdapter.setShowPlayCount(false);
         songAdapter.setSongs(currentDisplayedSongs);
@@ -640,6 +674,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         btnSearchToggle.setVisibility(View.VISIBLE);
         tvListTitle.setText(title);
         currentDisplayedSongs = (songs != null) ? songs : new ArrayList<SongItem>();
+        currentListTitle = title;
         tvSongCount.setText(currentDisplayedSongs.size() + " 首");
         songAdapter.setSongs(currentDisplayedSongs);
         // (2026-09-09 实车反馈) 列表切换后必须立刻重算高亮: setSongs 不清 selectedIndex,
@@ -676,7 +711,17 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         }
         songAdapter.setSelectedIndex(index);
         if (index >= 0 && scrollToList) {
-            rvSongList.smoothScrollToPosition(index);
+            // 冷启动跟随链路里, 本方法可能在 rvSongList 刚从 GONE 转 VISIBLE、尚未完成
+            // 布局的同帧被调 (showSongListView → syncPlayingHighlight), 直接
+            // smoothScrollToPosition 会因目标位置未布局而丢失 (2026-09-14 实车:
+            // 列表停在顶部没定位到正在播的歌)。post 到下一帧布局完成后执行。
+            final int target = index;
+            rvSongList.post(new Runnable() {
+                @Override
+                public void run() {
+                    rvSongList.smoothScrollToPosition(target);
+                }
+            });
         }
     }
 
@@ -793,6 +838,93 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         setupEngineToggle();
         // 远程升级 (2026-09-12): 「关于与升级」分块 (检查更新 + 启动时自动检查开关)
         setupUpdateSection();
+        // 诊断日志手动上报 (2026-09-16): 设置页「立即上报诊断日志」
+        setupDiagUploadSection();
+    }
+
+    /** 设置页「立即上报诊断日志」: 整行 + 右侧药丸都挂同一监听 (药丸吞触点问题同引擎开关) */
+    private void setupDiagUploadSection() {
+        if (layoutSettingsPage == null) return;
+        btnSettingUploadLog = layoutSettingsPage.findViewById(R.id.btnSettingUploadLog);
+        final View row = layoutSettingsPage.findViewById(R.id.rowSettingUploadLog);
+        if (btnSettingUploadLog == null && row == null) return;
+
+        final View.OnClickListener listener = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                uploadDiagnosticsNow("settings_page");
+            }
+        };
+        if (row != null) row.setOnClickListener(listener);
+        if (btnSettingUploadLog != null) btnSettingUploadLog.setOnClickListener(listener);
+    }
+
+    /**
+     * 手动立即上报诊断日志 (设置页/播放栏按钮)。
+     *
+     * 车机不可时刻 hold 住高速 logcat 的方法: 用户现场点一下, 把 DiagLog 滚动日志 +
+     * 崩溃面包屑/上下文 + 过滤后的 logcat 尾巴一次性送到崩溃收件端点。
+     * 上传是网络 IO, 必须后台线程; 结果回主线程 Toast, 成功失败都给明确反馈。
+     *
+     * @param source 触发入口标识: settings_page = 设置页「立即上报诊断日志」,
+     *               playback_bar = 播控栏「上报」(上报播放卡住现场)
+     */
+    private void uploadDiagnosticsNow(final String source) {
+        if (diagUploadInFlight) {
+            Toast.makeText(this, "正在上报诊断日志, 请稍候…", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (!isNetworkAvailable()) {
+            Toast.makeText(this, "车机当前无网络连接, 无法上报日志", Toast.LENGTH_LONG).show();
+            return;
+        }
+        final CrashMonitor monitor = CrashMonitor.getInstance();
+        if (monitor == null) {
+            Toast.makeText(this, "诊断组件未就绪, 无法上报日志", Toast.LENGTH_LONG).show();
+            return;
+        }
+        CrashMonitor.breadcrumb("diag", "manual upload clicked source=" + source);
+        diagUploadInFlight = true;
+        setUploadLogButtonState(true);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final boolean ok;
+                try {
+                    ok = monitor.uploadDiagnosticsNow(source);
+                } catch (Throwable t) {
+                    Log.w(TAG, "manual diag upload failed: " + t);
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            diagUploadInFlight = false;
+                            setUploadLogButtonState(false);
+                            Toast.makeText(MainActivity.this,
+                                    "上报失败: " + t, Toast.LENGTH_LONG).show();
+                        }
+                    });
+                    return;
+                }
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        diagUploadInFlight = false;
+                        setUploadLogButtonState(false);
+                        Toast.makeText(MainActivity.this,
+                                ok ? "诊断日志已上报, 感谢反馈"
+                                   : "上报失败 (服务端未确认), 请稍后重试",
+                                Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        }, "DiagLog-ManualUpload").start();
+    }
+
+    /** 上报进行中置灰右侧按钮, 避免连点叠请求 */
+    private void setUploadLogButtonState(boolean busy) {
+        if (btnSettingUploadLog == null) return;
+        btnSettingUploadLog.setEnabled(!busy);
+        btnSettingUploadLog.setText(busy ? "上报中…" : "上报日志");
     }
 
     /** v3 自研 DSP 引擎开关: 写偏好即可, 引擎在下一首歌起播时惰性重建 (不打断当前播放) */
@@ -1034,8 +1166,32 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                     categoryAdapter.setCategories(categories);
 
                     String savedCategory = getLastCategoryName();
-                    categoryAdapter.setSelectedCategoryName(savedCategory);
-                    currentDisplayedSongs = filterSongsByCategory(allSongsList, savedCategory);
+                    // 冷启动优先用"持久化播放队列"还原 (2026-09-15 实车): 只按分类名过滤
+                    // 无法重建红心/播放最多/搜索队列, 会退回全库顺序 → 用户反馈"冷启动后
+                    // 跟着全部歌曲走"。按上次队列的 id 顺序 1:1 重建, 保持歌单顺序。
+                    String queueTitle = SongDao.getInstance(MainActivity.this).getState(KEY_LAST_QUEUE_TITLE, "");
+                    String queueIds = SongDao.getInstance(MainActivity.this).getState(KEY_LAST_QUEUE_IDS, "");
+                    List<SongItem> restoredQueue = rebuildQueueFromIds(queueIds, allSongsList);
+
+                    if (!restoredQueue.isEmpty()) {
+                        currentDisplayedSongs = restoredQueue;
+                        currentListTitle = (queueTitle != null && !queueTitle.trim().isEmpty())
+                                ? queueTitle : savedCategory;
+                        categoryAdapter.setSelectedCategoryName(savedCategory);
+                        Log.i(TAG, "cold-start: restored queue '" + currentListTitle
+                                + "' (" + restoredQueue.size() + " songs) from persisted ids");
+                    } else {
+                        categoryAdapter.setSelectedCategoryName(savedCategory);
+                        currentDisplayedSongs = filterSongsByCategory(allSongsList, savedCategory);
+                        currentListTitle = savedCategory;
+                        if (currentDisplayedSongs.isEmpty()) {
+                            // 分类无法重建 (如旧记录里的红心/播放最多): 兜底全库, 列表绝不空
+                            currentDisplayedSongs = new ArrayList<>(allSongsList);
+                            currentListTitle = FULL_LIBRARY_TITLE;
+                            Log.i(TAG, "cold-start: category '" + savedCategory
+                                    + "' unrebuildable, fell back to full library");
+                        }
+                    }
 
                     tvSongCount.setText(currentDisplayedSongs.size() + " 首");
                     tvListTitle.setText("歌曲列表");
@@ -1154,6 +1310,34 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         if (categoryName == null || "全部歌曲".equals(categoryName) || "all".equals(categoryName)) {
             return new ArrayList<>(all);
         }
+        // 红心收藏 / 播放最多 无法用文件夹或流派反查, 冷启动与刷新时需在此就地重建
+        // (2026-09-15 实车): 否则这两类歌单过滤结果为空 → 退回全库顺序。
+        if (categoryName.contains("红心")) {
+            List<SongItem> favs = new ArrayList<>();
+            for (SongItem song : all) {
+                if (song.isFavorite()) favs.add(song);
+            }
+            return favs;
+        }
+        if (categoryName.contains("播放最多")) {
+            List<SongItem> tops = new ArrayList<>();
+            for (SongItem song : all) {
+                if (song.getPlayCount() > 0) tops.add(song);
+            }
+            // 与 SongDao.getMostPlayed 同口径: play_count DESC, name ASC, 上限 100
+            java.util.Collections.sort(tops, new java.util.Comparator<SongItem>() {
+                @Override
+                public int compare(SongItem a, SongItem b) {
+                    int d = Integer.compare(b.getPlayCount(), a.getPlayCount());
+                    if (d != 0) return d;
+                    String an = a.getName() == null ? "" : a.getName();
+                    String bn = b.getName() == null ? "" : b.getName();
+                    return an.compareTo(bn);
+                }
+            });
+            if (tops.size() > 100) return new ArrayList<>(tops.subList(0, 100));
+            return tops;
+        }
         List<SongItem> result = new ArrayList<>();
         for (SongItem song : all) {
             if (categoryName.startsWith("📁 ")) {
@@ -1207,6 +1391,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             SongItem target = currentSongs.get(targetIndex);
             int exactMs = resumePointForPlayback(target,
                     SongDao.getInstance(this).getSongProgress(lastSongId), "auto-resume");
+            // 先记来源再挂载 (setPlaylist 内同步回调 onSongChanged, 2026-09-13 播放跟随)
+            notePlaybackSource(currentListTitle, currentSongs);
             playerService.setPlaylist(currentSongs, targetIndex, exactMs,
                     PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
         } else {
@@ -1220,6 +1406,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                         int exactMs = resumePointForPlayback(fallback.get(i),
                                 SongDao.getInstance(this).getSongProgress(lastSongId),
                                 "auto-resume-fallback");
+                        notePlaybackSource("全部歌曲", fallback);
                         playerService.setPlaylist(fallback, i, exactMs,
                                 PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
                         Log.i(TAG, "auto-resume: last song not in category '"
@@ -1230,6 +1417,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             }
             // 无上次播放记录: 只挂载播放列表，不自动播放，等待用户点击
             isAutoPlayInitialized = true;
+            notePlaybackSource(currentListTitle, currentSongs);
             playerService.setPlaylist(currentSongs, -1);
             songAdapter.setSelectedIndex(0);
             Log.i(TAG, "auto-resume: no last song record (lastSongId='"
@@ -1509,17 +1697,44 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 allSongsList = new ArrayList<>(songs);
                 SongDao.getInstance(MainActivity.this).saveSongs(allSongsList);
 
-                // 同步 Service 中的播放列表对象并校准 index
+                // 刷新后不要用全库覆盖播放队列 (2026-09-15 实车): 那会让"下一首"退回
+                // 全部歌曲顺序, 即使用户正在某个歌单里播。改为把当前队列按 id 重映射到
+                // 新库对象上, 保持歌单顺序, 再同步给 Service 校准 index。
+                List<SongItem> refreshedQueue = allSongsList;
                 if (isBound && playerService != null) {
-                    playerService.updatePlaylist(allSongsList);
+                    refreshedQueue = remapQueueToLibrary(playerService.getPlaylist(), allSongsList);
+                    playerService.updatePlaylist(refreshedQueue);
+                }
+                // 播放来源引用同步换新对象 (后续切歌跟随/再次刷新都用新实例)
+                if (playbackSourceSongs != null) {
+                    playbackSourceSongs = refreshedQueue;
                 }
 
                 List<CategoryItem> categories = buildCategories(allSongsList);
                 categoryAdapter.setCategories(categories);
 
-                CategoryItem selectedCat = categoryAdapter.getSelectedCategory();
-                String catName = selectedCat != null ? selectedCat.getName() : "全部歌曲";
-                currentDisplayedSongs = filterSongsByCategory(allSongsList, catName);
+                // 刷新期间正在播放具体歌单 (2026-09-16 车机复现修复): 绝不能用分类网格的
+                // 选中项覆盖左侧列表。此前这里无条件按 categoryAdapter.getSelectedCategory()
+                // 重挂列表, 与 followPlayingSourceList 的判断各写一套、互不知会——即使
+                // selectedCategory 本身没错, 这次刷新也可能与用户"切下一首"竞态,
+                // 用分类网格的选中项覆盖掉刚刚由播放跟随对齐好的歌单视图, 表现为
+                // "音频是队列下一首, 但左侧列表跳到另一个歌单"。真正驱动播放队列的歌单
+                // (playbackSourceTitle/playbackSourceSongs) 才是唯一来源, 刷新只重映射
+                // 队列内容 (上面 refreshedQueue), 不改变左侧列表跟随的目标。
+                if (isFollowingRealPlaylistSource()) {
+                    currentDisplayedSongs = playbackSourceSongs;
+                    currentListTitle = playbackSourceTitle;
+                } else {
+                    CategoryItem selectedCat = categoryAdapter.getSelectedCategory();
+                    String catName = selectedCat != null ? selectedCat.getName() : "全部歌曲";
+                    currentDisplayedSongs = filterSongsByCategory(allSongsList, catName);
+                    currentListTitle = catName;
+                    if (currentDisplayedSongs.isEmpty()) {
+                        // 分类无法重建 (脏名/元数据缺失): 兜底全库, 列表绝不空
+                        currentDisplayedSongs = new ArrayList<>(allSongsList);
+                        currentListTitle = FULL_LIBRARY_TITLE;
+                    }
+                }
 
                 tvSongCount.setText(currentDisplayedSongs.size() + " 首");
                 tvListTitle.setText("歌曲列表");
@@ -1654,6 +1869,176 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         }
     }
 
+    // ---------------- 播放跟随歌单 (2026-09-13) ----------------
+
+    /**
+     * 记录播放队列的来源歌单。所有 setPlaylist 挂载点 (点歌/播放键兜底/自动续播/
+     * 全库 fallback/mount-only) 调用后, 切歌回调就能把左侧列表切回「正在播的歌单」。
+     */
+    private void notePlaybackSource(String title, List<SongItem> songs) {
+        playbackSourceTitle = title;
+        playbackSourceSongs = songs;
+        persistPlaybackQueue(title, songs);
+    }
+
+    /**
+     * 持久化当前播放队列 (来源标题 + 队列内歌曲 id 的有序列表)。
+     * 全库队列只存标题、不存 id (还原时直接用库顺序), 避免每次点歌写大字符串。
+     */
+    private void persistPlaybackQueue(String title, List<SongItem> songs) {
+        try {
+            String t = (title == null) ? "" : title;
+            saveState(KEY_LAST_QUEUE_TITLE, t);
+            if (isFullLibraryTitle(t)) {
+                saveState(KEY_LAST_QUEUE_IDS, "");
+                return;
+            }
+            saveState(KEY_LAST_QUEUE_IDS, joinSongIds(songs));
+        } catch (Exception e) {
+            Log.w(TAG, "persistPlaybackQueue failed: " + e);
+        }
+    }
+
+    private static boolean isFullLibraryTitle(String title) {
+        return title == null || title.trim().isEmpty() || FULL_LIBRARY_TITLE.equals(title.trim());
+    }
+
+    /** 把歌曲列表拼成"每行一个 id"的有序字符串 (null/空 id 跳过)。 */
+    private static String joinSongIds(List<SongItem> songs) {
+        StringBuilder sb = new StringBuilder();
+        if (songs != null) {
+            for (SongItem s : songs) {
+                if (s == null || s.getId() == null || s.getId().isEmpty()) continue;
+                if (sb.length() > 0) sb.append('\n');
+                sb.append(s.getId());
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 按持久化的 id 顺序, 从给定池 (通常是最新 allSongsList) 重建队列:
+     * 保序、按 id 命中新对象、剔除已从库中删除的歌曲。池为空或 ids 为空返回空列表。
+     */
+    private List<SongItem> rebuildQueueFromIds(String idsJoined, List<SongItem> pool) {
+        List<SongItem> out = new ArrayList<>();
+        if (idsJoined == null || idsJoined.trim().isEmpty() || pool == null || pool.isEmpty()) {
+            return out;
+        }
+        Map<String, SongItem> byId = new HashMap<>();
+        for (SongItem s : pool) {
+            if (s != null && s.getId() != null) byId.put(s.getId(), s);
+        }
+        for (String rawId : idsJoined.split("\n")) {
+            if (rawId == null) continue;
+            String id = rawId.trim();
+            if (id.isEmpty()) continue;
+            SongItem s = byId.get(id);
+            if (s != null) out.add(s);
+        }
+        return out;
+    }
+
+    /**
+     * 媒体库刷新后, 把"当前正在用的播放队列"按 id 重映射到新库对象上 (保持歌单顺序),
+     * 而不是用全库覆盖队列。当前队列为空/本就是全库 → 直接用新全库; 重映射后全被删光
+     * (异常) → 兜底新全库, 绝不让队列变空。
+     */
+    private List<SongItem> remapQueueToLibrary(List<SongItem> currentQueue, List<SongItem> newLibrary) {
+        if (currentQueue == null || currentQueue.isEmpty()) return newLibrary;
+        if (newLibrary == null || newLibrary.isEmpty()) return currentQueue;
+        // 队列规模已达全库 (顺序模式下的全部歌曲) → 用新全库即可
+        if (currentQueue.size() >= newLibrary.size()) return newLibrary;
+        List<SongItem> remapped = rebuildQueueFromIds(joinSongIds(currentQueue), newLibrary);
+        return remapped.isEmpty() ? newLibrary : remapped;
+    }
+
+    /**
+     * 从歌曲自身反推所属歌单标题 (与 buildCategories 的归类规则一致):
+     * 文件夹优先, 无文件夹用流派 (含「未分类」卡片), 都没有返回 null。
+     */
+    private String inferPlaylistTitleFor(SongItem song) {
+        String folder = song.getFolderName();
+        if (folder != null && !folder.trim().isEmpty() && !"未分类文件夹".equals(folder)) {
+            return "📁 " + folder;
+        }
+        String g = song.getGenre();
+        if (g != null && !g.trim().isEmpty()) {
+            return g;
+        }
+        return null;
+    }
+
+    /**
+     * 播放队列是否来自一个具体歌单 (红心/最多播放/文件夹/流派), 而非全部歌曲/搜索结果/
+     * 未知 (2026-09-16 车机复现修复): follow 分支 1 与媒体库刷新的左侧列表覆盖判断
+     * 必须共用同一份条件, 否则两处各写一套、判断不一致时, 刷新可能用分类网格的选中项
+     * 把正在跟随的歌单覆盖掉——音频仍是队列下一首, 左侧列表却跳到不相关的歌单。
+     */
+    private boolean isFollowingRealPlaylistSource() {
+        return playbackSourceSongs != null && !playbackSourceSongs.isEmpty()
+                && playbackSourceTitle != null
+                && !"全部歌曲".equals(playbackSourceTitle)
+                && !"搜索结果".equals(playbackSourceTitle);
+    }
+
+    /**
+     * 切歌时把左侧列表对齐到「正在播的歌单」并定位当前曲 (2026-09-13 实车需求):
+     * 播放队列来自具体歌单 → 切回该歌单; 来自全部歌曲/搜索结果/未知 → 从当前曲
+     * 反推所属歌单 (文件夹优先, 流派兜底)。搜索进行中或设置页打开时不抢焦点。
+     * showSongListView 内部的 syncPlayingHighlight(true) 负责滚动定位到当前曲。
+     */
+    private void followPlayingSourceList() {
+        if (etSearch != null && etSearch.getVisibility() == View.VISIBLE
+                && etSearch.getText().length() > 0) {
+            Log.i(TAG, "follow: skip (search active)");
+            return; // 搜索结果浏览中, 不打断用户
+        }
+        if (layoutSettingsPage != null && layoutSettingsPage.getVisibility() == View.VISIBLE) {
+            Log.i(TAG, "follow: skip (settings page)");
+            return; // 设置页打开中, 不打断用户
+        }
+        SongItem current = (isBound && playerService != null) ? playerService.getCurrentSong() : null;
+        if (current == null) {
+            Log.i(TAG, "follow: skip (no current song)");
+            return;
+        }
+        Log.i(TAG, "follow: song=" + current.getName() + " folder='" + current.getFolderName()
+                + "' genre='" + current.getGenre() + "' srcTitle='" + playbackSourceTitle
+                + "' listTitle='" + currentListTitle + "'");
+
+        boolean listVisible = rvSongList != null && rvSongList.getVisibility() == View.VISIBLE;
+        // 1) 播放队列来自具体歌单 (红心/最多播放/文件夹/流派): 左侧切回该歌单
+        if (isFollowingRealPlaylistSource()) {
+            if (listVisible && currentDisplayedSongs == playbackSourceSongs) {
+                Log.i(TAG, "follow: already on source list");
+                return; // 已在播放歌单视图, 定位交给外层 syncPlayingHighlight
+            }
+            Log.i(TAG, "follow: switch to source list '" + playbackSourceTitle + "'");
+            showSongListView(playbackSourceTitle, playbackSourceSongs);
+            return;
+        }
+        // 2) 队列是全部歌曲/搜索结果/未知: 从当前曲反推所属歌单 (用户不要全库大列表)
+        String title = inferPlaylistTitleFor(current);
+        if (title == null) {
+            Log.i(TAG, "follow: no inferred title, keep current");
+            return; // 无歌单归属, 保持现状
+        }
+        if (listVisible && title.equals(currentListTitle)) {
+            Log.i(TAG, "follow: already on '" + title + "'");
+            return; // 已在该歌单视图
+        }
+        List<SongItem> songs = filterSongsByCategory(allSongsList, title);
+        boolean contains = songs.contains(current);
+        if (songs.isEmpty() || !contains) {
+            Log.i(TAG, "follow: infer missed '" + title + "', size=" + songs.size()
+                    + " contains=" + contains);
+            return; // 反推失败 (元数据缺失/脏数据), 不盲目切
+        }
+        Log.i(TAG, "follow: switch to inferred '" + title + "' (" + songs.size() + " songs)");
+        showSongListView(title, songs);
+    }
+
     // ---------------- 播放回调与歌词先显后同 ----------------
 
     @Override
@@ -1682,6 +2067,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         seekBarProgress.setProgress(0);
         tvCurrentTime.setText("00:00");
         updateSeekFill();
+        // 缓冲层同帧归零 (2026-09-13 双进度条): 不清的话残留上一首的灰色缓冲段,
+        // 与归零后的播放进度形成分叉
+        updateSeekBufferFill(-1);
         // 切歌即给出缓冲反馈 (2026-09-12 缓冲/预取): 起播门槛 / 加载期间先显「缓冲中…」,
         // 后续 onBufferingUpdate 会刷新百分比并在稳定后隐藏
         if (tvBuffering != null) {
@@ -1692,6 +2080,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         // 防线误判 (id 相同但基准来自上一轮 generation 的情况尤其危险) (2026-09-12 #1)
         lastProgressSaveTrackId = null;
         lastProgressSaveMs = -1;
+
+        // (2026-09-13 播放跟随) 先把左侧列表对齐到「正在播的歌单」,
+        // 再由 syncPlayingHighlight 在 (可能刚切换的) 列表里定位当前曲
+        followPlayingSourceList();
 
         // 歌曲不在当前列表时也要清掉旧高亮 (2026-09-09 实车反馈):
         // 否则切列表后旧 index 位置的歌被错误点亮, 与实际播放脱节
@@ -1732,11 +2124,14 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     }
 
     /**
-     * 缓冲 % 上 UI (2026-09-12 缓冲/预取): 缓冲时显示「缓冲 43%」, 总长未知显示「缓冲中…」,
-     * 进入稳定播放 (buffering=false) 即隐藏。回调已在主线程, 直接操作控件。
+     * 缓冲 % 上 UI (2026-09-12 缓冲/预取; 2026-09-13 双进度条): 缓冲时显示「缓冲 43%」,
+     * 总长未知显示「缓冲中…」, 进入稳定播放 (buffering=false) 即隐藏文字。
+     * 缓冲进度层则无论稳定与否都跟随 percent 推进——稳定态服务端也会持续上报,
+     * 灰色缓冲段像「视频加载」一样持续长条。回调已在主线程, 直接操作控件。
      */
     @Override
     public void onBufferingUpdate(int percent, boolean buffering) {
+        updateSeekBufferFill(percent);
         if (tvBuffering == null) return;
         if (!buffering) {
             if (tvBuffering.getVisibility() != View.GONE) {
@@ -1895,24 +2290,49 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
      *  宽度终点对齐滑块中心 (滑块行程是 宽−滑块宽, 中心再补半个滑块宽), 否则填充会超出滑块 */
     private void updateSeekFill() {
         if (seekFill == null || seekBarProgress == null) return;
-        int w = seekBarProgress.getWidth();
-        int max = seekBarProgress.getMax();
-        if (w <= 0) return;
-        float frac = max > 0 ? seekBarProgress.getProgress() / (float) max : 0f;
+        if (seekBarProgress.getWidth() <= 0) return;
+        float frac = seekBarProgress.getMax() > 0
+                ? seekBarProgress.getProgress() / (float) seekBarProgress.getMax() : 0f;
         if (frac < 0f) frac = 0f;
         if (frac > 1f) frac = 1f;
-        int width;
+        applyFillWidth(seekFill, seekFillWidthFor(frac));
+    }
+
+    /**
+     * 缓冲进度层 (2026-09-13 双进度条): 与播放进度同比例尺, 宽度 = 缓冲 percent × 满宽。
+     * percent 是整首已下载的绝对占比 (bufEnd/总字节), 播放头之前的段落被上层青绿播放
+     * 进度遮住, 视觉上只露出「缓冲超前」的浅色段——即「视频加载」式双层进度条。
+     * percent&lt;0 (总长未知) 或播放中 seek 重置窗口时归零, 随下载推进重新长条。
+     */
+    private void updateSeekBufferFill(int percent) {
+        if (seekBufferFill == null || seekBarProgress == null) return;
+        if (seekBarProgress.getWidth() <= 0) return;
+        float frac = (percent >= 0 && percent <= 100) ? percent / 100f : 0f;
+        // 不落后于播放头: 字节↔时间比例尺存在微小偏差, 灰条缩到青条后面会像显示异常
+        float playFrac = seekBarProgress.getMax() > 0
+                ? seekBarProgress.getProgress() / (float) seekBarProgress.getMax() : 0f;
+        if (frac < playFrac) frac = playFrac;
+        if (frac > 1f) frac = 1f;
+        applyFillWidth(seekBufferFill, seekFillWidthFor(frac));
+    }
+
+    /** 把进度比例换算成填充宽度: 终点对齐滑块中心 (与 updateSeekFill 同一套数学) */
+    private int seekFillWidthFor(float frac) {
+        int w = seekBarProgress.getWidth();
         android.graphics.drawable.Drawable thumb = seekBarProgress.getThumb();
         if (thumb != null) {
             int thumbW = thumb.getIntrinsicWidth();
-            width = (int) (frac * (w - thumbW) + thumbW / 2f + 0.5f);
-        } else {
-            width = (int) (w * frac);
+            return (int) (frac * (w - thumbW) + thumbW / 2f + 0.5f);
         }
-        ViewGroup.LayoutParams lp = seekFill.getLayoutParams();
+        return (int) (w * frac);
+    }
+
+    /** 宽度确有变化才 setLayoutParams, 避免稳定期每 tick 无谓重排 */
+    private static void applyFillWidth(View fill, int width) {
+        ViewGroup.LayoutParams lp = fill.getLayoutParams();
         if (lp.width != width) {
             lp.width = width;
-            seekFill.setLayoutParams(lp);
+            fill.setLayoutParams(lp);
         }
     }
 
@@ -2153,6 +2573,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     private Dialog updateDialog;
     private Button btnSettingCheckUpdate;
     private Button btnSettingAutoUpdateValue;
+    private Button btnSettingUploadLog;
+    /** 手动上报诊断日志是否在飞: 点一次期间再点合并, 不叠请求 */
+    private boolean diagUploadInFlight = false;
     /** 检查是否在飞: 与 isRefreshing 同理, 进行中再点一律合并, 不叠请求 */
     private boolean updateCheckInFlight = false;
     /** 本进程是否已排过自动检查: 防止配置变更重建 Activity 时重复排队 */

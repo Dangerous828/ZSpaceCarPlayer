@@ -418,6 +418,15 @@
                     android:layout_gravity="center_vertical"
                     android:background="@drawable/seek_track_bg" />
 
+                <!-- 缓冲进度层 (2026-09-13 双进度条): 深色轨道上的浅色已加载段,
+                     青绿播放进度 (seekFill) 压在其上, 视觉上露出「缓冲超前」的浅色尾巴 -->
+                <View
+                    android:id="@+id/seekBufferFill"
+                    android:layout_width="0dp"
+                    android:layout_height="@dimen/seek_track_h"
+                    android:layout_gravity="center_vertical"
+                    android:background="@drawable/seek_buffer_bg" />
+
                 <View
                     android:id="@+id/seekFill"
                     android:layout_width="0dp"
@@ -488,11 +497,23 @@
             android:paddingTop="2dp"
             android:paddingBottom="6dp">
 
+            <!-- 上报播放卡住 (2026-09-16): 卡顿时一键采集现场上报, 无需 adb。用文字不用图形字符: API18 字体缺字形。 -->
+            <Button
+                android:id="@+id/btnReportStall"
+                android:layout_width="@dimen/mode_w"
+                android:layout_height="@dimen/mode_h"
+                android:background="@drawable/bg_soft_pill"
+                android:padding="0dp"
+                android:text="上报"
+                android:textColor="@color/ink_dim"
+                android:textSize="@dimen/mode_text" />
+
             <!-- 红心收藏按钮 (当前曲目收藏) -->
             <Button
                 android:id="@+id/btnCurrentFav"
                 android:layout_width="@dimen/mode_w"
                 android:layout_height="@dimen/mode_h"
+                android:layout_marginStart="14dp"
                 android:background="@drawable/bg_soft_pill"
                 android:padding="0dp"
                 android:text="♥"

@@ -358,6 +358,7 @@ public final class ApkDownloader {
         if (!part.renameTo(dest)) {
             throw new IOException("安装包保存失败: 无法重命名到 " + dest);
         }
+        UpdateInstaller.makeReadableForInstaller(dest);
         return dest;
     }
 

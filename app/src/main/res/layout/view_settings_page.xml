@@ -413,6 +413,71 @@
                     android:textSize="@dimen/mini_text" />
             </LinearLayout>
 
+            <LinearLayout
+                android:id="@+id/rowSettingUploadLog"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_card_grid"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="16dp"
+                android:paddingTop="14dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="14dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_badge_hi"
+                    android:paddingStart="8dp"
+                    android:paddingTop="3dp"
+                    android:paddingEnd="8dp"
+                    android:paddingBottom="3dp"
+                    android:text="LOG"
+                    android:textColor="@color/accent"
+                    android:textSize="@dimen/card_sub_size"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="14dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="立即上报诊断日志"
+                        android:textColor="@color/ink"
+                        android:textSize="@dimen/card_title_size"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="卡顿/缓冲/切歌错乱等现场一键打包发给开发者"
+                        android:textColor="@color/ink_dim"
+                        android:textSize="@dimen/card_sub_size" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnSettingUploadLog"
+                    android:layout_width="wrap_content"
+                    android:layout_height="@dimen/mini_h"
+                    android:background="@drawable/bg_soft_pill"
+                    android:minWidth="@dimen/font_w"
+                    android:singleLine="true"
+                    android:text="上报日志"
+                    android:textAllCaps="false"
+                    android:textColor="@color/ink_dim"
+                    android:textSize="@dimen/mini_text" />
+            </LinearLayout>
+
         </LinearLayout>
     </ScrollView>
 </LinearLayout>

@@ -33,8 +33,37 @@ public class CategoryAdapter extends RecyclerView.Adapter<CategoryAdapter.Catego
     }
 
     public void setCategories(List<CategoryItem> categories) {
+        // 按名字重定位 selectedPosition (2026-09-16 车机复现修复): 媒体库刷新后重建的
+        // 文件夹/流派卡片顺序由 LinkedHashMap 的歌曲遍历顺序决定, 服务器返回顺序变化
+        // (或曲目增减) 会让同一个歌单挪到不同下标。旧写法只保留裸下标, 刷新后
+        // getSelectedCategory() 会静默返回挪位后占据该下标的另一个歌单, 导致左侧列表
+        // 被错误覆盖成不相关的歌单——即使实际播放队列的来源歌单没有变化。
+        String selectedName = getSelectedCategoryName();
         this.categories = (categories != null) ? new ArrayList<>(categories) : new ArrayList<CategoryItem>();
+        if (selectedName != null) {
+            int resolved = indexOfName(selectedName);
+            selectedPosition = (resolved >= 0) ? resolved : 0;
+        } else if (selectedPosition >= this.categories.size()) {
+            selectedPosition = 0;
+        }
         notifyDataSetChanged();
+    }
+
+    /** 当前选中歌单的名字 (刷新前保存, 用于刷新后按名字重定位), 无选中项时 null。 */
+    private String getSelectedCategoryName() {
+        if (selectedPosition >= 0 && selectedPosition < categories.size()) {
+            return categories.get(selectedPosition).getName();
+        }
+        return null;
+    }
+
+    private int indexOfName(String name) {
+        for (int i = 0; i < categories.size(); i++) {
+            if (name.equals(categories.get(i).getName())) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     public List<CategoryItem> getCategories() {

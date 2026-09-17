@@ -1,15 +1,12 @@
 package com.ktools.zspacecarplayer.crash;
 
+import android.content.Context;
 import android.util.Log;
 
 import com.ktools.zspacecarplayer.net.IPv6FirstDns;
-import com.ktools.zspacecarplayer.net.TLSSocketFactory;
+import com.ktools.zspacecarplayer.net.TlsCompat;
 
 import java.util.concurrent.TimeUnit;
-
-import javax.net.ssl.TrustManagerFactory;
-import javax.net.ssl.X509TrustManager;
-
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -37,10 +34,16 @@ public final class CrashUploader {
     private static final java.util.regex.Pattern OK_FIELD =
             java.util.regex.Pattern.compile("\"ok\"\\s*:");
 
+    private final Context context;
     private final String endpoint;
     private volatile OkHttpClient client;
 
     public CrashUploader(String endpoint) {
+        this(null, endpoint);
+    }
+
+    public CrashUploader(Context context, String endpoint) {
+        this.context = context != null ? context.getApplicationContext() : null;
         this.endpoint = endpoint;
     }
 
@@ -153,26 +156,7 @@ public final class CrashUploader {
                 .followRedirects(false)
                 .followSslRedirects(false)
                 .dns(new IPv6FirstDns());
-        try {
-            TrustManagerFactory tmf =
-                    TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-            tmf.init((java.security.KeyStore) null);
-            X509TrustManager systemTm = null;
-            for (javax.net.ssl.TrustManager tm : tmf.getTrustManagers()) {
-                if (tm instanceof X509TrustManager) {
-                    systemTm = (X509TrustManager) tm;
-                    break;
-                }
-            }
-            if (systemTm != null) {
-                // 只用系统信任链：崩溃上报不该携带曲库那套证书固定，
-                // 否则端点换机器时连报告都传不出去
-                builder.sslSocketFactory(new TLSSocketFactory(new javax.net.ssl.TrustManager[]{systemTm}),
-                        systemTm);
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "TLS setup failed, fallback to okhttp default", t);
-        }
+        TlsCompat.configureTls(builder, context);
         return builder.build();
     }
 }

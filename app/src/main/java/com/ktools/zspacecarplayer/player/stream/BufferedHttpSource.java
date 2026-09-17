@@ -3,6 +3,8 @@ package com.ktools.zspacecarplayer.player.stream;
 import android.os.SystemClock;
 import android.util.Log;
 
+import com.ktools.zspacecarplayer.crash.CrashMonitor;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -255,6 +257,8 @@ public class BufferedHttpSource {
                         abortActiveConnectionLocked(); // 强行打断阻塞在 recvfrom 的连接，促发重试续传
                     }
                     Log.e(TAG, "readAt stall: url=" + url + " pos=" + position);
+                    CrashMonitor.breadcrumb("stream", "readAt stall fatal='" + fatalError
+                            + "' pos=" + position + " url=" + url);
                     lock.notifyAll();
                     continue;
                 }
@@ -320,6 +324,8 @@ public class BufferedHttpSource {
             fatalError = "stream starved: reader idle over " + STARVE_LIMIT_MS + "ms/"
                     + STARVE_WINDOW_MS + "ms for " + starveStallCount + " windows";
             Log.e(TAG, "starve fatal: " + fatalError + " pos=" + position + " url=" + url);
+            CrashMonitor.breadcrumb("stream", "starve FATAL '" + fatalError
+                    + "' pos=" + position + " url=" + url);
             abortActiveConnectionLocked();
             lock.notifyAll();
             return true;
@@ -327,6 +333,8 @@ public class BufferedHttpSource {
         Log.w(TAG, "starve stall " + starveStallCount + "/" + MAX_STARVE_STALLS
                 + ": reader idle over " + STARVE_LIMIT_MS + "ms/" + STARVE_WINDOW_MS
                 + "ms, reconnecting from " + bufEnd + " url=" + url);
+        CrashMonitor.breadcrumb("stream", "starve stall " + starveStallCount + "/"
+                + MAX_STARVE_STALLS + " reconnect from bufEnd=" + bufEnd + " url=" + url);
         downloadEpoch++;
         downloadAbort = true;
         abortActiveConnectionLocked();

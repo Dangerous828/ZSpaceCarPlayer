@@ -1,0 +1,12 @@
+{
+  "versionCode": 5,
+  "versionName": "3.1.1",
+  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.1.1-code5-debug.apk",
+  "fileName": "ZSpaceCarPlayer-3.1.1-code5-debug.apk",
+  "sizeBytes": 3111784,
+  "sha256": "601be848536c2f7b6e754a8afa79800374d268c1cf9ee431beb6971d70dff964",
+  "notes": "修复歌单播放顺序(切歌单/冷启动都跟随歌单顺序)、静音键暂停(改为监听系统静音跳变)、新增缓冲诊断落盘日志。",
+  "minVersionCode": 1,
+  "mandatory": false,
+  "publishedAt": "2026-09-15"
+}

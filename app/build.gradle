@@ -32,8 +32,8 @@ android {
         applicationId "com.ktools.zspacecarplayer"
         minSdk 18
         targetSdk 28
-        versionCode 4
-        versionName "3.1.0"
+        versionCode 5
+        versionName "3.1.1"
 
         buildConfigField "String", "JELLYFIN_SERVER_URL", "\"${devServerUrl}\""
         buildConfigField "String", "JELLYFIN_USERNAME", "\"${devUsername}\""

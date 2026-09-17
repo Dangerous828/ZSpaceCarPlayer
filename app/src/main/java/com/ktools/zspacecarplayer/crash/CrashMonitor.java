@@ -131,7 +131,7 @@ public final class CrashMonitor {
         this.appContext = context.getApplicationContext();
         this.prefs = appContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
         this.store = new CrashReportStore(new File(appContext.getFilesDir(), REPORT_DIR));
-        this.uploader = new CrashUploader(prefs.getString(PREF_ENDPOINT, DEFAULT_ENDPOINT));
+        this.uploader = new CrashUploader(appContext, prefs.getString(PREF_ENDPOINT, DEFAULT_ENDPOINT));
         this.deviceId = obtainDeviceId();
         String vn = "unknown";
         int vc = -1;
@@ -181,6 +181,12 @@ public final class CrashMonitor {
             Log.w(TAG, "inspectPreviousSession failed", t);
         }
         writeSessionMarker();
+        try {
+            // 落盘滚动诊断日志: logcat 与内存面包屑都会随车机重启丢失, 关键事件必须落盘
+            DiagLog.init(appContext.getFilesDir());
+        } catch (Throwable t) {
+            Log.w(TAG, "DiagLog init failed, disk diagnostics disabled", t);
+        }
         installUncaughtHandler();
         startMainThreadWatchdog();
         scheduleUpload(UPLOAD_DELAY_AFTER_START_MS);
@@ -191,9 +197,10 @@ public final class CrashMonitor {
     //  业务侧接口
     // ------------------------------------------------------------------ //
 
-    /** 记一条面包屑（崩溃前发生了什么） */
+    /** 记一条面包屑（崩溃前发生了什么）。同时落盘到滚动诊断日志, 重启后仍可取证。 */
     public static void breadcrumb(String tag, String message) {
         CrashBreadcrumbs.record(tag, message);
+        DiagLog.log(tag, message);
     }
 
     /** 写入/更新一个现场上下文字段，之后每份报告都会带上 */
@@ -666,6 +673,55 @@ public final class CrashMonitor {
         prefs.edit().putBoolean(PREF_ENABLED, enabled).apply();
     }
 
+    /** 手动上报的场景标签: 设置页「立即上报诊断日志」按钮。 */
+    public static final String KIND_MANUAL_DIAG = "manual_diag";
+
+    /**
+     * 手动立即上报诊断现场 (设置页按钮触发)。
+     *
+     * 与崩溃上报不同: 不落盘 {@link CrashReportStore}、不参与退避 —— 这是用户主动
+     * 点按钮的一次性动作, 当场就要结论。构造一份与崩溃同构的报告 (设备/版本/面包屑/
+     * logcat 尾巴/播放上下文) 并附上 DiagLog 滚动日志内容, 走同一端点同一 ack 校验。
+     *
+     * @param source 触发入口标识 (如 settings_page / playback_bar), 写进报告便于服务端区分
+     * @return true 表示服务端确认收下; false 表示本次没传出去 (网络/端点/TLS/ack).
+     *         失败也可再点一次, 不设退避。
+     */
+    public boolean uploadDiagnosticsNow(String source) {
+        if (!prefs.getBoolean(PREF_ENABLED, true)) {
+            Log.w(TAG, "manual diag upload skipped: upload disabled");
+            return false;
+        }
+        CrashReport report = newReport(KIND_MANUAL_DIAG);
+        if (source != null) {
+            report.put("triggerSource", source);
+        }
+        String diag = DiagLog.content();
+        if (diag != null && diag.trim().length() > 0) {
+            report.put("diagLog", diag);
+        }
+        // 手动上报也带上 crash 缓冲区的 logcat 尾巴 (崩溃信号行在重启后仍保留, 是现场铁证)
+        report.setLogcat(readLogcat());
+        String body = report.toJson();
+        if (body.length() > CrashUploader.MAX_BODY_BYTES) {
+            Log.w(TAG, "manual diag body too large (" + body.length() + " chars), dropping logcat");
+            report.setLogcat("");
+            body = report.toJson();
+        }
+        // upload() 对超限 body 的语义是「让调用方删文件」——手动上报没有本地文件可删,
+        // 必须自己确认体积, 否则用户会看到"上报成功"而现场根本没发出去
+        if (body.length() > CrashUploader.MAX_BODY_BYTES) {
+            Log.w(TAG, "manual diag body still too large (" + body.length() + " chars), aborting");
+            return false;
+        }
+        boolean ok = uploader.upload(body);
+        Log.i(TAG, "manual diag upload -> " + ok + " (bytes=" + body.length() + ")");
+        if (!ok) {
+            CrashMonitor.breadcrumb("diag", "manual upload failed");
+        }
+        return ok;
+    }
+
     public int getPendingCount() {
         return store.pending().size();
     }
@@ -681,6 +737,10 @@ public final class CrashMonitor {
      * 两个缓冲区都要：crash 缓冲区跨进程重启保留，是 native 崩溃定性的铁证；但它
      * 只有信号行。而 native 崩溃时内存里的面包屑环随进程一起没了，Java 侧也没有
      * 栈——主缓冲区尾巴就成了还原"崩溃前播放器在干什么"的唯一通道。
+     *
+     * 主缓冲区在车机上会混进大量导航等系统进程的日志（NaviServer/phone/CAN...），
+     * 白占上传体积也稀释现场，所以按行白名单过滤：只留本应用子系统 + 音频链路
+     * 关键系统 tag 的行。crash 缓冲区不过滤——信号行没有 tag，且是崩溃定性铁证。
      */
     private String readLogcat() {
         StringBuilder sb = new StringBuilder(8192);
@@ -688,15 +748,46 @@ public final class CrashMonitor {
         if (fromCrashBuffer != null && fromCrashBuffer.trim().length() > 0) {
             sb.append(fromCrashBuffer.trim());
         }
-        String mainTail = execLogcat(new String[]{"logcat", "-d", "-t", "300"});
+        // 行数从 300 提到 1500: 过滤会去掉大部分无关行, 提量后过滤完仍保留足够时间跨度
+        String mainTail = execLogcat(new String[]{"logcat", "-d", "-t", "1500"});
         if (mainTail != null && mainTail.trim().length() > 0) {
-            if (sb.length() > 0) {
-                sb.append("\n--- main buffer ---\n");
+            String filtered = filterLogcatLines(mainTail);
+            if (filtered.trim().length() > 0) {
+                if (sb.length() > 0) {
+                    sb.append("\n--- main buffer ---\n");
+                }
+                sb.append(filtered.trim());
             }
-            sb.append(mainTail.trim());
         }
         return sb.toString();
     }
+
+    /**
+     * 按 tag 白名单过滤 logcat 行。格式 "… V/tag: msg"，tag 在最后一个 '/' 与 ':' 之间；
+     * 用整行 contains 判断，避免 tag 大小写/附加字段差异漏判。
+     */
+    private static String filterLogcatLines(String raw) {
+        StringBuilder sb = new StringBuilder(raw.length());
+        for (String line : raw.split("\\n")) {
+            if (line.length() == 0) {
+                continue;
+            }
+            if (LOG_KEEP_ANY.matcher(line).find()) {
+                sb.append(line).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    /** 保留的行: 本应用各子系统 + 音频/媒体链路关键系统 tag。整行匹配, 大小写不敏感。 */
+    private static final java.util.regex.Pattern LOG_KEEP_ANY = java.util.regex.Pattern.compile(
+            "(?i)(AudioPlayerService|DspAudioTrackPlayer|AndroidMediaPlayer|HttpProxyServer|"
+          + "BufferedHttpSource|BufferingPolicy|MainActivity|UpdateChecker|UpdateHttp|ApkDownloader|"
+          + "UpdateInstaller|SystemMuteMonitor|MusicVolumeIntent|CarRemoteControlClient|GeelyAmpWake|"
+          + "MediaButtonReceiver|BootReceiver|NativeDsp|NativeLosslessDecoder|CacheSizeManager|SongDao|"
+          + "DiagLog|CrashMonitor|CrashBreadcrumbs|CrashUploader|CrashReportStore|"
+          + "AudioTrack|AudioFlinger|AudioManager|MediaPlayer|MediaCodec|PlaybackStateMachine"
+          + "|OkHttp|okhttp|JellyfinApiClient)");
 
     private String execLogcat(String[] command) {
         Process process = null;
