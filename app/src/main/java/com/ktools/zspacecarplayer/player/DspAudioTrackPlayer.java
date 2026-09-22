@@ -79,6 +79,11 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
 
     private int sampleRate = 44100;
     private int channelCount = 2;
+    /**
+     * 真正进 DSP 与 AudioTrack 的声道数：解码器报 &gt;2 时恒为 2（先经 {@link PcmDownmix} 下混）。
+     * 与 channelCount 分开是因为 PCM 读取缓冲必须按母带声道数分配，不能跟着缩。
+     */
+    private int renderChannels = 2;
     private float volume = 1.0f;
 
     private volatile Thread renderThread;
@@ -355,11 +360,23 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     }
 
     private void initAudioTrackAndDsp() {
+        // 多声道母带（曲库里混有 5.1 WAV）在下混前不得进链路：C++ DSP 只实现了 1/2 声道分支，
+        // ch>2 时一个样本都不处理；AudioTrack 又只能建 mono/stereo。两者叠加会把
+        // FL/C/FR/LFE/BL/BR 两两错配进 L/R——相位抵消 + LFE 进全频单元 + 同样内容被拉成
+        // 3 倍时长（6 声道样本按 2 声道消费），听感刺耳。
+        this.renderChannels = PcmDownmix.effectiveChannels(channelCount);
+        if (renderChannels != channelCount) {
+            Log.i(TAG, "downmix " + channelCount + "ch -> " + renderChannels + "ch");
+            CrashMonitor.putContext("downmixTo", renderChannels);
+            CrashMonitor.breadcrumb("v3", "downmix " + channelCount + "ch->"
+                    + renderChannels + "ch sr=" + sampleRate);
+        }
+
         // 初始化 Native DSP 核心
-        NativeDsp.init(sampleRate, channelCount);
+        NativeDsp.init(sampleRate, renderChannels);
 
         // 配置 AudioTrack (Android 4.3 兼容)
-        int channelConfig = (channelCount == 1) ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
+        int channelConfig = (renderChannels == 1) ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
         int minBufSize = AudioTrack.getMinBufferSize(sampleRate, channelConfig, AudioFormat.ENCODING_PCM_16BIT);
         // 给 4 倍 buffer 防止吉利 8600 车机 CPU 抖动产生 underrun
         int bufferSize = Math.max(minBufSize * 4, 32768);
@@ -514,7 +531,13 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         if (dec == null) return;
 
         final int framesPerRead = 2048;
-        short[] pcmBuf = new short[framesPerRead * channelCount];
+        final int srcChannels = channelCount;
+        final int outChannels = renderChannels;
+        // 解码缓冲按母带声道数分配（dr_* 会写满 frames*channels 个 short），
+        // 下混目标另开一块同等帧数的立体声 scratch，循环外分配一次复用
+        short[] pcmBuf = new short[framesPerRead * srcChannels];
+        final boolean needsDownmix = srcChannels > outChannels;
+        final short[] mixBuf = needsDownmix ? new short[framesPerRead * outChannels] : null;
 
         try {
             while (isRendering.get() && !sawOutputEOS) {
@@ -572,11 +595,17 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                 }
 
                 // ★★★ 核心：进入 Native C++ DSP 进行 EQ、BassBoost、全景声场与混响运算 ★★★
-                NativeDsp.processShorts(pcmBuf, 0, framesGot);
+                // 下混必须在 DSP 之前：DSP 的声道数已按立体声初始化，喂多声道会整块透传
+                short[] dspBuf = pcmBuf;
+                if (needsDownmix) {
+                    PcmDownmix.toStereo(pcmBuf, 0, framesGot, srcChannels, mixBuf, 0);
+                    dspBuf = mixBuf;
+                }
+                NativeDsp.processShorts(dspBuf, 0, framesGot);
 
                 // 写入裸 PCM AudioTrack (直接写 short 数组)
                 if (audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
-                    audioTrack.write(pcmBuf, 0, framesGot * channelCount);
+                    audioTrack.write(dspBuf, 0, framesGot * outChannels);
                 }
             }
         } catch (Exception e) {
@@ -712,6 +741,7 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
 
         byte[] pcmTempBuf = new byte[8192];
+        byte[] mixTempBuf = null; // 多声道下混 scratch，声道数变化时按新帧长重算
 
         try {
             while (isRendering.get() && !sawOutputEOS) {
@@ -759,16 +789,35 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                         currentPresentationTimeUs = info.presentationTimeUs;
 
                         int remaining = info.size;
+                        final int srcCh = channelCount;
+                        final int outCh = renderChannels;
+                        final int bytesPerSrcFrame = 2 * srcCh;
+                        // 分块必须整帧对齐：8192 对 6 声道不整除，切在帧中间会让下混读到半个样本
+                        final int chunkCap = pcmTempBuf.length - (pcmTempBuf.length % bytesPerSrcFrame);
+                        final boolean needsDownmix = srcCh > outCh;
+                        final int mixNeed = chunkCap / bytesPerSrcFrame * 4;
+                        if (needsDownmix && (mixTempBuf == null || mixTempBuf.length < mixNeed)) {
+                            mixTempBuf = new byte[mixNeed];
+                        }
                         while (remaining > 0 && isRendering.get()) {
-                            int toRead = Math.min(remaining, pcmTempBuf.length);
+                            int toRead = Math.min(remaining, chunkCap);
                             outputBuffer.get(pcmTempBuf, 0, toRead);
 
+                            byte[] out = pcmTempBuf;
+                            int outLen = toRead;
+                            if (needsDownmix) {
+                                int frames = toRead / bytesPerSrcFrame;
+                                PcmDownmix.toStereoBytes(pcmTempBuf, 0, frames, srcCh, mixTempBuf, 0);
+                                out = mixTempBuf;
+                                outLen = frames * 4;
+                            }
+
                             // ★★★ 核心：进入 Native C++ DSP 进行音效运算 ★★★
-                            NativeDsp.processBytes(pcmTempBuf, 0, toRead);
+                            NativeDsp.processBytes(out, 0, outLen);
 
                             // 写入裸 PCM AudioTrack
                             if (audioTrack != null && audioTrack.getPlayState() == AudioTrack.PLAYSTATE_PLAYING) {
-                                audioTrack.write(pcmTempBuf, 0, toRead);
+                                audioTrack.write(out, 0, outLen);
                             }
                             remaining -= toRead;
                         }
@@ -802,7 +851,14 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                     if (newFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
                         channelCount = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
                     }
-                    NativeDsp.init(sampleRate, channelCount);
+                    renderChannels = PcmDownmix.effectiveChannels(channelCount);
+                    if (renderChannels != channelCount) {
+                        CrashMonitor.breadcrumb("v3", "downmix " + channelCount + "ch->"
+                                + renderChannels + "ch (codec output format changed)");
+                    }
+                    // scratch 容量按源声道帧长算的，声道数一变就不可信，交给下一轮重分配
+                    mixTempBuf = null;
+                    NativeDsp.init(sampleRate, renderChannels);
                 }
             }
         } catch (Exception e) {
