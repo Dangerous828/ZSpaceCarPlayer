@@ -656,7 +656,8 @@ public class AudioPlayerService extends Service {
                 starving, prefillInProgress, already)) {
             return;
         }
-        String nextUrl = JellyfinApiClient.getInstance().getStreamUrl(next.getId(), true);
+        String nextUrl = JellyfinApiClient.getInstance()
+                .getStreamUrlForSong(next.getId(), next.getStreamUrl());
         if (nextUrl == null || nextUrl.length() == 0) return;
         proxy.prefetch(nextUrl);
         prefetchedNextSongId = next.getId();
@@ -677,10 +678,29 @@ public class AudioPlayerService extends Service {
 
     private void abortPrefetchById(String songId) {
         if (songId == null) return;
-        String pfUrl = JellyfinApiClient.getInstance().getStreamUrl(songId, true);
+        String pfUrl = streamUrlForSongId(songId);
         if (pfUrl != null && pfUrl.length() > 0) {
             HttpProxyServer.getInstance().abortPrefetch(pfUrl);
         }
+    }
+
+    /**
+     * 只有 songId 时复原该曲的传输方式。
+     *
+     * 预取源是按 URL 登记与命中的，作废时必须用与预取时完全一致的 URL（含下混与否），
+     * 否则作废打空、旧的 8MB 预取缓冲白占着内存与带宽。
+     */
+    private String streamUrlForSongId(String songId) {
+        JellyfinApiClient client = JellyfinApiClient.getInstance();
+        if (playlist != null) {
+            for (int i = 0; i < playlist.size(); i++) {
+                SongItem s = playlist.get(i);
+                if (s != null && songId.equals(s.getId())) {
+                    return client.getStreamUrlForSong(songId, s.getStreamUrl());
+                }
+            }
+        }
+        return client.getStreamUrl(songId, true);
     }
 
     private void startForegroundServiceNotification(String title, String content) {
@@ -857,8 +877,8 @@ public class AudioPlayerService extends Service {
                     CrashMonitor.breadcrumb("play", "reset done");
                     bindPlayerCallbacks(generation);
                     gainEnvelope.setImmediate(0.0f);
-                    // 双引擎均支持原码率直传无损 (static=true)：v3 经原生 dr_* 软解出 PCM 送 NativeDsp，系统引擎走系统 MediaPlayer
-                    String urlToPlay = client.getStreamUrl(song.getId());
+                    // 传输方式由该曲入库时的码率裁定决定（多声道无损走服务端下混），此处只现取 token
+                    String urlToPlay = client.getStreamUrlForSong(song.getId(), song.getStreamUrl());
                     CrashMonitor.putContext("streamUrl", urlToPlay);
                     // 缓冲 / 预取 (2026-09-12)：记录当前曲远端 URL 供 percent 查询与预取命中；
                     // 作废与新一首无关的旧预取源；重新武装起播门槛态
@@ -1984,7 +2004,20 @@ public class AudioPlayerService extends Service {
             }
         }
         pendingSeekMs = -1;
-        reportPlaybackError("播放出错(Code " + what + ")");
+        // 重试预算用尽绝不能静默：shouldNotifyError 只放行 streak<=1，而走到这里 streak 必然已 >1，
+        // 现场表现成「点了没声、屏幕上也没有任何提示」，且本曲要等进程重启才会再试
+        // (2026-09-22 上报复盘：断点续播撞 Failed to instantiate extractor 三首全中)。
+        SongItem abandoned = getCurrentSong();
+        String abandonedName = abandoned != null ? abandoned.getName() : "当前曲目";
+        if (stateChangeListener != null) {
+            stateChangeListener.onError("多次重试仍无法播放，已跳过: " + abandonedName);
+        }
+        CrashMonitor.breadcrumb("play", "GIVE_UP after " + streamRetryCount + " retries, skip " + abandonedName);
+        silentErrorStreak = 0;
+        streamRetryCount = 0;
+        if (abandoned != null) {
+            playNext(PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
+        }
     }
 
     /** 重复错误只提示一次, 其余落日志与面包屑 (慢网下看门狗会反复重启当前曲目)。 */
