@@ -11,17 +11,16 @@ public class SongItem implements Serializable {
     private String folderName;
     private long durationMs;
     private String streamUrl;
-    private String coverUrl;
     private boolean isFavorite;
     private int playCount;
 
     public SongItem() {}
 
-    public SongItem(String id, String name, String artist, String album, String genre, long durationMs, String streamUrl, String coverUrl) {
-        this(id, name, artist, album, genre, "未分类文件夹", durationMs, streamUrl, coverUrl, false);
+    public SongItem(String id, String name, String artist, String album, String genre, long durationMs, String streamUrl) {
+        this(id, name, artist, album, genre, "未分类文件夹", durationMs, streamUrl, false);
     }
 
-    public SongItem(String id, String name, String artist, String album, String genre, String folderName, long durationMs, String streamUrl, String coverUrl, boolean isFavorite) {
+    public SongItem(String id, String name, String artist, String album, String genre, String folderName, long durationMs, String streamUrl, boolean isFavorite) {
         this.id = id != null ? id : "";
         this.name = name != null ? name : "未知曲目";
         this.artist = artist != null ? artist : "未知歌手";
@@ -30,7 +29,6 @@ public class SongItem implements Serializable {
         this.folderName = (folderName != null && !folderName.trim().isEmpty()) ? folderName : "未分类文件夹";
         this.durationMs = durationMs;
         this.streamUrl = streamUrl != null ? streamUrl : "";
-        this.coverUrl = coverUrl != null ? coverUrl : "";
         this.isFavorite = isFavorite;
     }
 
@@ -96,14 +94,6 @@ public class SongItem implements Serializable {
 
     public void setStreamUrl(String streamUrl) {
         this.streamUrl = streamUrl != null ? streamUrl : "";
-    }
-
-    public String getCoverUrl() {
-        return coverUrl;
-    }
-
-    public void setCoverUrl(String coverUrl) {
-        this.coverUrl = coverUrl != null ? coverUrl : "";
     }
 
     public boolean isFavorite() {

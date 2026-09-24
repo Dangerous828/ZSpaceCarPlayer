@@ -13,7 +13,7 @@ import org.junit.Test;
 public class SeekSanitizeTest {
 
     private static SongItem song(long durationMs) {
-        return new SongItem("id_x", "晴天", "周杰伦", "叶惠美", "流行", durationMs, "url", "cover");
+        return new SongItem("id_x", "晴天", "周杰伦", "叶惠美", "流行", durationMs, "url");
     }
 
     @Test

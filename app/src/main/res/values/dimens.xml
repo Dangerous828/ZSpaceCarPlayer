@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- 3.2.0 单栏骨架 (手机紧凑档, 真车走 values-sw720dp) -->
+    <dimen name="head_h">28dp</dimen>
+    <dimen name="bar_h">84dp</dimen>
+    <dimen name="bar_margin_b">8dp</dimen>
+    <dimen name="row_padh">10dp</dimen>
+    <dimen name="idx_w">28dp</dimen>
+    <dimen name="idx_text">11sp</dimen>
+    <dimen name="dur_w">48dp</dimen>
+    <dimen name="lyric_ticker">18sp</dimen>
+    <dimen name="prog_w">160dp</dimen>
     <dimen name="topbar_h">48dp</dimen>
     <dimen name="brand_mark">26dp</dimen>
     <dimen name="brand_text">14sp</dimen>
@@ -30,7 +40,6 @@
     <dimen name="fav_box">34dp</dimen>
     <dimen name="fav_size">17sp</dimen>
     <dimen name="dur_text">11sp</dimen>
-    <dimen name="cover">92dp</dimen>
     <dimen name="badge_size">22dp</dimen>
     <dimen name="np_title">16sp</dimen>
     <dimen name="np_artist">12sp</dimen>

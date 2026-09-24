@@ -49,6 +49,7 @@ import com.ktools.zspacecarplayer.crash.NativeEngineGuard;
 import com.ktools.zspacecarplayer.model.CategoryItem;
 import com.ktools.zspacecarplayer.model.LyricLine;
 import com.ktools.zspacecarplayer.model.SongItem;
+import com.ktools.zspacecarplayer.util.LibraryOrder;
 import com.ktools.zspacecarplayer.net.JellyfinApiClient;
 import com.ktools.zspacecarplayer.service.AudioPlayerService;
 import com.ktools.zspacecarplayer.service.MediaButtonReceiver;
@@ -63,9 +64,11 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class MainActivity extends AppCompatActivity implements AudioPlayerService.OnPlayerStateChangeListener {
 
@@ -93,7 +96,14 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     private boolean lyricUserDragging = false;
     /** 双击返回确认的完全退出: onDestroy 时结束进程, 不留后台残留 */
     private boolean exitCompletely = false;
+    /** 整屏视图标识 */
+    private static final int PAGE_GRID = 0, PAGE_ALL = 1, PAGE_SONGS = 2,
+            PAGE_NOW_PLAYING = 3, PAGE_SETTINGS = 4;
+    /** 换深浅色会重建 Activity; 记下用户站着的那一页, 重建后原地恢复而不是弹回歌单网格 */
+    private static int lastPage = PAGE_GRID;
     private View layoutSettingsPage;
+    /** 「正在播放」整屏页: 3.2.0 起大歌词滚动从右栏搬到这里, 右栏已取消 */
+    private View layoutNowPlaying;
 
     private CategoryAdapter categoryAdapter;
     private SongAdapter songAdapter;
@@ -102,6 +112,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     private TextView tvCurrentTitle, tvCurrentArtist, tvCurrentTime, tvTotalTime, tvSongCount, tvServerStatus, tvListTitle;
     private TextView tvBadgeFolder;
     private TextView tvLyricsEmpty;
+    /** 底部通栏的单行歌词 (上一句/当前句/下一句), 与 rvLyrics 共用高亮下标 */
+    private TextView tvLyricTicker;
+    /** 上一次写进通栏的高亮下标, 用于跳过同句的重复 setText */
+    private int lastTickerIndex = -1;
     /** 缓冲指示 (2026-09-12 缓冲/预取): 缓冲时可见「缓冲 43%」/「缓冲中…」, 稳定播放后隐藏 */
     private TextView tvBuffering;
     private View seekFill;
@@ -110,6 +124,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     private SeekBar seekBarProgress;
     private Button btnPlayPause, btnPrev, btnNext, btnPlayMode, btnCurrentFav, btnReportStall;
     private Button btnNavAllSongs, btnNavPlaylist, btnNavRefresh, btnNavSettings, btnBackToPlaylist;
+    private Button btnNavNowPlaying, btnNavFavs, btnNavNight;
     private Button btnSearchToggle, btnCloseSearch;
 
     private boolean isUserSeeking = false;
@@ -235,7 +250,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         initViews();
         setupAdapters();
         setupListeners();
-        showPlaylistGridView();
+        restoreLastPage();
 
         // 1. 检查应用缓存容量上限
         CacheSizeManager.checkAndTrimCacheAsync(this);
@@ -258,6 +273,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     protected void onResume() {
         super.onResume();
         ensureSystemUiVisible();
+        // 自动档要在回到前台时对一次表: 跨过 18 点实际深浅色会变, 值没变时是空操作
+        NightModeManager.apply(this);
     }
 
     private void ensureSystemUiVisible() {
@@ -287,8 +304,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         seekFill = findViewById(R.id.seekFill);
         seekBufferFill = findViewById(R.id.seekBufferFill);
         tvLyricsEmpty = findViewById(R.id.tvLyricsEmpty);
+        tvLyricTicker = findViewById(R.id.tvLyricTicker);
         tvBadgeFolder = findViewById(R.id.tvBadgeFolder);
         layoutSettingsPage = findViewById(R.id.layoutSettingsPage);
+        layoutNowPlaying = findViewById(R.id.layoutNowPlaying);
         etSearch = findViewById(R.id.etSearch);
         seekBarProgress = findViewById(R.id.seekBarProgress);
 
@@ -303,6 +322,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         btnNavPlaylist = findViewById(R.id.btnNavPlaylist);
         btnNavRefresh = findViewById(R.id.btnNavRefresh);
         btnNavSettings = findViewById(R.id.btnNavSettings);
+        btnNavNowPlaying = findViewById(R.id.btnNavNowPlaying);
+        btnNavFavs = findViewById(R.id.btnNavFavs);
+        btnNavNight = findViewById(R.id.btnNavNight);
         btnBackToPlaylist = findViewById(R.id.btnBackToPlaylist);
 
         btnSearchToggle = findViewById(R.id.btnSearchToggle);
@@ -554,6 +576,42 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             }
         });
 
+        if (btnNavNowPlaying != null) {
+            btnNavNowPlaying.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    hideSoftKeyboard();
+                    showNowPlayingView();
+                }
+            });
+        }
+
+        if (btnNavFavs != null) {
+            btnNavFavs.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    hideSoftKeyboard();
+                    loadFavoriteSongs();
+                }
+            });
+        }
+
+        if (btnNavNight != null) {
+            updateNightButton();
+            btnNavNight.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    hideSoftKeyboard();
+                    // 一键只翻观感: 当前是深色就切白天, 反之切夜间。翻完即钉成手动档,
+                    // 否则自动档会在下一个整点把司机刚选的颜色抢回去。
+                    boolean night = NightModeManager.isNight(MainActivity.this);
+                    NightModeManager.setMode(MainActivity.this,
+                            night ? NightModeManager.MODE_DAY : NightModeManager.MODE_NIGHT);
+                    updateNightButton();
+                }
+            });
+        }
+
         btnNavRefresh.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -622,13 +680,39 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     private void updateCurrentFavBtn(boolean isFav) {
         if (btnCurrentFav == null) return;
         btnCurrentFav.setText("♥");
-        btnCurrentFav.setTextColor(Color.parseColor(isFav ? "#30DDC2" : "#556275"));
+        btnCurrentFav.setTextColor(getResources().getColor(isFav ? R.color.accent : R.color.ink_mute));
+    }
+
+    /** 内容区四个整屏视图互斥: 切页前先全部收起, 避免 GONE 漏掉某一个造成两层叠画 */
+    private void hideAllPages() {
+        rvCategoriesGrid.setVisibility(View.GONE);
+        rvSongList.setVisibility(View.GONE);
+        if (layoutNowPlaying != null) layoutNowPlaying.setVisibility(View.GONE);
+        if (layoutSettingsPage != null) layoutSettingsPage.setVisibility(View.GONE);
+    }
+
+    /** 按钮文案 = 点下去会变成什么: 白天时写「夜间」, 夜间时写「白天」 */
+    private void updateNightButton() {
+        if (btnNavNight == null) return;
+        btnNavNight.setText(NightModeManager.isNight(this) ? "白天" : "夜间");
+    }
+
+    /** 顶栏标签页高亮; 传 null 表示保持现状 (动作型按钮刷新, 以及沿用当前页的列表切换) */
+    private void setNavActive(Button active) {
+        if (active == null) return;
+        Button[] tabs = {btnNavNowPlaying, btnNavPlaylist, btnNavFavs, btnNavAllSongs, btnNavSettings};
+        for (Button tab : tabs) {
+            if (tab == null) continue;
+            boolean on = (tab == active);
+            tab.setSelected(on);
+            tab.setTextColor(getResources().getColor(on ? R.color.on_accent : R.color.ink_dim));
+        }
     }
 
     private void showAllSongsView() {
-        rvCategoriesGrid.setVisibility(View.GONE);
+        hideAllPages();
+        lastPage = PAGE_ALL;
         rvSongList.setVisibility(View.VISIBLE);
-        if (layoutSettingsPage != null) layoutSettingsPage.setVisibility(View.GONE);
         btnBackToPlaylist.setVisibility(View.GONE);
         btnSearchToggle.setVisibility(View.VISIBLE);
         tvListTitle.setText("全部歌曲");
@@ -642,34 +726,51 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         if (songAdapter.getSelectedIndex() < 0) {
             rvSongList.scrollToPosition(0);
         }
-        btnNavAllSongs.setSelected(true);
-        btnNavAllSongs.setTextColor(Color.parseColor("#30DDC2"));
-        btnNavPlaylist.setSelected(false);
-        btnNavPlaylist.setTextColor(Color.parseColor("#A8B5C6"));
-        btnNavSettings.setSelected(false);
-        btnNavSettings.setTextColor(Color.parseColor("#A8B5C6"));
+        setNavActive(btnNavAllSongs);
     }
 
     private void showPlaylistGridView() {
+        hideAllPages();
+        lastPage = PAGE_GRID;
         rvCategoriesGrid.setVisibility(View.VISIBLE);
-        rvSongList.setVisibility(View.GONE);
-        if (layoutSettingsPage != null) layoutSettingsPage.setVisibility(View.GONE);
         btnBackToPlaylist.setVisibility(View.GONE);
         btnSearchToggle.setVisibility(View.VISIBLE);
         tvListTitle.setText("我的歌单");
         tvSongCount.setText(categoryAdapter.getItemCount() + " 个分类");
-        btnNavPlaylist.setSelected(true);
-        btnNavPlaylist.setTextColor(Color.parseColor("#30DDC2"));
-        btnNavAllSongs.setSelected(false);
-        btnNavAllSongs.setTextColor(Color.parseColor("#A8B5C6"));
-        btnNavSettings.setSelected(false);
-        btnNavSettings.setTextColor(Color.parseColor("#A8B5C6"));
+        setNavActive(btnNavPlaylist);
+    }
+
+    /** 「正在播放」整屏: 大歌词滚动。曲名/当前句/进度始终在底部通栏, 此处不重复渲染 */
+    private void showNowPlayingView() {
+        hideAllPages();
+        lastPage = PAGE_NOW_PLAYING;
+        if (layoutNowPlaying == null) return;
+        layoutNowPlaying.setVisibility(View.VISIBLE);
+        btnBackToPlaylist.setVisibility(View.GONE);
+        btnSearchToggle.setVisibility(View.VISIBLE);
+        tvListTitle.setText("正在播放");
+        SongItem current = isBound && playerService != null ? playerService.getCurrentSong() : null;
+        tvSongCount.setText(current != null ? current.getArtist() : "");
+        setNavActive(btnNavNowPlaying);
+        final int idx = lyricAdapter.getHighlightIndex();
+        if (idx >= 0) {
+            rvLyrics.post(new Runnable() {
+                @Override
+                public void run() {
+                    centerLyricHighlight(idx);
+                }
+            });
+        }
     }
 
     private void showSongListView(String title, List<SongItem> songs) {
-        rvCategoriesGrid.setVisibility(View.GONE);
+        showSongListView(title, songs, null);
+    }
+
+    private void showSongListView(String title, List<SongItem> songs, Button activeNav) {
+        hideAllPages();
+        lastPage = PAGE_SONGS;
         rvSongList.setVisibility(View.VISIBLE);
-        if (layoutSettingsPage != null) layoutSettingsPage.setVisibility(View.GONE);
         btnBackToPlaylist.setVisibility(View.VISIBLE);
         btnSearchToggle.setVisibility(View.VISIBLE);
         tvListTitle.setText(title);
@@ -686,12 +787,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         if (songAdapter.getSelectedIndex() < 0) {
             rvSongList.scrollToPosition(0);
         }
-        btnNavPlaylist.setSelected(true);
-        btnNavPlaylist.setTextColor(Color.parseColor("#30DDC2"));
-        btnNavAllSongs.setSelected(false);
-        btnNavAllSongs.setTextColor(Color.parseColor("#A8B5C6"));
-        btnNavSettings.setSelected(false);
-        btnNavSettings.setTextColor(Color.parseColor("#A8B5C6"));
+        setNavActive(activeNav);
     }
 
     /**
@@ -745,8 +841,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     }
 
     private void showSettingsPageView() {
-        rvCategoriesGrid.setVisibility(View.GONE);
-        rvSongList.setVisibility(View.GONE);
+        hideAllPages();
+        lastPage = PAGE_SETTINGS;
         layoutSettingsPage.setVisibility(View.VISIBLE);
         btnBackToPlaylist.setVisibility(View.GONE);
         btnSearchToggle.setVisibility(View.GONE);
@@ -754,18 +850,56 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         etSearch.setVisibility(View.GONE);
         tvListTitle.setText("系统与播放设置");
         tvSongCount.setText("");
-        btnNavSettings.setSelected(true);
-        btnNavSettings.setTextColor(Color.parseColor("#30DDC2"));
-        btnNavAllSongs.setSelected(false);
-        btnNavAllSongs.setTextColor(Color.parseColor("#A8B5C6"));
-        btnNavPlaylist.setSelected(false);
-        btnNavPlaylist.setTextColor(Color.parseColor("#A8B5C6"));
+        setNavActive(btnNavSettings);
 
         setupSettingsPageListeners();
     }
 
+    /**
+     * 换深浅色重建后回到原页面。文件夹歌曲列表 (PAGE_SONGS) 的内容不在静态状态里,
+     * 恢复不到具体那一栏, 退回收纳它的歌单网格 —— 一次点击就能再进去。
+     */
+    private void restoreLastPage() {
+        switch (lastPage) {
+            case PAGE_ALL:
+                showAllSongsView();
+                break;
+            case PAGE_NOW_PLAYING:
+                showNowPlayingView();
+                break;
+            case PAGE_SETTINGS:
+                showSettingsPageView();
+                break;
+            case PAGE_SONGS:
+            case PAGE_GRID:
+            default:
+                showPlaylistGridView();
+                break;
+        }
+    }
+
+    /** 夜间模式三档循环: 自动 → 白天 → 夜间 → 自动 */
+    private void setupNightModeRow() {
+        View row = layoutSettingsPage.findViewById(R.id.btnSettingNightToggle);
+        final Button valueBtn = layoutSettingsPage.findViewById(R.id.btnSettingNightValue);
+        if (row == null || valueBtn == null) return;
+
+        valueBtn.setText(NightModeManager.modeLabel(NightModeManager.getMode(this)));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                int next = (NightModeManager.getMode(MainActivity.this) + 1) % 3;
+                NightModeManager.setMode(MainActivity.this, next);
+                valueBtn.setText(NightModeManager.modeLabel(next));
+                CrashMonitor.breadcrumb("ui", "night mode -> " + NightModeManager.modeLabel(next));
+            }
+        });
+    }
+
     private void setupSettingsPageListeners() {
         if (layoutSettingsPage == null) return;
+
+        setupNightModeRow();
 
         Button btnSub = layoutSettingsPage.findViewById(R.id.btnSettingLrcSub);
         Button btnAdd = layoutSettingsPage.findViewById(R.id.btnSettingLrcAdd);
@@ -1171,7 +1305,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                     // 跟着全部歌曲走"。按上次队列的 id 顺序 1:1 重建, 保持歌单顺序。
                     String queueTitle = SongDao.getInstance(MainActivity.this).getState(KEY_LAST_QUEUE_TITLE, "");
                     String queueIds = SongDao.getInstance(MainActivity.this).getState(KEY_LAST_QUEUE_IDS, "");
-                    List<SongItem> restoredQueue = rebuildQueueFromIds(queueIds, allSongsList);
+                    List<SongItem> restoredQueue = QueueRestore.rebuildFromIds(queueIds, allSongsList);
 
                     if (!restoredQueue.isEmpty()) {
                         currentDisplayedSongs = restoredQueue;
@@ -1216,7 +1350,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         SongDao.getInstance(MainActivity.this).getFavoriteSongsAsync(new SongDao.DbCallback<List<SongItem>>() {
             @Override
             public void onResult(List<SongItem> favs) {
-                showSongListView("❤️ 红心收藏", favs);
+                showSongListView("❤️ 红心收藏", favs, btnNavFavs);
             }
         });
     }
@@ -1227,7 +1361,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         SongDao.getInstance(MainActivity.this).getMostPlayedAsync(new SongDao.DbCallback<List<SongItem>>() {
             @Override
             public void onResult(List<SongItem> tops) {
-                showSongListView("🔥 播放最多", tops);
+                showSongListView("🔥 播放最多", tops, btnNavPlaylist);
             }
         });
     }
@@ -1324,17 +1458,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             for (SongItem song : all) {
                 if (song.getPlayCount() > 0) tops.add(song);
             }
-            // 与 SongDao.getMostPlayed 同口径: play_count DESC, name ASC, 上限 100
-            java.util.Collections.sort(tops, new java.util.Comparator<SongItem>() {
-                @Override
-                public int compare(SongItem a, SongItem b) {
-                    int d = Integer.compare(b.getPlayCount(), a.getPlayCount());
-                    if (d != 0) return d;
-                    String an = a.getName() == null ? "" : a.getName();
-                    String bn = b.getName() == null ? "" : b.getName();
-                    return an.compareTo(bn);
-                }
-            });
+            // 顺序一律走 LibraryOrder, 与 SongDao.getMostPlayed 同一份定义 (含 id 兜底),
+            // 否则同一个「播放最多」从 DB 和从内存缓存两条路进来会给出两种顺序
+            java.util.Collections.sort(tops, LibraryOrder.BY_PLAY_COUNT_THEN_NAME);
             if (tops.size() > 100) return new ArrayList<>(tops.subList(0, 100));
             return tops;
         }
@@ -1396,32 +1522,23 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             playerService.setPlaylist(currentSongs, targetIndex, exactMs,
                     PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
         } else {
-            // 当前显示分类里找不到上次歌曲 (分类被切换过/歌曲归属变化):
-            // 回退到全曲库匹配, 绝不能因为分类过滤而丢掉自动续播
-            List<SongItem> fallback = allSongsList;
-            if (fallback != null && !fallback.isEmpty()) {
-                for (int i = 0; i < fallback.size(); i++) {
-                    if (lastSongId.equals(fallback.get(i).getId())) {
-                        isAutoPlayInitialized = true;
-                        int exactMs = resumePointForPlayback(fallback.get(i),
-                                SongDao.getInstance(this).getSongProgress(lastSongId),
-                                "auto-resume-fallback");
-                        notePlaybackSource("全部歌曲", fallback);
-                        playerService.setPlaylist(fallback, i, exactMs,
-                                PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
-                        Log.i(TAG, "auto-resume: last song not in category '"
-                                + getLastCategoryName() + "', fell back to full library index " + i);
-                        return;
-                    }
-                }
+            // 上次那首歌不在当前列表里 (切过分类 / 歌曲归属变了): 不再把队列换成全曲库。
+            // 曾经的做法是回退到 allSongsList 去匹配, 于是队列 799 首、左边列表只有几十行,
+            // 「下一首」走的顺序和屏幕完全对不上 —— 这就是实车反馈「播放不跟左侧列表走」
+            // 的直接来源。队列必须永远等于屏幕上那份列表, 宁可这次不自动续播。
+            if (lastSongId != null && !lastSongId.trim().isEmpty()) {
+                CrashMonitor.breadcrumb("resume", "last song " + lastSongId
+                        + " not in list '" + currentListTitle + "' (" + currentSongs.size()
+                        + " songs), mount without autoplay");
+                Log.i(TAG, "auto-resume: last song not in category '" + currentListTitle
+                        + "', keeping queue = displayed list (" + currentSongs.size() + " songs)");
             }
-            // 无上次播放记录: 只挂载播放列表，不自动播放，等待用户点击
+            // 无上次播放记录, 或上次歌曲不在本列表: 只挂载播放列表，不自动播放，等待用户点击
             isAutoPlayInitialized = true;
             notePlaybackSource(currentListTitle, currentSongs);
             playerService.setPlaylist(currentSongs, -1);
             songAdapter.setSelectedIndex(0);
-            Log.i(TAG, "auto-resume: no last song record (lastSongId='"
-                    + lastSongId + "'), mount playlist only");
+            Log.i(TAG, "auto-resume: mount playlist only (lastSongId='" + lastSongId + "')");
         }
     }
 
@@ -1695,14 +1812,16 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 }
 
                 allSongsList = new ArrayList<>(songs);
-                SongDao.getInstance(MainActivity.this).saveSongs(allSongsList);
+                // 全量替换缓存：既写入服务端顺序，也清掉服务端已下架/改名的残留条目
+                // (逐条 upsert 永不删除，幽灵曲目会一直留在列表里，取不到流即表现为卡住)
+                SongDao.getInstance(MainActivity.this).saveLibrarySnapshot(allSongsList);
 
                 // 刷新后不要用全库覆盖播放队列 (2026-09-15 实车): 那会让"下一首"退回
                 // 全部歌曲顺序, 即使用户正在某个歌单里播。改为把当前队列按 id 重映射到
                 // 新库对象上, 保持歌单顺序, 再同步给 Service 校准 index。
                 List<SongItem> refreshedQueue = allSongsList;
                 if (isBound && playerService != null) {
-                    refreshedQueue = remapQueueToLibrary(playerService.getPlaylist(), allSongsList);
+                    refreshedQueue = QueueRestore.remapToLibrary(playerService.getPlaylist(), allSongsList);
                     playerService.updatePlaylist(refreshedQueue);
                 }
                 // 播放来源引用同步换新对象 (后续切歌跟随/再次刷新都用新实例)
@@ -1917,43 +2036,6 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     }
 
     /**
-     * 按持久化的 id 顺序, 从给定池 (通常是最新 allSongsList) 重建队列:
-     * 保序、按 id 命中新对象、剔除已从库中删除的歌曲。池为空或 ids 为空返回空列表。
-     */
-    private List<SongItem> rebuildQueueFromIds(String idsJoined, List<SongItem> pool) {
-        List<SongItem> out = new ArrayList<>();
-        if (idsJoined == null || idsJoined.trim().isEmpty() || pool == null || pool.isEmpty()) {
-            return out;
-        }
-        Map<String, SongItem> byId = new HashMap<>();
-        for (SongItem s : pool) {
-            if (s != null && s.getId() != null) byId.put(s.getId(), s);
-        }
-        for (String rawId : idsJoined.split("\n")) {
-            if (rawId == null) continue;
-            String id = rawId.trim();
-            if (id.isEmpty()) continue;
-            SongItem s = byId.get(id);
-            if (s != null) out.add(s);
-        }
-        return out;
-    }
-
-    /**
-     * 媒体库刷新后, 把"当前正在用的播放队列"按 id 重映射到新库对象上 (保持歌单顺序),
-     * 而不是用全库覆盖队列。当前队列为空/本就是全库 → 直接用新全库; 重映射后全被删光
-     * (异常) → 兜底新全库, 绝不让队列变空。
-     */
-    private List<SongItem> remapQueueToLibrary(List<SongItem> currentQueue, List<SongItem> newLibrary) {
-        if (currentQueue == null || currentQueue.isEmpty()) return newLibrary;
-        if (newLibrary == null || newLibrary.isEmpty()) return currentQueue;
-        // 队列规模已达全库 (顺序模式下的全部歌曲) → 用新全库即可
-        if (currentQueue.size() >= newLibrary.size()) return newLibrary;
-        List<SongItem> remapped = rebuildQueueFromIds(joinSongIds(currentQueue), newLibrary);
-        return remapped.isEmpty() ? newLibrary : remapped;
-    }
-
-    /**
      * 从歌曲自身反推所属歌单标题 (与 buildCategories 的归类规则一致):
      * 文件夹优先, 无文件夹用流派 (含「未分类」卡片), 都没有返回 null。
      */
@@ -2039,6 +2121,22 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         showSongListView(title, songs);
     }
 
+    /**
+     * 底部通栏的单行歌词。数据源与 rvLyrics 完全同一个 (LyricAdapter 的 currentHighlightIndex),
+     * 这里只做渲染, 不缓存下标以外的状态 —— 避免出现第二份「当前唱到第几句」。
+     */
+    private void refreshLyricTicker() {
+        if (tvLyricTicker == null) return;
+        CharSequence ticker = lyricAdapter.renderTicker(this);
+        tvLyricTicker.setText(ticker != null ? ticker : "暂无歌词");
+    }
+
+    /** 换歌或异步拉到歌词后重挂词表: 高亮下标已归零, 通栏与滚动视图都要回到起点 */
+    private void onLyricsReplaced() {
+        lastTickerIndex = -1;
+        refreshLyricTicker();
+    }
+
     // ---------------- 播放回调与歌词先显后同 ----------------
 
     @Override
@@ -2099,6 +2197,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             lyricAdapter.setLyrics(null);
             tvLyricsEmpty.setVisibility(View.VISIBLE);
         }
+        onLyricsReplaced();
 
         JellyfinApiClient.getInstance().fetchLyrics(song.getId(), new JellyfinApiClient.ApiCallback<String>() {
             @Override
@@ -2107,6 +2206,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                     SongDao.getInstance(MainActivity.this).saveLyric(song.getId(), lrcContent);
                     lyricAdapter.setLyrics(LyricLine.parseLrc(lrcContent));
                     tvLyricsEmpty.setVisibility(View.GONE);
+                    onLyricsReplaced();
                 }
             }
 
@@ -2165,6 +2265,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         int highlightIdx = lyricAdapter.updateHighlight(currentMs);
         if (highlightIdx >= 0 && !lyricUserDragging) {
             centerLyricHighlight(highlightIdx);
+        }
+        if (highlightIdx != lastTickerIndex) {
+            lastTickerIndex = highlightIdx;
+            refreshLyricTicker();
         }
 
         // 5秒节流异步写入进度
@@ -2893,7 +2997,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         progressBar.setVisibility(View.VISIBLE);
         progressBar.setProgress(0);
         tvProgress.setVisibility(View.VISIBLE);
-        tvProgress.setTextColor(Color.parseColor("#30DDC2"));
+        tvProgress.setTextColor(getResources().getColor(R.color.accent));
         tvProgress.setText("正在下载 0%");
         Log.i(TAG, "apk download requested url=" + manifest.getApkUrl()
                 + " size=" + manifest.getSizeBytes());
@@ -2950,7 +3054,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 // 失败留在同一个对话框里: 原因写清楚, 按钮变「重试」, 车主可以直接再来一次。
                 // 校验失败的包 ApkDownloader 已经删掉了, 这里绝不会再碰安装器。
                 progressBar.setVisibility(View.GONE);
-                tvProgress.setTextColor(Color.parseColor("#F3B34C"));
+                tvProgress.setTextColor(getResources().getColor(R.color.hl));
                 tvProgress.setText(msg);
                 btnAction.setText("重试");
                 btnAction.setEnabled(true);

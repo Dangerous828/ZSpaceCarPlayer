@@ -1,101 +1,109 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 3.2.0 行版式: 序号列 + 歌名/歌手同一基线 + 收藏 + 时长, 行高 72dp。
+     歌名与歌手从「上下两行」改成「同行基线」, 是为了在 72dp 里把歌名放到 27sp ——
+     两行版式要放大歌名就必须加行高, 一屏就会从 6 行掉到 5 行。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="@dimen/row_h"
     android:background="@drawable/bg_row_song"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:paddingStart="14dp"
-    android:paddingTop="9dp"
-    android:paddingEnd="12dp"
-    android:paddingBottom="9dp">
+    android:paddingStart="@dimen/row_padh"
+    android:paddingEnd="@dimen/row_padh">
 
-    <!-- 选中态左侧青绿指示条 -->
-    <View
-        android:id="@+id/accentBar"
-        android:layout_width="3dp"
-        android:layout_height="@dimen/accent_bar"
-        android:layout_marginEnd="10dp"
-        android:background="@drawable/bg_accent_bar"
-        android:visibility="gone" />
-
-    <!-- 首字色块 (按歌曲 Id 哈希取 6 色渐变之一) -->
-    <TextView
-        android:id="@+id/tvThumb"
-        android:layout_width="@dimen/thumb"
-        android:layout_height="@dimen/thumb"
-        android:background="@drawable/bg_thumb_1"
-        android:gravity="center"
-        android:text="歌"
-        android:textColor="#F2FFFFFF"
-        android:textSize="@dimen/thumb_text"
-        android:textStyle="bold" />
-
-    <LinearLayout
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="12dp"
-        android:layout_weight="1"
-        android:orientation="vertical">
+    <!-- 序号列: 普通行显示数字, 正在播的行换成波形徽标 -->
+    <FrameLayout
+        android:layout_width="@dimen/idx_w"
+        android:layout_height="match_parent">
 
         <TextView
-            android:id="@+id/tvSongTitle"
+            android:id="@+id/tvIndex"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:textColor="@color/ink"
-            android:textSize="@dimen/song_title"
-            android:textStyle="bold" />
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:textColor="@color/ink_mute"
+            android:textSize="@dimen/idx_text" />
 
         <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="3dp"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:id="@+id/eqBadge"
+            android:layout_width="@dimen/idx_w"
+            android:layout_height="18dp"
+            android:layout_gravity="center"
+            android:gravity="bottom|center_horizontal"
+            android:orientation="horizontal"
+            android:visibility="gone">
 
-            <TextView
-                android:id="@+id/tvArtistAlbum"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:ellipsize="end"
-                android:maxLines="1"
-                android:textColor="@color/ink_mute"
-                android:textSize="@dimen/artist" />
+            <View
+                android:layout_width="3dp"
+                android:layout_height="9dp"
+                android:layout_marginEnd="3dp"
+                android:background="@color/accent" />
 
-            <TextView
-                android:id="@+id/tvGenreTag"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:background="@drawable/bg_tag_chip"
-                android:paddingStart="7dp"
-                android:paddingTop="2dp"
-                android:paddingEnd="7dp"
-                android:paddingBottom="2dp"
-                android:text="流行"
-                android:textColor="@color/accent"
-                android:textSize="@dimen/tag_text"
-                android:textStyle="bold" />
+            <View
+                android:layout_width="3dp"
+                android:layout_height="17dp"
+                android:layout_marginEnd="3dp"
+                android:background="@color/accent" />
+
+            <View
+                android:layout_width="3dp"
+                android:layout_height="12dp"
+                android:background="@color/accent" />
         </LinearLayout>
-    </LinearLayout>
+    </FrameLayout>
+
+    <TextView
+        android:id="@+id/tvSongTitle"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="24dp"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:maxWidth="520dp"
+        android:textColor="@color/ink"
+        android:textSize="@dimen/song_title"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/tvArtistAlbum"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="@color/ink_mute"
+        android:textSize="@dimen/artist" />
+
+    <TextView
+        android:id="@+id/tvGenreTag"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:background="@drawable/bg_tag_chip"
+        android:paddingStart="7dp"
+        android:paddingTop="1dp"
+        android:paddingEnd="7dp"
+        android:paddingBottom="1dp"
+        android:textColor="@color/accent"
+        android:textSize="@dimen/tag_text"
+        android:textStyle="bold"
+        android:visibility="gone" />
 
     <TextView
         android:id="@+id/tvFavIcon"
         android:layout_width="@dimen/fav_box"
         android:layout_height="@dimen/fav_box"
         android:gravity="center"
-        android:text="♡"
+        android:text="♥"
         android:textColor="@color/ink_mute"
         android:textSize="@dimen/fav_size" />
 
     <TextView
         android:id="@+id/tvDuration"
-        android:layout_width="wrap_content"
+        android:layout_width="@dimen/dur_w"
         android:layout_height="wrap_content"
-        android:layout_marginStart="6dp"
+        android:gravity="end"
         android:textColor="@color/ink_mute"
         android:textSize="@dimen/dur_text" />
 </LinearLayout>

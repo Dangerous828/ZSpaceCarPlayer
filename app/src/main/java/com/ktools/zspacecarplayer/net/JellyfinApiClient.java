@@ -58,7 +58,7 @@ public class JellyfinApiClient {
     private static final String CLIENT_NAME = "ZSpaceCarPlayer";
     private static final String DEVICE_NAME = "Geely-iMX6-Car";
     private static final String DEVICE_ID = "CAR-IMX6-001";
-    private static final String CLIENT_VERSION = "3.1.4";
+    private static final String CLIENT_VERSION = "3.2.0";
 
     /** 鉴权持久化统一走这里, Service 后台静默登录与 Activity 必须读写同一份凭据 */
     public static final String PREF_NAME = "zspace_car_player_prefs";
@@ -546,63 +546,96 @@ public class JellyfinApiClient {
     }
 
     /**
-     * 服务端下混转码的判定阈值 (bps)。
+     * 服务端转码 FLAC 的字节率阈值 (B/s)，只对非 PCM 容器生效。
      *
-     * 车机蜂窝链路实测有效吞吐约 250~300KB/s。多声道无损直传的字节率远超这个数：
-     * 44.1kHz/7ch/PCM 要 616KB/s (整曲 143MB)，起播后下载头只能领先播放头 2s，
-     * 于是全程 underrun (2026-09-22 上报「答案」现场)。立体声 PCM 只需 176KB/s，
-     * 留得起 8MB 环形缓冲的 47s 余量，不必转码 —— 阈值取在两者之间。
+     * 车机蜂窝链路实测有效吞吐约 250~300KB/s。未压缩 PCM 的字节率与声道数成正比：
+     * 44.1kHz/7ch 要 616KB/s (2026-09-22「答案」现场：下载头只能领先播放头 2s，全程
+     * underrun)；连立体声也要 176KB/s，几乎贴着链路能力跑，没有余量（2026-09-23「出山」
+     * 现场：17 秒内缓冲百分比只涨 1%，lead 卡在 10s，用户因此点了上报）。所以 PCM 系
+     * 容器无论声道数一律转，超阈值的其它源也转。
      */
-    private static final long SERVER_DOWNMIX_BITRATE_BPS = 2_000_000L;
+    private static final long SERVER_TRANSCODE_BYTES_PER_SEC = 300_000L;
 
-    /** 缓存 stream_url 里辨识「该曲走服务端下混」的标记，冷启动读缓存时据此复原决策。 */
-    private static final String DOWNMIX_URL_MARKER = "audioChannels=2";
+    /** 未压缩 PCM 系容器：无损但字节率极高，FLAC 再压缩仍是无损，体积约降到四成。 */
+    private static final String[] UNCOMPRESSED_CONTAINERS = {
+            "wav", "wave", "pcm", "aif", "aiff", "aifc", "raw", "sun", "au"
+    };
+
+    /** 缓存 stream_url 里辨识「该曲走服务端 FLAC」的标记，冷启动读缓存时据此复原决策。 */
+    private static final String TRANSCODE_URL_MARKER = "audioCodec=flac";
+
+    private static final String DOWNMIX_QUERY = "&audioChannels=2";
 
     /**
-     * 该源码率是否高到必须让服务端下混后再传。
+     * 由 MediaSources 的 Size 与 RunTimeTicks 求源码字节率 (B/s)，取不到回 -1。
      *
-     * 判据收口成纯函数：车机侧唯一能观测的是「下载领先量」，而它由字节率与链路吞吐之差
-     * 决定，用真机回归去撞阈值代价极高，故边界由 host 单测钉死。
+     * 不能用 MediaSources[0].BitRate：本机 Jellyfin 在列表接口返回的 MediaSources 里
+     * 根本不带这个字段（实测 801 首全缺，只有嵌套 MediaStreams 里有），而 Size 与
+     * RunTimeTicks 一定在，两者相除即精确字节率。此前按 BitRate 判定的版本因此从未
+     * 触发过转码。
      */
-    public static boolean shouldUseServerDownmix(long sourceBitRateBps) {
-        return sourceBitRateBps > SERVER_DOWNMIX_BITRATE_BPS;
-    }
-
-    /** 服务端下混 URL 是否就是当前这条 stream_url（冷启动读缓存时据此复原决策）。 */
-    public static boolean isServerDownmixUrl(String streamUrl) {
-        return streamUrl != null && streamUrl.contains(DOWNMIX_URL_MARKER);
+    public static long sourceBytesPerSec(long sizeBytes, long runTimeTicks) {
+        if (sizeBytes <= 0 || runTimeTicks <= 0) return -1L;
+        double seconds = runTimeTicks / 10_000_000.0d;
+        if (seconds <= 0) return -1L;
+        return Math.round(sizeBytes / seconds);
     }
 
     /**
-     * 高码率源改由服务端下混成两声道 FLAC 再传。
+     * 该源是否该由服务端出 FLAC 再传。
      *
-     * 无损：flac 只是压缩，不做有损量化；声道数裁定与 v3 的 6ch/7ch->2ch 下混一致，
-     * 听感不变而传输字节降到约 101KB/s。车机 v3 的 sniff 认 fLaC 头并由 dr_flac 硬解，
-     * 不会掉回系统 MediaExtractor (8600 上缺 FLAC 解码，正是它抛
-     * "Failed to instantiate extractor" 的那条路)。
+     * 判据收口成纯函数：车机上唯一可观测的是「下载领先量」，而它由字节率与链路吞吐之差
+     * 决定，用真机回归撞阈值代价极高，故边界由 host 单测钉死。
      */
-    public String getDownmixStreamUrl(String itemId) {
+    public static boolean shouldUseServerFlac(long bytesPerSec, String container) {
+        if (container != null) {
+            String c = container.toLowerCase(java.util.Locale.US);
+            for (String pcm : UNCOMPRESSED_CONTAINERS) {
+                if (c.equals(pcm) || c.startsWith(pcm + ",")) {
+                    return true;
+                }
+            }
+        }
+        return bytesPerSec > SERVER_TRANSCODE_BYTES_PER_SEC;
+    }
+
+    /** 字节率高到只可能是多声道母带，顺带让服务端下混到两声道。 */
+    public static boolean shouldDownmixToStereo(long bytesPerSec) {
+        return bytesPerSec > SERVER_TRANSCODE_BYTES_PER_SEC;
+    }
+
+    /** 缓存 stream_url 是否走服务端 FLAC（冷启动读缓存时据此复原决策）。 */
+    public static boolean isServerFlacUrl(String streamUrl) {
+        return streamUrl != null && streamUrl.contains(TRANSCODE_URL_MARKER);
+    }
+
+    /**
+     * 服务端出 FLAC 再传。
+     *
+     * 无损：flac 只做无损压缩，不做有损量化，音质零变化；下混到两声道的口径与 v3 客户端
+     * 的 6ch/7ch->2ch 一致，听感不变而传输字节降到约 101KB/s。车机 v3 的 sniff 认 fLaC
+     * 头并由 dr_flac 硬核软解，不会掉回系统 MediaExtractor（8600 缺 FLAC 解码，正是它抛
+     * "Failed to instantiate extractor" 的那条路）。
+     */
+    public String getFlacStreamUrl(String itemId, boolean downmixToStereo) {
         if (itemId == null || itemId.isEmpty()) return "";
         if (accessToken == null || accessToken.isEmpty()) return "";
         return serverUrl + "/Audio/" + itemId + "/stream.flac?api_key=" + accessToken
-                + "&static=false&audioCodec=flac&audioChannels=2";
+                + "&static=false&audioCodec=flac"
+                + (downmixToStereo ? DOWNMIX_QUERY : "");
     }
 
     /**
-     * 起播/预取用的 URL：沿用该曲入库时按码率定下的传输方式，同时现取当前 access token。
+     * 起播/预取用的 URL：沿用该曲入库时定下的传输方式，同时现取当前 access token。
      *
      * 不能无条件走直传：token 轮换会让缓存 URL 作废，但传输方式必须由缓存决定，
-     * 否则重启后多声道源又回到喂不上的直传路径。
+     * 否则重启后高字节率源又回到喂不上的直传路径。
      */
     public String getStreamUrlForSong(String itemId, String cachedStreamUrl) {
-        if (cachedStreamUrl != null && cachedStreamUrl.contains(DOWNMIX_URL_MARKER)) {
-            return getDownmixStreamUrl(itemId);
+        if (isServerFlacUrl(cachedStreamUrl)) {
+            return getFlacStreamUrl(itemId, cachedStreamUrl.contains(DOWNMIX_QUERY));
         }
         return getStreamUrl(itemId, true);
-    }
-
-    public String getCoverUrl(String itemId) {
-        return serverUrl + "/Items/" + itemId + "/Images/Primary?quality=90";
     }
 
     private String buildAuthHeader() {
@@ -778,18 +811,27 @@ public class JellyfinApiClient {
 
         // 源码率取自 MediaSources (请求已带 Fields=MediaSources)。只用于裁定传输方式，
         // 不入 SongItem 字段：裁定结果写进 stream_url 本身，冷启动读缓存时靠标记复原，免建 DB 迁移。
-        long sourceBitRate = 0;
+        // 字节率取自 Size/时长：列表接口的 MediaSources 不带 BitRate (实测恒缺)，
+        // 而 Container 与 Size 一定在。只用于裁定传输方式，不入 SongItem 字段：
+        // 裁定结果写进 stream_url 本身，冷启动读缓存时按标记复原，免建 DB 迁移。
+        long sourceSizeBytes = 0;
+        String sourceContainer = null;
         if (itemObj.has("MediaSources") && itemObj.get("MediaSources").isJsonArray()) {
             JsonArray sources = itemObj.getAsJsonArray("MediaSources");
             if (sources.size() > 0 && sources.get(0).isJsonObject()) {
                 JsonObject src = sources.get(0).getAsJsonObject();
-                if (src.has("BitRate") && !src.get("BitRate").isJsonNull()) {
-                    sourceBitRate = src.get("BitRate").getAsLong();
+                if (src.has("Size") && !src.get("Size").isJsonNull()) {
+                    sourceSizeBytes = src.get("Size").getAsLong();
+                }
+                if (src.has("Container") && !src.get("Container").isJsonNull()) {
+                    sourceContainer = src.get("Container").getAsString();
                 }
             }
         }
-        String streamUrl = shouldUseServerDownmix(sourceBitRate)
-                ? getDownmixStreamUrl(itemId) : getStreamUrl(itemId, true);
+        long sourceBytesPerSec = sourceBytesPerSec(sourceSizeBytes, durationMs * 10_000L);
+        String streamUrl = shouldUseServerFlac(sourceBytesPerSec, sourceContainer)
+                ? getFlacStreamUrl(itemId, shouldDownmixToStereo(sourceBytesPerSec))
+                : getStreamUrl(itemId, true);
 
         boolean isFav = false;
         if (itemObj.has("UserData") && itemObj.getAsJsonObject("UserData").has("IsFavorite")) {
@@ -798,7 +840,7 @@ public class JellyfinApiClient {
 
         return new SongItem(itemId, TextRepair.repair(name), TextRepair.repair(artist),
                 TextRepair.repair(album), TextRepair.repair(genre), TextRepair.repair(folderName),
-                durationMs, getStreamUrl(itemId), getCoverUrl(itemId), isFav);
+                durationMs, getStreamUrl(itemId), isFav);
     }
 
     /**

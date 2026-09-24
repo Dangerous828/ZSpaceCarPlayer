@@ -105,6 +105,38 @@ zip 条目数与 `.so` 完全一致、看不出问题，只有体积暴露它 �
 另记一条排查坑：从 Mac 经共享盘写 `latest.json` 后**立刻**从公网拉，可能仍拿到旧内容
 （源站刷新有秒级延迟）。判发布结果要轮询到内容变更为止，不能写完就看一眼就下结论。
 
+## vc9 = 3.1.5 发布记录（2026-09-23 10:03）
+
+正式发布物：**`ZSpaceCarPlayer-3.1.5-code9-2-debug.apk`**，3,118,945 B，
+`sha256=84efd11b4e6896dde30c4070fca31b5d7c8136ec67c188d59906866b37b7dc54`，
+`aapt dump badging` → `versionCode='9' versionName='3.1.5'`。`clean testDebugUnitTest assembleDebug` 出包，349 条 host 单测全绿；公网按清单 URL 实下载 sha256 与 size 逐字节一致。
+
+同 versionCode 的首发件 `...-code9-debug.apk`（`57773b54…`，缺 `sort_index` 列缺失降级）已移到
+`update/_rejected-superseded-builds/code9-1-no-column-guard.apk`，不再被任何清单引用。
+换名原因见上文：**同名换内容会被 CF 边缘缓存（APK URL `max-age=14400`）配上新清单导致拒装**。
+
+vc9 的内容要点（详见 `changelogs/3.1.5.md`）：无损 PCM 一律请服务端出 FLAC（已用 ffmpeg 逐字节验证无损）；
+`songs` 表加 `sort_index` 让车机缓存只有服务端一份顺序，不再与 `name ASC` 码点序并存；刷新成功时
+`saveLibrarySnapshot` 全量替换以清掉服务端已下架的幽灵条目。
+
+## vc10 = 3.1.6 —— 曾短暂指向，已回滚，未成为正式发布物
+
+**当前线上清单不指向 vc10。** 2026-09-24 10:18 曾把 `latest.json` 指到本包，随后因「未经用户看图确认就发版」回滚到 vc9；vc10 的版式（深色底 + 左右分栏）随后被 v3.2.0 整体取代。包体仍留在 `ZSpaceCarPlayer-3.1.6-code10-debug.apk`（3,118,446 B，`sha256=ecfa32bc23c6d74a6495c909b11a083243919b1b027c8ece603c3cce33f98089`，`versionCode='10' versionName='3.1.6'`），但不再被任何清单引用。
+
+仍然有效的判断：移除与歌名重复的首字色块、进度条轨道 5→10dp、滑块 18→30dp、`saveLibrarySnapshot` 全量替换清幽灵条目。
+
+教训一条：**发版前必须先出图给用户确认，"构建通过"不等于"可以发布"。** 回滚动作本身也说明清单是唯一的发布开关——改 `latest.json` 就是发版，改包体不是。
+
+## vc11 = 3.2.0 —— 物料已备，未发布（2026-09-24 15:42）
+
+**`ZSpaceCarPlayer-3.2.0-code11-debug.apk`**，3,121,885 B，
+`sha256=9bd284522138ef49f00af1d1d8ae880e9e3fb866693cd4a1e63bdc4112965976`，
+`aapt dump badging` → `versionCode='11' versionName='3.2.0'`。`clean :app:assembleDebug :app:testDebugUnitTest` 通过，367 条 host 单测全绿。包内已核验 `values-night` 资源与 `QueueRestore` / `LibraryOrder` / `NightModeManager` 三个新类均进 dex（不只看文件名）。
+
+**`latest.json` 仍指向 vc9，本版未发布。** 内容见 `changelogs/3.2.0.md`。
+
+发布时源站清单刷新有秒级滞后（vc9/vc10 那次 poll1 仍回旧值、poll2 才变更），判发布结果要轮询到内容变更为止。
+
 **发版铁律**：出包前先推进 `versionCode`；发布时把「构建时间 + 大小 + SHA-256 + `aapt2 dump badging` 的 package 行」记进本文件。判断"是否已部署"只认从设备 pull 回来的包哈希，不认版本号和 changelog。
 
 

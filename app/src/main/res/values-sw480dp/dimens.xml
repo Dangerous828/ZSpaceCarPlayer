@@ -33,7 +33,6 @@
     <dimen name="fav_size">21sp</dimen>
     <dimen name="dur_text">15sp</dimen>
     <dimen name="accent_bar">34dp</dimen>
-    <dimen name="cover">118dp</dimen>
     <dimen name="badge_size">30dp</dimen>
     <dimen name="np_title">22sp</dimen>
     <dimen name="np_artist">15sp</dimen>

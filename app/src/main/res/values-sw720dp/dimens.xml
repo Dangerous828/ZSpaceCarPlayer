@@ -1,79 +1,107 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 车机档 (真车命中): 吉利 8600 为 1920x720 px @ density 1.0 → sw=720dp。
-     用户在实车反馈文字普遍过小, 本档按车内一臂距离阅读放大约 1.5 倍
-     (与 values-sw480dp 档位保持 1.5:1 的物理等比, 后者服务 240dpi 设备)。 -->
+<!-- 车机档 (真车命中): 吉利 8600 为 1920x720 px @ density 1.0 → sw=720dp, 1dp = 1px。
+
+     3.2.0 起改为「单栏全宽列表 + 底部通栏播控条」, 纵向预算是闭合的, 任何一项改动
+     都会把第 6 行挤出屏幕:
+       顶栏 88 + 列头 44 + 列表 6x72=432 + 播控条 140 + 条下留白 14 = 718 (≤720)
+     所以 row_h / bar_h / topbar_h / head_h 四个数只能整体平移, 不能单独放大。
+
+     行车可达性: 播控条内所有可点元素左对齐 (◀◀ 播放 ▶▶ 上报 顺序), 司机左手不出
+     方向盘半径就能完成切歌; 进度条是唯一需要横向距离的控件, 放在条内右端。 -->
 <resources>
-    <dimen name="topbar_h">96dp</dimen>
-    <dimen name="brand_mark">52dp</dimen>
-    <dimen name="brand_text">30sp</dimen>
-    <dimen name="brand_z">32sp</dimen>
-    <dimen name="nav_h">68dp</dimen>
-    <dimen name="nav_text">22sp</dimen>
-    <dimen name="status_text">22sp</dimen>
-    <dimen name="clock_text">26sp</dimen>
-    <dimen name="conn_h">56dp</dimen>
-    <dimen name="body_pad_v">16dp</dimen>
-    <dimen name="body_pad_h">22dp</dimen>
-    <dimen name="list_title">36sp</dimen>
-    <dimen name="count_text">22sp</dimen>
-    <dimen name="search_w">380dp</dimen>
-    <dimen name="search_h">58dp</dimen>
-    <dimen name="search_text">24sp</dimen>
-    <dimen name="chips_h">72dp</dimen>
-    <dimen name="chip_h">50dp</dimen>
-    <dimen name="chip_text">24sp</dimen>
-    <dimen name="chip_padh">20dp</dimen>
-    <dimen name="row_h">104dp</dimen>
-    <dimen name="thumb">72dp</dimen>
-    <dimen name="thumb_text">36sp</dimen>
-    <dimen name="song_title">28sp</dimen>
-    <dimen name="artist">22sp</dimen>
-    <dimen name="tag_text">19sp</dimen>
-    <dimen name="fav_box">62dp</dimen>
-    <dimen name="fav_size">30sp</dimen>
-    <dimen name="dur_text">22sp</dimen>
-    <dimen name="accent_bar">48dp</dimen>
-    <dimen name="cover">132dp</dimen>
-    <dimen name="badge_size">38dp</dimen>
-    <dimen name="np_title">32sp</dimen>
+    <!-- 纵向骨架 -->
+    <dimen name="topbar_h">88dp</dimen>
+    <dimen name="head_h">44dp</dimen>
+    <dimen name="bar_h">140dp</dimen>
+    <dimen name="bar_margin_b">14dp</dimen>
+    <dimen name="body_pad_v">0dp</dimen>
+    <dimen name="body_pad_h">32dp</dimen>
+    <dimen name="panel_padh">26dp</dimen>
+
+    <!-- 顶栏 -->
+    <dimen name="brand_mark">40dp</dimen>
+    <dimen name="brand_text">24sp</dimen>
+    <dimen name="brand_z">26sp</dimen>
+    <dimen name="nav_h">52dp</dimen>
+    <dimen name="nav_text">21sp</dimen>
+    <dimen name="status_text">18sp</dimen>
+    <dimen name="clock_text">22sp</dimen>
+    <dimen name="conn_h">44dp</dimen>
+    <dimen name="list_title">26sp</dimen>
+    <dimen name="count_text">19sp</dimen>
+    <dimen name="search_w">260dp</dimen>
+    <dimen name="search_h">52dp</dimen>
+    <dimen name="search_text">20sp</dimen>
+    <dimen name="close_text">20sp</dimen>
+
+    <!-- 列表密度: 72dp 行高 × 6 行, 歌名与歌手同行基线对齐 -->
+    <dimen name="row_h">72dp</dimen>
+    <dimen name="row_padh">18dp</dimen>
+    <dimen name="idx_w">40dp</dimen>
+    <dimen name="idx_text">20sp</dimen>
+    <dimen name="song_title">27sp</dimen>
+    <dimen name="artist">19sp</dimen>
+    <dimen name="tag_text">16sp</dimen>
+    <dimen name="fav_box">52dp</dimen>
+    <dimen name="fav_size">24sp</dimen>
+    <dimen name="dur_text">19sp</dimen>
+    <dimen name="dur_w">76dp</dimen>
+    <dimen name="accent_bar">44dp</dimen>
+    <dimen name="list_padh">0dp</dimen>
+    <dimen name="thumb">40dp</dimen>
+    <dimen name="thumb_text">20sp</dimen>
+
+    <!-- 播控条: 主播放钮 88dp, 次级钮统一 66dp, 只留一档差距 -->
+    <dimen name="play">88dp</dimen>
+    <dimen name="play_text">34sp</dimen>
+    <dimen name="prev_next">66dp</dimen>
+    <dimen name="sk">66dp</dimen>
+    <dimen name="sk_text">22sp</dimen>
+    <dimen name="mode_w">96dp</dimen>
+    <dimen name="mode_h">66dp</dimen>
+    <dimen name="mode_text">21sp</dimen>
+    <dimen name="np_title">36sp</dimen>
     <dimen name="np_artist">22sp</dimen>
-    <dimen name="kicker_text">22sp</dimen>
-    <dimen name="badge_text">19sp</dimen>
-    <dimen name="lyr_label">22sp</dimen>
+    <dimen name="lyric_ticker">40sp</dimen>
+    <dimen name="prog_w">260dp</dimen>
+    <dimen name="time_text">17sp</dimen>
+    <dimen name="total_time_text">17sp</dimen>
+    <dimen name="kicker_text">18sp</dimen>
+    <dimen name="badge_text">16sp</dimen>
+    <dimen name="badge_size">32dp</dimen>
+
+    <!-- 进度条: 轨道 9dp / 滑块 20dp, 行车中要能点得中 -->
+    <dimen name="seek_bar_h">24dp</dimen>
+    <dimen name="seek_track_h">9dp</dimen>
+    <dimen name="seek_thumb">20dp</dimen>
+    <dimen name="seek_thumb_off">10dp</dimen>
+    <dimen name="seek_thumb_stroke">3dp</dimen>
+
+    <!-- 「正在播放」整屏页: 大歌词滚动 -->
+    <dimen name="lyr_label">20sp</dimen>
     <dimen name="lyrics_empty">30sp</dimen>
-    <dimen name="mini_h">42dp</dimen>
-    <dimen name="mini_text">21sp</dimen>
-    <dimen name="mini_w">72dp</dimen>
+    <dimen name="lyric_base">40sp</dimen>
+    <dimen name="lyric_mid">48sp</dimen>
+    <dimen name="lyric_large">56sp</dimen>
+
+    <!-- 其余沿用 (设置页 / 弹窗 / 分类网格) -->
+    <dimen name="chips_h">60dp</dimen>
+    <dimen name="chip_h">44dp</dimen>
+    <dimen name="chip_text">20sp</dimen>
+    <dimen name="chip_padh">16dp</dimen>
+    <dimen name="mini_h">40dp</dimen>
+    <dimen name="mini_text">18sp</dimen>
+    <dimen name="mini_w">64dp</dimen>
     <dimen name="font_w">100dp</dimen>
-    <dimen name="time_text">22sp</dimen>
-    <dimen name="total_time_text">22sp</dimen>
-    <dimen name="play">60dp</dimen>
-    <dimen name="play_text">28sp</dimen>
-    <dimen name="sk">52dp</dimen>
-    <dimen name="sk_text">18sp</dimen>
-    <dimen name="prev_next">52dp</dimen>
-    <dimen name="seek_bar_h">18dp</dimen>
-    <dimen name="seek_thumb">18dp</dimen>
-    <dimen name="seek_thumb_off">9dp</dimen>
-    <dimen name="seek_thumb_stroke">2.5dp</dimen>
-    <dimen name="seek_track_h">5dp</dimen>
-    <dimen name="mode_w">84dp</dimen>
-    <dimen name="mode_h">42dp</dimen>
-    <dimen name="mode_text">19sp</dimen>
-    <dimen name="list_padh">18dp</dimen>
-    <dimen name="panel_padh">30dp</dimen>
-    <dimen name="lyric_base">36sp</dimen>
-    <dimen name="lyric_mid">44sp</dimen>
-    <dimen name="lyric_large">52sp</dimen>
-    <dimen name="dialog_title">38sp</dimen>
-    <dimen name="dialog_text">28sp</dimen>
-    <dimen name="dialog_input_h">84dp</dimen>
-    <dimen name="dialog_btn_h">72dp</dimen>
+    <dimen name="dialog_title">34sp</dimen>
+    <dimen name="dialog_text">26sp</dimen>
+    <dimen name="dialog_input_h">76dp</dimen>
+    <dimen name="dialog_btn_h">66dp</dimen>
     <dimen name="dialog_btn_w_cancel">160dp</dimen>
     <dimen name="dialog_btn_w_save">220dp</dimen>
     <dimen name="dialog_w">780dp</dimen>
-    <dimen name="card_grid_h">116dp</dimen>
-    <dimen name="card_icon_size">72dp</dimen>
-    <dimen name="card_title_size">26sp</dimen>
-    <dimen name="card_sub_size">20sp</dimen>
+    <dimen name="card_grid_h">104dp</dimen>
+    <dimen name="card_icon_size">60dp</dimen>
+    <dimen name="card_title_size">24sp</dimen>
+    <dimen name="card_sub_size">18sp</dimen>
 </resources>

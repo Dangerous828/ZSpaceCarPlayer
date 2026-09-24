@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 缓冲进度层 (2026-09-13 双进度条): 半透明浅色, 夹在深色轨道与青绿播放进度之间,
-     呈现「视频加载」式的双层进度条观感 -->
+<!-- 缓冲进度层: 浅蓝尾巴, 夹在灰轨道与蓝色播放进度之间, 保留「加载超前」的双层观感 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <solid android:color="#66F1F6FB" />
-    <corners android:radius="2dp" />
+    <solid android:color="@color/line_2" />
+    <corners android:radius="5dp" />
 </shape>

@@ -2,6 +2,7 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="@drawable/bg_panel"
     android:orientation="vertical"
     android:paddingStart="16dp"
     android:paddingTop="12dp"
@@ -266,6 +267,68 @@
                     android:minWidth="@dimen/font_w"
                     android:singleLine="true"
                     android:text="系统"
+                    android:textAllCaps="false"
+                    android:textColor="@color/ink_dim"
+                    android:textSize="@dimen/mini_text" />
+            </LinearLayout>
+
+            <!-- 夜间模式: 三档循环 (自动 / 白天 / 夜间)。API 18 车机字体缺日月图形字符,
+                 图标位用汉字, 不用 emoji。 -->
+            <LinearLayout
+                android:id="@+id/btnSettingNightToggle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_card_grid"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="16dp"
+                android:paddingTop="14dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="14dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="夜"
+                    android:textColor="@color/accent"
+                    android:textSize="@dimen/dialog_title"
+                    android:textStyle="bold" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="14dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="夜间模式"
+                        android:textColor="@color/ink"
+                        android:textSize="@dimen/card_title_size"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="自动=18 点至次日 6 点转深色; 深色为琥珀底, 夜里不刺眼"
+                        android:textColor="@color/ink_dim"
+                        android:textSize="@dimen/card_sub_size" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnSettingNightValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="@dimen/mini_h"
+                    android:background="@drawable/bg_soft_pill"
+                    android:minWidth="@dimen/font_w"
+                    android:singleLine="true"
+                    android:text="自动"
                     android:textAllCaps="false"
                     android:textColor="@color/ink_dim"
                     android:textSize="@dimen/mini_text" />

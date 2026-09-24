@@ -9,6 +9,7 @@ import android.os.Looper;
 import android.util.Log;
 
 import com.ktools.zspacecarplayer.model.SongItem;
+import com.ktools.zspacecarplayer.util.LibraryOrder;
 import com.ktools.zspacecarplayer.util.PinyinUtils;
 import com.ktools.zspacecarplayer.util.TextRepair;
 
@@ -43,6 +44,21 @@ public class SongDao {
     }
 
     public void saveSongs(final List<SongItem> songs) {
+        saveSongsInternal(songs, false);
+    }
+
+    /**
+     * 用一次完整成功的媒体库拉取**全量替换**缓存。
+     *
+     * 逐条 upsert 只能改已有行、永远不会删除服务端已经下架/改名的条目，于是车机库里
+     * 长期留着这类"幽灵曲目"：它们仍出现在列表里，但真去取流必然拿不到，表现成播放卡住
+     * 或无声。只有在整份拉取成功时才走这里，拉取失败保留旧缓存。
+     */
+    public void saveLibrarySnapshot(final List<SongItem> songs) {
+        saveSongsInternal(songs, true);
+    }
+
+    private void saveSongsInternal(final List<SongItem> songs, final boolean replaceAll) {
         if (songs == null) return;
         new Thread(new Runnable() {
             @Override
@@ -67,6 +83,9 @@ public class SongDao {
 
                 db.beginTransaction();
                 try {
+                    if (replaceAll) {
+                        db.delete("songs", null, null);
+                    }
                     for (SongItem song : songs) {
                         ContentValues cv = new ContentValues();
                         cv.put("id", song.getId());
@@ -77,7 +96,6 @@ public class SongDao {
                         cv.put("folder_name", song.getFolderName());
                         cv.put("duration_ms", song.getDurationMs());
                         cv.put("stream_url", song.getStreamUrl());
-                        cv.put("cover_url", song.getCoverUrl());
                         cv.put("is_favorite", song.isFavorite() ? 1 : 0);
 
                         Integer existingPlayCount = playCountMap.get(song.getId());
@@ -113,12 +131,14 @@ public class SongDao {
         }).start();
     }
 
+
+
     public List<SongItem> getAllSongs() {
         List<SongItem> list = new ArrayList<>();
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         Cursor cursor = null;
         try {
-            cursor = db.query("songs", null, null, null, null, null, "name ASC");
+            cursor = db.query("songs", null, null, null, null, null, LibraryOrder.SQL_ORDER_BY);
             if (cursor != null && cursor.moveToFirst()) {
                 do {
                     SongItem song = parseCursorToSong(cursor);
@@ -153,7 +173,7 @@ public class SongDao {
         SQLiteDatabase db = dbHelper.getReadableDatabase();
         Cursor cursor = null;
         try {
-            cursor = db.query("songs", null, "is_favorite = 1", null, null, null, "name ASC");
+            cursor = db.query("songs", null, "is_favorite = 1", null, null, null, LibraryOrder.SQL_ORDER_BY);
             if (cursor != null && cursor.moveToFirst()) {
                 do {
                     SongItem song = parseCursorToSong(cursor);
@@ -189,7 +209,7 @@ public class SongDao {
         Cursor cursor = null;
         try {
             cursor = db.query("songs", null, "play_count > 0", null, null, null,
-                    "play_count DESC, name ASC", "100");
+                    LibraryOrder.SQL_ORDER_BY_MOST_PLAYED, "100");
             if (cursor != null && cursor.moveToFirst()) {
                 do {
                     SongItem song = parseCursorToSong(cursor);
@@ -264,7 +284,7 @@ public class SongDao {
             String where = "name LIKE ? OR artist LIKE ? OR album LIKE ? OR genre LIKE ? OR pinyin LIKE ?";
             String[] args = new String[]{kw, kw, kw, kw, kw};
 
-            cursor = db.query("songs", null, where, args, null, null, "name ASC");
+            cursor = db.query("songs", null, where, args, null, null, LibraryOrder.SQL_ORDER_BY);
             if (cursor != null && cursor.moveToFirst()) {
                 do {
                     SongItem song = parseCursorToSong(cursor);
@@ -297,10 +317,9 @@ public class SongDao {
 
         long durationMs = cursor.getLong(cursor.getColumnIndexOrThrow("duration_ms"));
         String streamUrl = cursor.getString(cursor.getColumnIndexOrThrow("stream_url"));
-        String coverUrl = cursor.getString(cursor.getColumnIndexOrThrow("cover_url"));
         boolean isFav = cursor.getInt(cursor.getColumnIndexOrThrow("is_favorite")) == 1;
 
-        SongItem song = new SongItem(id, name, artist, album, genre, folderName, durationMs, streamUrl, coverUrl, isFav);
+        SongItem song = new SongItem(id, name, artist, album, genre, folderName, durationMs, streamUrl, isFav);
         song.setPlayCount(cursor.getInt(cursor.getColumnIndexOrThrow("play_count")));
         return song;
     }

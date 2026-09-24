@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 选中态=实心蓝药丸 + 白字 (由 MainActivity 切 textColor), 未选中态无底 -->
     <item android:state_selected="true">
         <shape android:shape="rectangle">
-            <solid android:color="#2630DDC2" />
-            <corners android:radius="10dp" />
-            <stroke android:width="1dp" android:color="@color/accent_border" />
+            <solid android:color="@color/accent" />
+            <corners android:radius="26dp" />
         </shape>
     </item>
     <item android:state_pressed="true">
         <shape android:shape="rectangle">
             <solid android:color="@color/panel_3" />
-            <corners android:radius="10dp" />
+            <corners android:radius="26dp" />
         </shape>
     </item>
     <item android:drawable="@android:color/transparent" />

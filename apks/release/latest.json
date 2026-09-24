@@ -1,11 +1,11 @@
 {
-  "versionCode": 8,
-  "versionName": "3.1.4",
-  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.1.4-code8-clean-debug.apk",
-  "fileName": "ZSpaceCarPlayer-3.1.4-code8-clean-debug.apk",
-  "sizeBytes": 3117808,
-  "sha256": "35de7751653206b31ca64b7f208a9c34c3afd615480583feef98a918761faf5f",
-  "notes": "多声道歌曲（如「答案」）改由服务端下混成立体声无损再传，传输量降到约六分之一，播放不再卡顿。某首歌反复重试仍放不出来时，现在会提示并自动跳过继续播下一首，不再无声等待。",
+  "versionCode": 9,
+  "versionName": "3.1.5",
+  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.1.5-code9-2-debug.apk",
+  "fileName": "ZSpaceCarPlayer-3.1.5-code9-2-debug.apk",
+  "sizeBytes": 3118945,
+  "sha256": "84efd11b4e6896dde30c4070fca31b5d7c8136ec67c188d59906866b37b7dc54",
+  "notes": "无损歌曲改由服务端压成 FLAC 再传（逐字节验证无损，音质零变化），传输量降到约六分之一，播放不再卡顿。某首歌反复重试仍放不出来时，会提示并自动跳过继续播下一首。",
   "minVersionCode": 1,
   "mandatory": false,
   "publishedAt": "2026-09-23"

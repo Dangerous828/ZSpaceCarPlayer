@@ -1,24 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- top/bottom inset 让 4dp 轨道居中, 不被拉伸到 SeekBar 整个视图高度 -->
+    <!-- top/bottom inset 让轨道居中, 不被拉伸到 SeekBar 整个视图高度 -->
     <item android:id="@android:id/background"
-        android:top="5dp"
-        android:bottom="5dp">
+        android:top="7dp"
+        android:bottom="7dp">
         <shape android:shape="rectangle">
-            <solid android:color="@color/panel_3" />
-            <corners android:radius="2dp" />
+            <solid android:color="@color/track" />
+            <corners android:radius="5dp" />
         </shape>
     </item>
     <item android:id="@android:id/progress"
-        android:top="5dp"
-        android:bottom="5dp">
+        android:top="7dp"
+        android:bottom="7dp">
         <clip>
             <shape android:shape="rectangle">
-                <gradient
-                    android:angle="0"
-                    android:startColor="#2BDEC3"
-                    android:endColor="#49D8D5" />
-                <corners android:radius="2dp" />
+                <solid android:color="@color/accent" />
+                <corners android:radius="5dp" />
             </shape>
         </clip>
     </item>

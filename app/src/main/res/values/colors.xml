@@ -1,23 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- ZSpace Player 2.3 redesign tokens (Night-Drive Teal) -->
-    <color name="app_bg">#080C12</color>
-    <color name="topbar_bg">#0B1017</color>
-    <color name="panel">#101722</color>
-    <color name="panel_2">#151D2A</color>
-    <color name="panel_3">#1B2431</color>
-    <color name="line">#1ABDD3E9</color>
-    <color name="line_2">#33BDD3E9</color>
-    <color name="ink">#F1F6FB</color>
-    <color name="ink_dim">#A8B5C6</color>
-    <color name="ink_mute">#738195</color>
-    <color name="accent">#30DDC2</color>
-    <color name="accent_2">#1DBDA7</color>
-    <color name="accent_soft">#2130DDC2</color>
-    <color name="accent_border">#5730DDC2</color>
-    <color name="accent_row_bg">#1330DDC2</color>
-    <color name="on_accent">#062D29</color>
-    <color name="play_border">#85F5E5</color>
-    <color name="play_icon">#062822</color>
-    <color name="hl">#F3B34C</color>
+    <!-- 3.2.0 Day-Light 色板: 亮底单栏。车机 1920x720 常在日光下直读,
+         深色底在强光里反射成镜面, 图标与文字一起被洗掉; 亮底把对比度让给日光。
+         强调色从青绿 (#30DDC2, 亮底上仅 2.2:1) 换成蓝 (#1668C9, 白底 6.1:1)。 -->
+    <color name="app_bg">#F4F6F9</color>
+    <color name="topbar_bg">#F4F6F9</color>
+    <color name="panel">#FFFFFF</color>
+    <color name="panel_2">#F7F9FC</color>
+    <color name="panel_3">#EAF0F7</color>
+    <color name="track">#DDE4EC</color>
+    <color name="line">#E2E7EE</color>
+    <color name="line_2">#C9D3DF</color>
+    <color name="ink">#111820</color>
+    <color name="ink_dim">#4A5568</color>
+    <color name="ink_mute">#69758A</color>
+    <color name="lyric_off">#8A94A6</color>
+    <color name="accent">#1668C9</color>
+    <color name="accent_2">#0F55A8</color>
+    <color name="accent_soft">#141668C9</color>
+    <color name="accent_border">#591668C9</color>
+    <color name="accent_row_bg">#EAF2FC</color>
+    <color name="on_accent">#FFFFFF</color>
+    <color name="play_border">#FFFFFF</color>
+    <color name="play_icon">#FFFFFF</color>
+    <color name="hl">#B4551F</color>
+    <!-- 列表行未收藏的心形: 只作占位对齐, 不能抢歌名视线 -->
+    <color name="fav_off">#C9CFD8</color>
 </resources>

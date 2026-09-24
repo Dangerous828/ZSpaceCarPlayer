@@ -1,16 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- radius 故意大于任何控件高度: Android 会把圆角夹到短边一半,
+         于是 44/52/66dp 高的胶囊各自成全圆角, 不必为每种尺寸开一个 drawable。 -->
     <item android:state_pressed="true">
         <shape android:shape="rectangle">
             <solid android:color="@color/panel_3" />
-            <corners android:radius="10dp" />
+            <corners android:radius="40dp" />
             <stroke android:width="1dp" android:color="@color/line_2" />
         </shape>
     </item>
     <item>
         <shape android:shape="rectangle">
             <solid android:color="@color/panel_2" />
-            <corners android:radius="10dp" />
+            <corners android:radius="40dp" />
             <stroke android:width="1dp" android:color="@color/line" />
         </shape>
     </item>

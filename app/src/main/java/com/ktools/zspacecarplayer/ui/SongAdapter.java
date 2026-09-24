@@ -1,6 +1,6 @@
 package com.ktools.zspacecarplayer.ui;
 
-import android.graphics.Color;
+import android.content.res.Resources;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -16,12 +16,6 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class SongAdapter extends RecyclerView.Adapter<SongAdapter.SongViewHolder> {
-
-    /** 首字色块的 6 组渐变背景, 按歌曲 Id 哈希轮转 (对应设计稿 hsl 渐变色板) */
-    private static final int[] THUMB_BG = {
-            R.drawable.bg_thumb_1, R.drawable.bg_thumb_2, R.drawable.bg_thumb_3,
-            R.drawable.bg_thumb_4, R.drawable.bg_thumb_5, R.drawable.bg_thumb_6
-    };
 
     private List<SongItem> songs = new ArrayList<>();
     private int selectedIndex = -1;
@@ -80,12 +74,6 @@ public class SongAdapter extends RecyclerView.Adapter<SongAdapter.SongViewHolder
         holder.tvSongTitle.setText(song.getName());
         holder.tvArtistAlbum.setText(song.getArtist());
 
-        // 首字色块: 渐变按歌曲 Id 稳定轮转, 展示歌名首个字符
-        int variant = Math.abs(song.getId().hashCode()) % THUMB_BG.length;
-        holder.tvThumb.setBackgroundResource(THUMB_BG[variant]);
-        String first = firstDisplayChar(song.getName());
-        holder.tvThumb.setText(first);
-
         // 流派小标签 (未分类不展示)
         String genre = song.getGenre();
         if (genre != null && !genre.trim().isEmpty() && !"未分类".equals(genre)) {
@@ -103,19 +91,18 @@ public class SongAdapter extends RecyclerView.Adapter<SongAdapter.SongViewHolder
         }
         holder.tvDuration.setText(durationText);
 
-        if (song.isFavorite()) {
-            holder.tvFavIcon.setText("♥");
-            holder.tvFavIcon.setTextColor(Color.parseColor("#F3B34C"));
-        } else {
-            // 车机字体缺 ♡ (U+2661) 字形会渲染成方框, 统一用安全字符 ♥: 未收藏=淡灰
-            holder.tvFavIcon.setText("♥");
-            holder.tvFavIcon.setTextColor(Color.parseColor("#4D738195"));
-        }
+        Resources res = holder.itemView.getResources();
+        holder.tvFavIcon.setText("♥");
+        // 车机字体缺 ♡ (U+2661) 字形会渲染成方框, 统一用安全字符 ♥: 未收藏=淡灰
+        holder.tvFavIcon.setTextColor(res.getColor(song.isFavorite() ? R.color.hl : R.color.fav_off));
 
         boolean selected = (position == selectedIndex);
-        // state_selected 驱动 bg_row_song 选择器 (高亮底 + 边框), 左侧指示条单独控制
+        // state_selected 驱动 bg_row_song 选择器 (高亮底 + 边框); 序号列在选中时让位给波形徽标
         holder.itemView.setSelected(selected);
-        holder.accentBar.setVisibility(selected ? View.VISIBLE : View.GONE);
+        holder.eqBadge.setVisibility(selected ? View.VISIBLE : View.GONE);
+        holder.tvIndex.setVisibility(selected ? View.INVISIBLE : View.VISIBLE);
+        holder.tvIndex.setText(String.valueOf(position + 1));
+        holder.tvSongTitle.setTextColor(res.getColor(selected ? R.color.accent : R.color.ink));
 
         holder.itemView.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -136,44 +123,29 @@ public class SongAdapter extends RecyclerView.Adapter<SongAdapter.SongViewHolder
         });
     }
 
-    /** 色块展示字符: 跳过歌名前导的 - _ 空格 括号等符号, 全是符号时回退音符 */
-    static String firstDisplayChar(String name) {
-        if (name == null || name.trim().length() == 0) return "♪";
-        for (int i = 0; i < name.length(); i++) {
-            char c = name.charAt(i);
-            if (c == '-' || c == '_' || c == ' ' || c == '.' || c == '·' || c == '【'
-                    || c == '】' || c == '[' || c == ']' || c == '(' || c == ')'
-                    || c == '《' || c == '》') {
-                continue;
-            }
-            return String.valueOf(c);
-        }
-        return "♪";
-    }
-
     @Override
     public int getItemCount() {
         return songs.size();
     }
 
     static class SongViewHolder extends RecyclerView.ViewHolder {
-        TextView tvThumb;
         TextView tvSongTitle;
         TextView tvArtistAlbum;
         TextView tvGenreTag;
         TextView tvFavIcon;
         TextView tvDuration;
-        View accentBar;
+        TextView tvIndex;
+        View eqBadge;
 
         public SongViewHolder(@NonNull View itemView) {
             super(itemView);
-            tvThumb = itemView.findViewById(R.id.tvThumb);
             tvSongTitle = itemView.findViewById(R.id.tvSongTitle);
             tvArtistAlbum = itemView.findViewById(R.id.tvArtistAlbum);
             tvGenreTag = itemView.findViewById(R.id.tvGenreTag);
             tvFavIcon = itemView.findViewById(R.id.tvFavIcon);
             tvDuration = itemView.findViewById(R.id.tvDuration);
-            accentBar = itemView.findViewById(R.id.accentBar);
+            tvIndex = itemView.findViewById(R.id.tvIndex);
+            eqBadge = itemView.findViewById(R.id.eqBadge);
         }
     }
 }

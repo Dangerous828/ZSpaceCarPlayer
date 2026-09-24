@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 夜间档 (N3 暖墨琥珀): 夜间行车时屏幕是车里唯一的强光源, 蓝成分会压暗视觉并影响
+     看路, 所以整套色板往琥珀偏移 —— 强调色从白天的蓝 #1668C9 换成 #E0A15A, 底色带暖褐。
+     只覆盖 @color token: 布局与 drawable 全部引用 token, 换档不需要动版式。
+     与 values/colors.xml 的 token 必须一一对应, 少一个就会在夜间露出白天的颜色。 -->
+<resources>
+    <color name="app_bg">#12100D</color>
+    <color name="topbar_bg">#12100D</color>
+    <color name="panel">#1C1915</color>
+    <color name="panel_2">#26221C</color>
+    <color name="panel_3">#302B23</color>
+    <color name="track">#35302A</color>
+    <color name="line">#35302A</color>
+    <color name="line_2">#4C443A</color>
+    <color name="ink">#EFE7D8</color>
+    <color name="ink_dim">#BCAF99</color>
+    <color name="ink_mute">#9C907C</color>
+    <color name="lyric_off">#7E7462</color>
+    <color name="accent">#E0A15A</color>
+    <color name="accent_2">#EBB878</color>
+    <color name="accent_soft">#1FE0A15A</color>
+    <color name="accent_border">#59E0A15A</color>
+    <color name="accent_row_bg">#2A2318</color>
+    <color name="on_accent">#1A1206</color>
+    <color name="play_border">#E0A15A</color>
+    <color name="play_icon">#1A1206</color>
+    <color name="hl">#D96A4A</color>
+    <color name="fav_off">#4C443A</color>
+</resources>

@@ -7,7 +7,7 @@ import android.database.sqlite.SQLiteOpenHelper;
 public class DbHelper extends SQLiteOpenHelper {
 
     private static final String DB_NAME = "zspace_car_player.db";
-    private static final int DB_VERSION = 4;
+    private static final int DB_VERSION = 5;
 
     public DbHelper(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
@@ -25,7 +25,6 @@ public class DbHelper extends SQLiteOpenHelper {
                 + "folder_name TEXT, "
                 + "duration_ms INTEGER, "
                 + "stream_url TEXT, "
-                + "cover_url TEXT, "
                 + "is_favorite INTEGER DEFAULT 0, "
                 + "play_count INTEGER DEFAULT 0, "
                 + "pinyin TEXT)");
@@ -72,6 +71,12 @@ public class DbHelper extends SQLiteOpenHelper {
             try {
                 db.execSQL("ALTER TABLE songs ADD COLUMN pinyin TEXT");
             } catch (Exception ignored) {}
+        }
+        if (oldVersion < 5) {
+            // v5 曾引入 sort_index 记录服务端返回顺序位, 现已废弃: 探针实测 Jellyfin 会把
+            // SortName 未赋值的条目无条件顶到列表最前 (全库 79/799 首), 那个顺序位不是任何
+            // 可解释的规则。版本号保留在 5 不回退 —— 已经跑过 v5 的设备拿到更低版本号会走
+            // onDowngrade 直接抛异常, 打不开库。残留的 sort_index 列无人读写, 与 cover_url 同。
         }
     }
 }

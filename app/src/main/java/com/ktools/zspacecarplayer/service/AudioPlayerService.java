@@ -765,6 +765,11 @@ public class AudioPlayerService extends Service {
         } else {
             this.currentIndex = -1;
         }
+        // 上报里必须反映刷新后的真实位置，否则 playlistIndex 会一直停在 setPlaylist 那一刻
+        CrashMonitor.putContext("playlistSize", playlist.size());
+        CrashMonitor.putContext("playlistIndex", currentIndex);
+        CrashMonitor.breadcrumb("play", "updatePlaylist size=" + playlist.size()
+                + " index=" + currentIndex);
     }
 
     public List<SongItem> getPlaylist() {
@@ -1322,6 +1327,7 @@ public class AudioPlayerService extends Service {
         streamRetryCount = 0;
         silentErrorStreak = 0;
         playbackState.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);
+        CrashMonitor.putContext("playlistIndex", currentIndex);
         startPlaybackWithSeek(playlist.get(currentIndex), -1, origin);
     }
 
@@ -1339,6 +1345,7 @@ public class AudioPlayerService extends Service {
         streamRetryCount = 0;
         silentErrorStreak = 0;
         playbackState.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);
+        CrashMonitor.putContext("playlistIndex", currentIndex);
         startPlaybackWithSeek(playlist.get(currentIndex), -1, origin);
     }
 
