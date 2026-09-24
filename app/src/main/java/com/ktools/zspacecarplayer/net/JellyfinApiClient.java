@@ -765,7 +765,8 @@ public class JellyfinApiClient {
         }, "jf-fetch-items").start();
     }
 
-    private SongItem parseSongItem(JsonObject itemObj) {
+    /** 包内可见: 传输方式裁定是否正确落到 SongItem 上, 由单测端到端钉住 (见 StreamTransportWiringTest) */
+    SongItem parseSongItem(JsonObject itemObj) {
         if (itemObj == null || !itemObj.has("Id")) return null;
         String itemId = itemObj.get("Id").getAsString();
         String name = itemObj.has("Name") ? itemObj.get("Name").getAsString() : "未知曲目";
@@ -829,18 +830,23 @@ public class JellyfinApiClient {
             }
         }
         long sourceBytesPerSec = sourceBytesPerSec(sourceSizeBytes, durationMs * 10_000L);
-        String streamUrl = shouldUseServerFlac(sourceBytesPerSec, sourceContainer)
-                ? getFlacStreamUrl(itemId, shouldDownmixToStereo(sourceBytesPerSec))
-                : getStreamUrl(itemId, true);
 
         boolean isFav = false;
         if (itemObj.has("UserData") && itemObj.getAsJsonObject("UserData").has("IsFavorite")) {
             isFav = itemObj.getAsJsonObject("UserData").get("IsFavorite").getAsBoolean();
         }
 
+        // 裁定结果必须直接进构造参数。这里曾经先算进一个局部变量、下一行却仍传
+        // getStreamUrl(itemId)——于是 PCM 走服务端 FLAC、多声道下混两条规则从 v3.1.2
+        // 到 v3.1.5 所有已发布版本全部空转 (2026-09-24 核对 67 条真车上报, 无一条
+        // audioCodec=flac)。写成单个表达式, 结构上就不存在"算了但忘了用"。
         return new SongItem(itemId, TextRepair.repair(name), TextRepair.repair(artist),
                 TextRepair.repair(album), TextRepair.repair(genre), TextRepair.repair(folderName),
-                durationMs, getStreamUrl(itemId), isFav);
+                durationMs,
+                shouldUseServerFlac(sourceBytesPerSec, sourceContainer)
+                        ? getFlacStreamUrl(itemId, shouldDownmixToStereo(sourceBytesPerSec))
+                        : getStreamUrl(itemId, true),
+                isFav);
     }
 
     /**
