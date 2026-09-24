@@ -127,17 +127,23 @@ vc9 的内容要点（详见 `changelogs/3.1.5.md`）：无损 PCM 一律请服�
 
 教训一条：**发版前必须先出图给用户确认，"构建通过"不等于"可以发布"。** 回滚动作本身也说明清单是唯一的发布开关——改 `latest.json` 就是发版，改包体不是。
 
-## vc11 = 3.2.0 —— 物料已备，未发布（2026-09-24 15:42）
+## vc11 = 3.2.0 —— 已发布（2026-09-24 23:50）
 
-**`ZSpaceCarPlayer-3.2.0-code11-debug.apk`**，3,121,885 B，
-`sha256=9bd284522138ef49f00af1d1d8ae880e9e3fb866693cd4a1e63bdc4112965976`，
-`aapt dump badging` → `versionCode='11' versionName='3.2.0'`。`clean :app:assembleDebug :app:testDebugUnitTest` 通过，367 条 host 单测全绿。包内已核验 `values-night` 资源与 `QueueRestore` / `LibraryOrder` / `NightModeManager` 三个新类均进 dex（不只看文件名）。
+正式发布物：**`ZSpaceCarPlayer-3.2.0-code11b-debug.apk`**，3,121,850 B，
+`sha256=60d70be162f01997f540428a536313d58372538be5cdcc0a000afbcffd782ce0`，
+`aapt dump badging` → `versionCode='11' versionName='3.2.0'`。`clean :app:assembleDebug :app:testDebugUnitTest` 通过，371 条 host 单测全绿。包内已核验 `values-night` 资源与 `QueueRestore` / `LibraryOrder` / `NightModeManager` 三个新类均进 dex（不只看文件名）。
 
-**`latest.json` 仍指向 vc9，本版未发布。** 内容见 `changelogs/3.2.0.md`。
+公网复核：按清单 `apkUrl` 实下载 → HTTP 200、`content-length` 与清单 `sizeBytes` 一致、下载件 sha256 与清单及本地包**三方一致**、`cf-cache-status: MISS`。发布前现网清单已备份为 `latest.json.bak-20260924-vc9`。
+
+首发件 `ZSpaceCarPlayer-3.2.0-code11-debug.apk`（`9bd28452…`，3,121,885 B）**构建于传输方式接线修复之前**，已移到 `_rejected-superseded-builds/3.2.0-code11-pre-wiring-fix.apk`，不再被任何清单引用。换名而非覆盖的原因见下方铁律。
+
+本版最重要的内容：`parseSongItem` 把 FLAC/下混裁定算进局部变量后从未传给 `SongItem`，导致 v3.1.2 起两条传输优化在所有已发布版本里完全空转（67 条真车上报无一条含 `audioCodec=flac`）。车机因此一直拉 172–173 KB/s 的原始 WAV，而蜂窝下载中位只有 169 KB/s。修复后 FLAC 实测 88–112 KB/s。详见 `changelogs/3.2.0.md` 第 6 节。
 
 发布时源站清单刷新有秒级滞后（vc9/vc10 那次 poll1 仍回旧值、poll2 才变更），判发布结果要轮询到内容变更为止。
 
 **发版铁律**：出包前先推进 `versionCode`；发布时把「构建时间 + 大小 + SHA-256 + `aapt2 dump badging` 的 package 行」记进本文件。判断"是否已部署"只认从设备 pull 回来的包哈希，不认版本号和 changelog。
+
+**同一 versionCode 换内容必须换文件名**：APK 的 URL 在 Cloudflare 侧缓存 4 小时，沿用旧名会让清单是新的、包却可能命中旧缓存，两边 sha256 对不上时车机直接拒装（2026-09-24 vc11 就踩在这一步之前）。
 
 
 ## 回滚操作
