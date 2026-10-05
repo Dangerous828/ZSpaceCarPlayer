@@ -100,6 +100,12 @@ public class AudioPlayerService extends Service {
     private int pendingAuthSeekMs = -1;
     private long pendingAuthGeneration = -1L;
     private boolean authWaitInProgress = false;
+    /**
+     * 同曲重试退避挂起中：恢复动作由退避链唯一拥有，看门狗在此期间让位
+     * (与 authWaitInProgress 用同一种表达方式，见 watchdog 的 REBUILD_STREAM 分支)。
+     */
+    private boolean streamRetryBackoffPending = false;
+    private Runnable streamRetryBackoffRunnable;
     /** MEDIA_ERROR_IO 后的原曲重试计数, 起播成功 (onPrepared) 后归零 */
     private int streamRetryCount = 0;
     /** 同一轮起播未成功期间的重复错误计数, 用于抑制 Toast 刷屏; 与 streamRetryCount 同时归零 */
@@ -522,7 +528,8 @@ public class AudioPlayerService extends Service {
                     preparingTicks = 0;
                     deadTicks++;
                     if (deadTicks >= deadRetryTicks
-                            && pendingAuthSong == null && !authWaitInProgress) {
+                            && pendingAuthSong == null && !authWaitInProgress
+                            && !streamRetryBackoffPending) {
                         deadTicks = 0;
                         deadRetryTicks = Math.min(deadRetryTicks * 2, DEAD_RETRY_TICKS_MAX);
                         autoResumeFromLastPosition(playbackState.getGenerationId());
@@ -811,6 +818,21 @@ public class AudioPlayerService extends Service {
         return startMs;
     }
 
+    /**
+     * 取消尚未到点的同曲重试退避。{@code startPlayback} 是所有起播路径的唯一入口，在它开头调一次
+     * 就同时覆盖用户切歌 / 自动下一首 / 上一首 / 看门狗重建 / GIVE_UP，比逐个复位点挂更可靠——
+     * 迟到的重放打到另一首歌上是不可接受的。服务释放时也必须调，否则延迟任务残留在 handler 上。
+     */
+    private void cancelStreamRetryBackoff() {
+        if (streamRetryBackoffRunnable != null) {
+            if (progressHandler != null) {
+                progressHandler.removeCallbacks(streamRetryBackoffRunnable);
+            }
+            streamRetryBackoffRunnable = null;
+        }
+        streamRetryBackoffPending = false;
+    }
+
     private void replayPendingSong(SongItem song, int startMs,
                                    PlaybackStateMachine.PlaybackOrigin origin) {
         startPlaybackWithSeek(song, sanitizeSeekMs(song, startMs), origin);
@@ -825,6 +847,8 @@ public class AudioPlayerService extends Service {
     /** Starts a new generation and performs fade -> pause -> reset -> prepareAsync. */
     private void startPlayback(final SongItem song,
                                final PlaybackStateMachine.PlaybackOrigin origin) {
+        // 任何一轮新起播都作废尚未到点的退避重放 (含退避链自己这次，标志已在 Runnable 内先行清掉)
+        cancelStreamRetryBackoff();
         if (song == null) {
             pendingSeekMs = -1;
             return;
@@ -1981,9 +2005,34 @@ public class AudioPlayerService extends Service {
                 final int finalResumeMs = Math.max(resumeMs, 0);
                 pendingSeekMs = -1;
                 if (action == PlaybackStateMachine.StreamRetryAction.PLAIN_RETRY) {
+                    // streamRetryCount 已在本分支自增过，此刻它恰等于本次是第几次尝试
+                    final long backoffMs = PlaybackStateMachine.streamRetryBackoffMs(streamRetryCount);
                     reportPlaybackError("网络波动, 自动重试 " + failedSong.getName());
-                    replayPendingSong(failedSong, finalResumeMs,
-                            PlaybackStateMachine.PlaybackOrigin.NETWORK_RECOVERY);
+                    CrashMonitor.breadcrumb("play", "retry backoff wait=" + backoffMs
+                            + "ms attempt=" + streamRetryCount + " song=" + failedSong.getName());
+                    if (backoffMs <= 0L) {
+                        // 鉴权冷却期内第 3 次也会降级成 PLAIN_RETRY：这条已在等冷却，再叠等待只会更差
+                        replayPendingSong(failedSong, finalResumeMs,
+                                PlaybackStateMachine.PlaybackOrigin.NETWORK_RECOVERY);
+                        return;
+                    }
+                    cancelStreamRetryBackoff();
+                    streamRetryBackoffPending = true;
+                    streamRetryBackoffRunnable = new Runnable() {
+                        @Override
+                        public void run() {
+                            // 必须先复位状态再校验 generation：反过来写会在错误路径上留下
+                            // pending=true，让看门狗永久让位、整个恢复链停摆
+                            streamRetryBackoffRunnable = null;
+                            streamRetryBackoffPending = false;
+                            if (!playbackState.isCurrentGeneration(generation)) return;
+                            CrashMonitor.breadcrumb("play", "retry backoff fired wait=" + backoffMs
+                                    + "ms song=" + failedSong.getName());
+                            replayPendingSong(failedSong, finalResumeMs,
+                                    PlaybackStateMachine.PlaybackOrigin.NETWORK_RECOVERY);
+                        }
+                    };
+                    progressHandler.postDelayed(streamRetryBackoffRunnable, backoffMs);
                     return;
                 }
                 lastReAuthAt = System.currentTimeMillis();
@@ -2050,6 +2099,7 @@ public class AudioPlayerService extends Service {
         if (progressHandler != null) {
             progressHandler.removeCallbacks(progressRunnable);
         }
+        cancelStreamRetryBackoff();
         cancelSeekTimeout();
         if (gainEnvelope != null) {
             try { gainEnvelope.hardMute(); } catch (Exception ignored) {}

@@ -291,6 +291,26 @@ public class PlaybackStateMachineTest {
     }
 
     @Test
+    public void plainRetriesWaitSixThenTwelveSeconds() {
+        // 退避起点与假播放看门狗同为 6s 起步翻倍，但两条序列各自独立：
+        // 改看门狗的 tick 常量不得带动本序列，反之亦然。
+        Assert.assertEquals(6000L, PlaybackStateMachine.streamRetryBackoffMs(1));
+        Assert.assertEquals(12000L, PlaybackStateMachine.streamRetryBackoffMs(2));
+        // 第 3 次走重新登录的异步等待、预算之外走 GIVE_UP：都不该再叠一层等待
+        Assert.assertEquals(0L, PlaybackStateMachine.streamRetryBackoffMs(3));
+        Assert.assertEquals(0L, PlaybackStateMachine.streamRetryBackoffMs(4));
+    }
+
+    @Test
+    public void backoffLadderWorstCaseSilenceIsEighteenSeconds() {
+        long total = 0L;
+        for (int attempt = 1; attempt <= PlaybackStateMachine.MAX_STREAM_RETRY_ATTEMPTS; attempt++) {
+            total += PlaybackStateMachine.streamRetryBackoffMs(attempt);
+        }
+        Assert.assertEquals(18000L, total);
+    }
+
+    @Test
     public void reauthIsSkippedDuringCooldownAndUnrecoverableErrorsGiveUp() {
         Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.PLAIN_RETRY,
                 PlaybackStateMachine.streamRetryAction(true, 2, false));

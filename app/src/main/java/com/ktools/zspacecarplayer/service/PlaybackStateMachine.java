@@ -63,6 +63,8 @@ public final class PlaybackStateMachine {
     /** 同一曲目最多尝试 3 次: 前 2 次直接重试, 第 3 次先重新登录再重试。 */
     public static final int MAX_STREAM_RETRY_ATTEMPTS = 3;
     private static final int REAUTH_ATTEMPT = 3;
+    /** 同曲直接重试的退避起点 (翻倍递增)；与看门狗的 6s 起点是两条独立序列。 */
+    private static final long STREAM_RETRY_BACKOFF_BASE_MS = 6000L;
     /** android.media.MediaPlayer.MEDIA_ERROR_UNKNOWN 的值 (本类不依赖 Android, 故镜像于此)。 */
     private static final int MEDIA_ERROR_UNKNOWN_WHAT = 1;
     /** 慢网冷启动时 start/seek 撞车产生的传输层错误 extra, 重试即可恢复。 */
@@ -427,6 +429,24 @@ public final class PlaybackStateMachine {
             return StreamRetryAction.PLAIN_RETRY;
         }
         return reauthCooldownElapsed ? StreamRetryAction.REAUTH_RETRY : StreamRetryAction.PLAIN_RETRY;
+    }
+
+    /**
+     * 第 attempt 次 (1 起计) 同曲直接重试前应等待的毫秒数：6s 起步翻倍。
+     *
+     * 立刻重放会在两三秒内把 {@link #MAX_STREAM_RETRY_ATTEMPTS} 的预算烧光——蜂窝链路抖一下通常
+     * 要几秒才回来，于是三次全撞在同一个坑上，然后 GIVE_UP 跳下一首，用户听到「歌自己跳了」。
+     * 起点与假播放看门狗 (DEAD_RETRY_TICKS_START) 同档，但**两条序列各自独立**：这里是
+     * onError 重试链的节奏，那里是「UI 显示在播但播放器已死」的兜底节奏，改一个不该带动另一个。
+     *
+     * 第 3 次 (REAUTH_ATTEMPT) 返回 0：那条路径要先异步重新登录，本身已在等网络，再叠一层等待
+     * 只会更差；预算之外的 attempt 同样返回 0，交由 GIVE_UP 处理。
+     */
+    public static long streamRetryBackoffMs(int attempt) {
+        if (attempt >= REAUTH_ATTEMPT) {
+            return 0L;
+        }
+        return STREAM_RETRY_BACKOFF_BASE_MS << (attempt - 1);
     }
 
     /**
