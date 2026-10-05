@@ -1,6 +1,6 @@
 # 车机同曲重试的退避节奏（stream retry backoff）
 
-日期：2026-10-05　适用版本：v3.2.0 / vc11　状态：待实施
+日期：2026-10-05　适用版本：v3.2.0 / vc11　状态：**已实施并发布**（退避与检查更新后台化 = vc12；TLS 启动主路径 = vc13；崩溃上报只取当前线程栈 = vc14；open 判据与缓冲时长 = vc15，现网清单 vc15 / 3.2.4）
 
 ## Problem Statement
 
@@ -76,18 +76,32 @@
 
 ## Out of Scope
 
-> **后续状态（2026-10-05 当晚，同夜已推进，别再把下面当待办）**：第 1 项已在 **vc15** 落地（判据从墙上时间换成环形缓冲有无进展，见 `changelogs/3.2.4.md`）；第 2 项的「时长接回管线」已在 **vc15** 落地，其中 prefill 的 768KB 退化经论证**不改**（FLAC ~100KB/s ⇒ 约 7.7s 领先量本就够）、`lead` 在 `percent<0` 时**保持返回 -1 不硬造**；第 3 项**车主明确拍板不做**——它就是决定，不是欠账；vc12 的 TLS 那一项后来发现只修了次要调用点，启动主路径在 **vc13** 补上。
+> 下面每一项都已收口，行尾的**加粗结论**就是它的最终状态，不存在待办。
 
-- **`NATIVE_OPEN_TIMEOUT_MS` 15s 死线放宽或可配**（`DspAudioTrackPlayer.java:44-46`）。它只护 open 阶段
-  （首 16 字节嗅探 + `drflac_open`），`abort()` 也只置取消标志、不杀连接（`NativeLosslessDecoder.java:325-329`），
-  之后是回退系统 MediaCodec 而非重试；实测频率是每 5.1 次起播 1 次，不是「每首都跳」。留待单独评估。
-- **`UpdateChecker.ensureClient()` 出主线程**——本次修复清单里的第二项，独立一轮。
-- **退避期间的 UI 可见状态**（状态条「重试中 N 秒」或复用缓冲指示）。等实车确认 6s 静默是否可接受再说。
+- **`NATIVE_OPEN_TIMEOUT_MS` 15s 死线放宽或可配**（`DspAudioTrackPlayer.java:44-49`）。它只护 open 阶段
+  （首 16 字节嗅探 + `drflac_open`），`abort()` 也只置取消标志、不杀连接（`dsp/NativeLosslessDecoder.java:326`），
+  之后是回退系统 MediaCodec 而非重试；实测频率是每 5.1 次起播 1 次，不是「每首都跳」。
+  → **vc15 已收口，且没有采用「放宽/可配」这条路**：死线判据换成环形缓冲是否真的增长
+  （`BufferingPolicy.openShouldAbort`，`OPEN_STALL_MS=15s` 只在无进展时生效 + `OPEN_HARD_CAP_MS=45s` 封顶），
+  「慢但一直在下载」不再被误掐。常量本身不再单独维护，统一由 `BufferingPolicy` 拥有。
+- **`UpdateChecker.ensureClient()` 出主线程**。
+  → **vc12 已落地**（TLS 底座装配连同派发进 `update-check` 单线程，`cancelled` 双检防装配窗口的取消打空）。
+  当夜按上报栈顶计数复核后发现同一个昂贵操作还有**第二个调用点**——冷启动必经的
+  `JellyfinApiClient.init → initHttpClient`，那才是启动卡顿的主因，**vc13 一并补齐**
+  （`tls-warmup` 后台预热 + 所有使用点 `ensureClient()` 双检兜底）。
+- **退避期间的 UI 可见状态**（状态条「重试中 N 秒」或复用缓冲指示）。
+  → **车主拍板不做，这是决定而不是欠账**：6s/12s 静默期内不改任何 UI，只保留 Toast 提示与面包屑。
+  后续若无新的车主要求，此项不再重开。
 - **`dur=0ms` 连带缺陷**：prefill 门槛退化为 768KB+7s 超时、`isBufferingStable(-1,-1,-1)` 恒 false
-  （满屏 `STUCK heartbeat percent=-1` 即由此而来，不是真卡住）、下一首预取永不触发。要单独一条线做。
+  （满屏 `STUCK heartbeat percent=-1` 即由此而来，不是真卡住）、下一首预取永不触发。
+  → **vc15 已收口**：入库时长经 `IAudioPlayer.setKnownDurationMs` 接回播放管线，容器不自报时长时兜底，
+  缓冲进度与下一首预取恢复正常。其中两处**论证后刻意不改**：prefill 的 768KB 退化（FLAC ~100KB/s
+  ⇒ 约 7.7s 领先量本就够）与 `lead` 在 `percent<0` 时返回 -1（不硬造百分比）。
 - **传输方式裁定与 TLS**：`shouldUseServerFlac` / `audioCodec=flac` / `TlsCompat` 的信任锚策略一律不动
   （后者「只增加信任锚、绝不放宽主机名校验」是刻意的不变量）。
+  → **by design，不动**，与版本无关。
 - 不动 `versionCode`、不发 OTA、不改 `latest.json`。
+  → 指本**规格**只覆盖退避这一处代码改动；发布由其后的 vc12→vc15 各自轮次完成，现网清单为 vc15 / 3.2.4。
 
 ## Testing Decisions
 
