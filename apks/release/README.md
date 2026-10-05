@@ -233,6 +233,25 @@ OkHttp 建 `BasicTrustRootIndex` 遍历全部内置根 DN）——2026-10-05 当
 
 ⚠️ 设备侧仍未 pull 核验（车机 21:48 后离线）。本版起改由定时任务自动跟进，判据见下条。
 
+## vc15 = 3.2.4 —— 已发布（2026-10-05 23:58）
+
+正式发布物：**`ZSpaceCarPlayer-3.2.4-code15-debug.apk`**，3,124,523 B，
+`sha256=e433065734e7f75f275743bb8802d267bb0a4a9470f4c13c3903ab7baac42981`，
+`aapt2 dump badging` → `versionCode='15' versionName='3.2.4'`。
+`clean assembleDebug testDebugUnitTest` 通过，**376 条 host 单测 0 失败**。
+
+修两处（本次复盘列出的「已知未修」里的两项；退避期间 UI 状态经车主拍板明确不做）：
+
+1. **原生 open 看门狗按「缓冲有无进展」判死**：旧实现 `sleep(15s)` 后无条件 abort，把慢但一直在下载的开流也掐死；而 8600 的 MediaCodec 没注册 FLAC/WAV，abort 后回退必然 `Failed to instantiate extractor`，重试耗尽就跳歌。现在轮询环形缓冲增量：有增长就顺延，连续 15s 零增长才收手，另有 45s 硬上限。判定收口 `BufferingPolicy.openShouldAbort()`。
+2. **入库已知的时长接回播放管线**：流式 FLAC 容器 `frames=0` → `getDuration()=0` → `remaining=-1`，连带 `isBufferingStable` 恒 false（满屏 `STUCK heartbeat percent=-1` 即由此来）与预取 `nearEnd` 永不触发。时长一直在 `SongItem.durationMs` 里，新增 `IAudioPlayer.setKnownDurationMs()` 在 `setDataSource` 前喂入。
+
+**有意不改**：`prefillTargetBytes` 的 768KB 退化——FLAC 约 100KB/s，768KB 就是约 7.7s 领先量，本来就够；`lead` 在 `percent<0` 时仍返回 -1，没有 contentLength 就不硬造下载头领先量。
+
+公网复核：清单轮询第 1 轮即 `versionCode=15`；下载 HTTP 200、3,124,523 B 与 `sizeBytes` 一致、三方 sha256 一致。备份 `latest.json.bak-20261005-vc14`。
+包内容验证：新串 `native open stalled no-progress`、`duration unknown in container` 命中；**旧措辞 `native open blocked` 在包里计数为 0**（证明换的是实现而不是并存一条新日志）；正对照 `tls-warmup`／`update-check`／`retry backoff wait=`／`dumpCurrentThreadStack` 全部命中 —— **vc12~vc15 的六项修复全在这一只包里，装 vc15 一次拿全**。
+
+⚠️ 设备侧仍未 pull 核验（车机 21:48 后离线）。核验由 cron 任务「车机 vc15 升级与六项修复效果自动核验」每小时自动跑，七条判据写死在任务里，含「无法判定就直说、不许推测」。
+
 ## 回滚操作
 
 versionCode 不可降级安装，必须先卸载 3.0.0：

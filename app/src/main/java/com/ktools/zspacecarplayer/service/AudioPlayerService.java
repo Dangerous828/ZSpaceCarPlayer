@@ -915,6 +915,9 @@ public class AudioPlayerService extends Service {
                     invalidateStalePrefetch(song);
                     prefillInProgress = true;
                     // v3: 本地回环代理 + 环形缓冲，抵御公网串流抖动（消除“播 2s 停 1s”式 underrun）
+                    // 流式 FLAC 容器不自报时长，先把入库已知时长交给播放器兜底，
+                    // 否则 getDuration()=0 会让剩余时长/预取/缓冲稳定判定全线失效
+                    player.setKnownDurationMs(song.getDurationMs());
                     player.setDataSource(HttpProxyServer.getInstance().getProxyUrl(urlToPlay));
                     playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.PREPARING);
                     CrashMonitor.breadcrumb("play", "prepareAsync");

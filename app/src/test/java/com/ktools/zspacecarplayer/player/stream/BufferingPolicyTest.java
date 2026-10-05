@@ -168,4 +168,32 @@ public class BufferingPolicyTest {
         // 全未知 => 不稳定（继续显示「缓冲中…」）
         assertFalse(BufferingPolicy.isBufferingStable(-1, -1, -1));
     }
+
+    @Test
+    public void openWatchdogKillsOnlyStalledOpens() {
+        long stall = BufferingPolicy.OPEN_STALL_MS;
+        long cap = BufferingPolicy.OPEN_HARD_CAP_MS;
+        // 有进展：过了 15s 也不掐——旧判据正是在这里把「慢但活着」的开流做成静音
+        assertFalse(BufferingPolicy.openShouldAbort(true, 0, stall));
+        assertFalse(BufferingPolicy.openShouldAbort(true, 0, cap - 1));
+        // 无进展：满 stall 才掐，差一毫秒都不算
+        assertFalse(BufferingPolicy.openShouldAbort(false, stall - 1, stall - 1));
+        assertTrue(BufferingPolicy.openShouldAbort(false, stall, stall));
+        // 一直有进展也不能赌死：硬上限一到必须收手，解码线程只有一条
+        assertTrue(BufferingPolicy.openShouldAbort(true, 0, cap));
+        assertTrue(BufferingPolicy.openShouldAbort(false, 0, cap));
+        assertTrue("stall 必须严格小于硬上限，否则“有进展就顺延”是空话", stall < cap);
+    }
+
+    @Test
+    public void knownDurationRestoresNearEndJudgements() {
+        // 流式 FLAC 容器里 percent/lead 恒为 -1：时长一旦接回播放器，
+        // 「接近结尾算稳定」与「接近结尾无条件预取」两条判据才可能命中。
+        assertTrue(BufferingPolicy.isBufferingStable(-1, -1, 20));
+        assertFalse(BufferingPolicy.isBufferingStable(-1, -1, 300));
+        assertFalse("时长未知时仍是 -1，不许硬造稳定结论",
+                BufferingPolicy.isBufferingStable(-1, -1, -1));
+        assertTrue(BufferingPolicy.shouldPrefetchNext(-1, -1, 10, false, false, false));
+        assertFalse(BufferingPolicy.shouldPrefetchNext(-1, -1, -1, false, false, false));
+    }
 }

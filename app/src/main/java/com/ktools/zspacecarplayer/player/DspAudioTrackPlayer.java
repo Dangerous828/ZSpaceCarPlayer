@@ -41,9 +41,12 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     private static final int MSG_RELEASE = 3;
     private static final int MSG_TEARDOWN = 4;
 
-    /** 原生解码器 open 的阻塞上限。drflac_open 会一路读容器头，弱网下可能长时间
-     *  卡在环形缓冲等下载；超时后由看门狗 abort 读者，避免解码线程被永久占死。 */
-    private static final long NATIVE_OPEN_TIMEOUT_MS = 15_000L;
+    /**
+     * 原生解码器 open 的阻塞判据已收口到 {@link BufferingPolicy#openShouldAbort}：
+     * 按「环形缓冲有无增长」判死 (OPEN_STALL_MS)，并有 OPEN_HARD_CAP_MS 封顶，
+     * 不再用单一墙上时间把慢但有进展的开流掐掉。
+     */
+    private static final long NATIVE_OPEN_TIMEOUT_MS = BufferingPolicy.OPEN_STALL_MS;
 
     private String dataSourcePath;
     private OnEventListener eventListener;
@@ -63,6 +66,13 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     private volatile boolean abortPrepare = false;
 
     private volatile int currentDurationMs = 0;
+    /**
+     * 入库时已知的曲目时长 (Jellyfin 列表接口的 RunTimeTicks)。流式 FLAC 容器里 dr_flac
+     * 拿不到总帧数 (frames=0)，currentDurationMs 就是 0，于是剩余时长算不出、
+     * 「接近结尾算稳定」与「接近结尾无条件预取」两条判据全线失效、满屏 STUCK heartbeat。
+     * native 报 0 时用它兜底。
+     */
+    private volatile int knownDurationMs = 0;
     private volatile long currentPresentationTimeUs = 0;
     private volatile int pendingSeekMs = -1;
 
@@ -117,6 +127,16 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                 }
             }
         };
+    }
+
+    /**
+     * 提供入库时已知的时长，供容器不自报时长时兜底 (见 {@link #knownDurationMs})。
+     * 必须在 prepare 之前调用；传 0 表示没有可用信息，行为与旧版一致。
+     */
+    @Override
+    public void setKnownDurationMs(long durationMs) {
+        this.knownDurationMs = durationMs > 0L
+                ? (int) Math.min(durationMs, (long) Integer.MAX_VALUE) : 0;
     }
 
     @Override
@@ -193,9 +213,11 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         NativeLosslessDecoder.LosslessStreamReader streamReader = null;
         NativeLosslessDecoder dec = null;
         Thread openWatchdog = null;
+        String openProbeUrl = null;
         try {
             if (dataSourcePath.startsWith("http://") || dataSourcePath.startsWith("https://")) {
                 String realUrl = HttpProxyServer.extractRemoteUrl(dataSourcePath);
+                openProbeUrl = realUrl;
                 Log.i(TAG, "tryPrepareNativeLossless: realUrl=" + realUrl);
                 BufferedHttpSource source = HttpProxyServer.getInstance().acquireSource(realUrl, 0);
                 streamReader = new NativeLosslessDecoder.HttpSourceReader(source, 0);
@@ -215,22 +237,56 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             // 起播就能把唯一的解码线程永久占死，之后所有 prepare/seek/release 消息都排不
             // 上队（车机表现：点了不播，且这个进程再也不会播了）。
             final NativeLosslessDecoder.LosslessStreamReader guarded = streamReader;
+            final String probeUrl = openProbeUrl;
             openWatchdog = new Thread(new Runnable() {
                 @Override
                 public void run() {
-                    try {
-                        Thread.sleep(NATIVE_OPEN_TIMEOUT_MS);
-                    } catch (InterruptedException e) {
+                    final long startedAt = System.currentTimeMillis();
+                    long lastBytes = -1L;
+                    long lastProgressAt = startedAt;
+                    while (true) {
+                        try {
+                            Thread.sleep(BufferingPolicy.OPEN_POLL_MS);
+                        } catch (InterruptedException e) {
+                            return;
+                        }
+                        long now = System.currentTimeMillis();
+                        long bytes = lastBytes;
+                        if (probeUrl != null) {
+                            try {
+                                bytes = HttpProxyServer.getInstance().getBufferedBytes(probeUrl);
+                            } catch (Throwable t) {
+                                bytes = lastBytes; // 读不到进度就当无进展，交给 stall 判定
+                            }
+                        }
+                        boolean advanced;
+                        if (lastBytes < 0) {
+                            // 第一轮只立基线：0 字节也是"起点"而不是"进展"
+                            advanced = false;
+                            lastBytes = bytes;
+                        } else if (bytes > lastBytes) {
+                            advanced = true;
+                            lastBytes = bytes;
+                            lastProgressAt = now;
+                        } else {
+                            advanced = false;
+                        }
+                        if (!BufferingPolicy.openShouldAbort(advanced,
+                                now - lastProgressAt, now - startedAt)) {
+                            continue;
+                        }
+                        Log.e(TAG, "native open stalled: no progress for "
+                                + (now - lastProgressAt) + "ms, total " + (now - startedAt)
+                                + "ms, buffered=" + lastBytes + "B, aborting reader to free decode thread");
+                        CrashMonitor.putContext("nativeOpenTimeout", true);
+                        CrashMonitor.breadcrumb("v3", "native open stalled no-progress="
+                                + (now - lastProgressAt) + "ms total=" + (now - startedAt)
+                                + "ms buffered=" + lastBytes + "B, aborting reader");
+                        try {
+                            guarded.abort();
+                        } catch (Throwable ignored) {}
                         return;
                     }
-                    Log.e(TAG, "native open blocked over " + NATIVE_OPEN_TIMEOUT_MS
-                            + "ms, aborting reader to free decode thread");
-                    CrashMonitor.putContext("nativeOpenTimeout", true);
-                    CrashMonitor.breadcrumb("v3", "native open blocked >"
-                            + NATIVE_OPEN_TIMEOUT_MS + "ms, aborting reader");
-                    try {
-                        guarded.abort();
-                    } catch (Throwable ignored) {}
                 }
             }, "DspPlayer-OpenWatchdog");
             openWatchdog.setDaemon(true);
@@ -269,6 +325,13 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             this.sampleRate = dec.getSampleRate() > 0 ? dec.getSampleRate() : 44100;
             this.channelCount = dec.getChannels() > 0 ? dec.getChannels() : 2;
             this.currentDurationMs = dec.getDurationMs();
+            if (this.currentDurationMs <= 0) {
+                this.currentDurationMs = knownDurationMs;
+                if (knownDurationMs > 0) {
+                    Log.i(TAG, "duration unknown in container, use library duration "
+                            + knownDurationMs + "ms");
+                }
+            }
             this.currentPresentationFrame = 0;
             this.currentPresentationTimeUs = 0;
 

@@ -83,6 +83,11 @@ public class AndroidMediaPlayerWrapper implements IAudioPlayer {
         }
     }
 
+    /** 系统路径由 MediaExtractor 自报时长，无需兜底；保留实现以满足接口契约。 */
+    @Override
+    public void setKnownDurationMs(long durationMs) {
+    }
+
     @Override
     public void setDataSource(String pathOrUrl) throws Exception {
         if (mediaPlayer == null) {

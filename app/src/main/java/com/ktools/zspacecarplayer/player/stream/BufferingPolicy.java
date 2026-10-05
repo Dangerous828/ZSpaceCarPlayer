@@ -79,6 +79,34 @@ public final class BufferingPolicy {
         return bufferedBytes >= targetBytes;
     }
 
+    /**
+     * open 看门狗该不该掐掉读者。
+     *
+     * 旧判据是「墙上时间超过 15s 就 abort」，于是把**慢但一直在下载**的开流也一起掐死：
+     * 8600 的 MediaCodec 没注册 FLAC/WAV，abort 之后回退 MediaExtractor 必然抛
+     * `Failed to instantiate extractor`，重试耗尽就跳歌——把一条还能撑住的链路做成了静音。
+     * 现按「环形缓冲有没有增长」判：有进展就一直等到硬上限；连续无进展满 stall 才收手。
+     *
+     * @param progressAdvanced 本轮相对上轮是否拿到了更多字节
+     * @param msSinceProgress  距上一次出现增长过了多久
+     * @param msSinceOpenStart open 一共进行了多久
+     */
+    public static boolean openShouldAbort(boolean progressAdvanced,
+                                          long msSinceProgress,
+                                          long msSinceOpenStart) {
+        if (msSinceOpenStart >= OPEN_HARD_CAP_MS) {
+            return true;
+        }
+        return !progressAdvanced && msSinceProgress >= OPEN_STALL_MS;
+    }
+
+    /** open 看门狗轮询间隔：够密以免拖长判死，够稀以免白读环形缓冲游标。 */
+    public static final long OPEN_POLL_MS = 500L;
+    /** 连续这么久环形缓冲零增长才掐——这才是「真卡住」的语义。 */
+    public static final long OPEN_STALL_MS = 15_000L;
+    /** 即便一直有进展也最多等这么久：解码线程只有一条，不能赌死。 */
+    public static final long OPEN_HARD_CAP_MS = 45_000L;
+
     // ------------------------------------------------------------------ //
     //  2) 下一首预取 (next-song prefetch)
     // ------------------------------------------------------------------ //

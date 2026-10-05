@@ -17,6 +17,12 @@ public interface IAudioPlayer {
     }
 
     void setDataSource(String pathOrUrl) throws Exception;
+
+    /**
+     * 告知入库时已知的曲目时长 (ms)，供容器不自报时长的引擎兜底。必须在 prepare 前调用。
+     * 传 0 表示无信息。系统 MediaPlayer 走 MediaExtractor 自报时长，实现方可忽略。
+     */
+    void setKnownDurationMs(long durationMs);
     void prepareAsync();
     void start();
     void pause();
