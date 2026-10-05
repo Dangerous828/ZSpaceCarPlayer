@@ -76,6 +76,8 @@
 
 ## Out of Scope
 
+> **后续状态（2026-10-05 当晚，同夜已推进，别再把下面当待办）**：第 1 项已在 **vc15** 落地（判据从墙上时间换成环形缓冲有无进展，见 `changelogs/3.2.4.md`）；第 2 项的「时长接回管线」已在 **vc15** 落地，其中 prefill 的 768KB 退化经论证**不改**（FLAC ~100KB/s ⇒ 约 7.7s 领先量本就够）、`lead` 在 `percent<0` 时**保持返回 -1 不硬造**；第 3 项**车主明确拍板不做**——它就是决定，不是欠账；vc12 的 TLS 那一项后来发现只修了次要调用点，启动主路径在 **vc13** 补上。
+
 - **`NATIVE_OPEN_TIMEOUT_MS` 15s 死线放宽或可配**（`DspAudioTrackPlayer.java:44-46`）。它只护 open 阶段
   （首 16 字节嗅探 + `drflac_open`），`abort()` 也只置取消标志、不杀连接（`NativeLosslessDecoder.java:325-329`），
   之后是回退系统 MediaCodec 而非重试；实测频率是每 5.1 次起播 1 次，不是「每首都跳」。留待单独评估。
