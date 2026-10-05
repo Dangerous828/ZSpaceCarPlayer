@@ -206,6 +206,33 @@ OkHttp 建 `BasicTrustRootIndex` 遍历全部内置根 DN）——2026-10-05 当
 （出现即说明第一批请求赶在预热之前，需把首次拉取也排到 warmup 之后）。vc13 **未走 host 单测**，
 原因是被测对象为 Android 单例 + 线程编排 + Context 依赖，硬造接缝只能测到自己搭的假接口。
 
+## vc14 = 3.2.3 —— 已发布（2026-10-05 23:34）
+
+正式发布物：**`ZSpaceCarPlayer-3.2.3-code14-debug.apk`**，3,123,774 B，
+`sha256=e1853801ac5bdf93137858c49c3bee57f62277e2ce57227d6655a2fdeb6d2e78`，
+`aapt2 dump badging` → `versionCode='14' versionName='3.2.3'`。
+`clean assembleDebug testDebugUnitTest` 通过，**374 条 host 单测 0 失败**（含本版新增的
+`currentThreadStackDumpCoversOnlyTheCallingThread`，它钉住「dump 只含一个线程段」这个形状，
+将来改回全线程遍历会当场变红）。
+
+修的是 TLS 那条线之外的最后一处启动期主线程开销：`CrashMonitor.inspectPreviousSession()`
+在 `ZSpaceApplication.onCreate → CrashMonitor.install` 上用 `Thread.getAllStackTraces()`
+为 `abnormal_exit` 报告拍全线程栈。它既占主线程又**没有归因价值**——拍的是本次新进程的栈，
+解释不了上次为什么退（当日那批 abnormal_exit 的 threadDump 全是 `installInternal` 自己的
+启动栈，即直接证据）。改为新增的 `CrashReport.dumpCurrentThreadStack()`，字段保留、成本消失。
+
+**另外两处全线程 dump 有意不动**（判据是「这一刻是否真需要所有线程现场」）：`:247` 主线程卡死
+看门狗——必须看别的线程停在哪把锁上，且它本就跑在后台线程；`:543` Java 未捕获异常——进程正在死，
+晚一帧现场就没了，必须同步抓完整。
+
+公网复核：清单轮询第 1 轮即 `versionCode=14`；`apkUrl` 实下载 HTTP 200、3,123,774 B 与清单
+`sizeBytes` 一致、远端／清单／本地三方 sha256 一致。发布前清单备份 `latest.json.bak-20261005-vc13`。
+包内容验证：dex 内 `dumpCurrentThreadStack` 命中，正对照 `tls-warmup`／`update-check`／
+`retry backoff wait=`／`NETWORK_RECOVERY` 全部非 0 —— 即 **vc12/13/14 的四项修复在同一只包里**，
+车机装 vc14 一次拿全，不必逐级升。
+
+⚠️ 设备侧仍未 pull 核验（车机 21:48 后离线）。本版起改由定时任务自动跟进，判据见下条。
+
 ## 回滚操作
 
 versionCode 不可降级安装，必须先卸载 3.0.0：

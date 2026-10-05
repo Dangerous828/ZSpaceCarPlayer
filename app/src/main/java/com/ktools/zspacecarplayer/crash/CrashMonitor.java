@@ -388,7 +388,8 @@ public final class CrashMonitor {
         report.put("previousEngineV3", previousV3Active);
         report.put("evidenceConfidence", confidence);
         report.setLogcat(logcat);
-        report.setThreadDump(CrashReport.dumpAllThreads());
+        // 只 dump 当前线程：这里抓不到上次的现场 (新进程的栈)，全线程遍历却要占住启动主线程
+        report.setThreadDump(CrashReport.dumpCurrentThreadStack());
         File written = store.write(report);
         Log.w(TAG, "previous session ended abnormally -> " + kind
                 + " confidence=" + confidence + " afterMs=" + previousSessionMs

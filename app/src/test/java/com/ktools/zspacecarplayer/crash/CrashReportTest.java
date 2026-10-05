@@ -381,6 +381,31 @@ public class CrashReportTest {
         Assert.assertEquals("main_thread_blocked", CrashReport.KIND_MAIN_THREAD_BLOCKED);
     }
 
+    // ------------------------------------------------------ 启动期线程快照
+    //
+    // 异常退出后的首次启动那次 dump 曾在主线程遍历全部线程 (Application.onCreate 路径)，
+    // 而它抓的是新进程的栈、没有归因价值。钉住「只含调用线程自己」这个形状：
+    // 若哪天有人把它改回 dumpAllThreads()，第二个线程段会让这条用例变红。
+
+    @Test
+    public void currentThreadStackDumpCoversOnlyTheCallingThread() {
+        String self = Thread.currentThread().getName();
+        String dump = CrashReport.dumpCurrentThreadStack();
+
+        Assert.assertTrue("应带当前线程名 [" + self + "]: " + head(dump), dump.contains(self));
+        Assert.assertTrue("应含本次调用帧: " + head(dump),
+                dump.contains("currentThreadStackDumpCoversOnlyTheCallingThread"));
+
+        int threadHeaders = 0;
+        for (String line : dump.split("\n")) {
+            if (line.startsWith("\"")) {
+                threadHeaders++;
+            }
+        }
+        Assert.assertEquals("不该出现其它线程的段落 (全线程遍历会停住它们): " + head(dump),
+                1, threadHeaders);
+    }
+
     private static int countOccurrences(String hay, String needle) {
         int count = 0;
         int idx = 0;

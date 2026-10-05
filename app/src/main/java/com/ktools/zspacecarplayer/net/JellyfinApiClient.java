@@ -61,7 +61,7 @@ public class JellyfinApiClient {
     private static final String CLIENT_NAME = "ZSpaceCarPlayer";
     private static final String DEVICE_NAME = "Geely-iMX6-Car";
     private static final String DEVICE_ID = "CAR-IMX6-001";
-    private static final String CLIENT_VERSION = "3.2.2";
+    private static final String CLIENT_VERSION = "3.2.3";
 
     /** 鉴权持久化统一走这里, Service 后台静默登录与 Activity 必须读写同一份凭据 */
     public static final String PREF_NAME = "zspace_car_player_prefs";

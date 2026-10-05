@@ -230,6 +230,23 @@ public final class CrashReport {
         return sb.toString();
     }
 
+    /**
+     * 只 dump 调用线程自己的栈。
+     *
+     * 异常退出后的首次启动 (CrashMonitor.inspectPreviousSession) 原先用 {@link #dumpAllThreads()}，
+     * 抓的却是**新进程**的线程快照——它解释不了上一次为什么退，却要在 Application.onCreate 的
+     * 主线程上等 {@code Thread.getAllStackTraces()} 把每个线程各停一遍 (2026-10-05 实测当日
+     * 多条 abnormal_exit 的 threadDump 内容全是 CrashMonitor 自己的启动栈，零归因价值)。
+     * 改成只记当前线程：字段仍在、成本消失。真正需要全现场的另外两处 (主线程卡死看门狗、
+     * Java 未捕获异常) 继续用 dumpAllThreads()。
+     */
+    public static String dumpCurrentThreadStack() {
+        StringBuilder sb = new StringBuilder(1024);
+        Thread t = Thread.currentThread();
+        appendThread(sb, t, t.getStackTrace());
+        return sb.toString();
+    }
+
     private static void appendThread(StringBuilder sb, Thread t, StackTraceElement[] frames) {
         sb.append('"').append(t.getName()).append("\" ")
                 .append(t.isDaemon() ? "daemon " : "")
