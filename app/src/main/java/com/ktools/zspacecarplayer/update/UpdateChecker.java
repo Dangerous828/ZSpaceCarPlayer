@@ -14,6 +14,9 @@ import java.io.InputStream;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.SSLException;
@@ -84,6 +87,22 @@ public final class UpdateChecker {
     private volatile OkHttpClient client;
     /** 正在飞的请求, cancel() 时用得上 (退出页面别再回来弹对话框) */
     private volatile Call inFlight;
+    /**
+     * 底座装配与请求派发所在的后台线程。check() 的调用点是主线程 (手动按钮 + 启动自动检查)，
+     * 而 ensureClient() 里的 X.509 解析与 TrustManagerFactory 初始化在 Android 4.3 上要好几秒
+     * —— 留在调用者线程就违背类注释「整个过程不阻塞主线程」与 MainActivity 的硬要求 3。
+     */
+    private static final ExecutorService DISPATCH = Executors.newSingleThreadExecutor(
+            new ThreadFactory() {
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "update-check");
+                    t.setDaemon(true);
+                    return t;
+                }
+            });
+    /** cancel() 可能落在装配完成之前 (inFlight 还没就位)，故后台派发前后各查一次它 */
+    private volatile boolean cancelled;
 
     public UpdateChecker(Context context) {
         this.appContext = context == null ? null : context.getApplicationContext();
@@ -106,32 +125,56 @@ public final class UpdateChecker {
         }
         Log.i(TAG, "update check begin url=" + url
                 + " currentVc=" + currentVersionCode(appContext));
-        Request request = new Request.Builder()
+        final Request request = new Request.Builder()
                 .url(url)
                 .header("User-Agent", "ZSpaceCarPlayer-updater")
                 .header("Cache-Control", "no-cache")
                 .get()
                 .build();
-        Call call = ensureClient().newCall(request);
-        inFlight = call;
-        call.enqueue(new Callback() {
+        cancelled = false;
+        // 连装配带派发一起进后台：装配那几秒是主线程阻塞的真正来源，只把 enqueue 挪走不够。
+        DISPATCH.execute(new Runnable() {
             @Override
-            public void onFailure(Call call, IOException e) {
-                Log.w(TAG, "manifest fetch failed: " + e);
-                postError(callback, new Exception(friendlyError(e), e));
-            }
-
-            @Override
-            public void onResponse(Call call, Response response) {
+            public void run() {
+                if (cancelled) {
+                    Log.i(TAG, "update check cancelled before bootstrap, skipped");
+                    return;
+                }
                 try {
-                    UpdateManifest manifest = parseResponse(response);
-                    Log.i(TAG, "manifest fetched: " + manifest.describe());
-                    postManifest(callback, manifest);
+                    Call call = ensureClient().newCall(request);
+                    inFlight = call;
+                    if (cancelled) {
+                        // 装配期间用户已离开页面：此刻 inFlight 才刚就位，cancel() 那一下没打到
+                        Log.i(TAG, "update check cancelled during bootstrap, call dropped");
+                        call.cancel();
+                        return;
+                    }
+                    call.enqueue(new Callback() {
+                        @Override
+                        public void onFailure(Call call, IOException e) {
+                            Log.w(TAG, "manifest fetch failed: " + e);
+                            postError(callback, new Exception(friendlyError(e), e));
+                        }
+
+                        @Override
+                        public void onResponse(Call call, Response response) {
+                            try {
+                                UpdateManifest manifest = parseResponse(response);
+                                Log.i(TAG, "manifest fetched: " + manifest.describe());
+                                postManifest(callback, manifest);
+                            } catch (Throwable t) {
+                                Log.w(TAG, "manifest rejected: " + t);
+                                postError(callback, new Exception(friendlyError(t), t));
+                            } finally {
+                                closeQuietly(response);
+                            }
+                        }
+                    });
                 } catch (Throwable t) {
-                    Log.w(TAG, "manifest rejected: " + t);
+                    // 底座装配本身失败 (证书资源缺失 / TLS 初始化异常) 也必须走回调，
+                    // 否则调用方挂在 45s 看门狗上、按钮卡在「检查中」
+                    Log.w(TAG, "update client bootstrap failed: " + t);
                     postError(callback, new Exception(friendlyError(t), t));
-                } finally {
-                    closeQuietly(response);
                 }
             }
         });
@@ -139,6 +182,7 @@ public final class UpdateChecker {
 
     /** 取消在飞的请求 (离开设置页/退出 App 时调用), 回调不会再回来 */
     public void cancel() {
+        cancelled = true;
         Call call = inFlight;
         if (call != null && !call.isCanceled()) {
             Log.i(TAG, "update check cancelled");
