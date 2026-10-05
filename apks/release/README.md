@@ -146,6 +146,28 @@ vc9 的内容要点（详见 `changelogs/3.1.5.md`）：无损 PCM 一律请服�
 **同一 versionCode 换内容必须换文件名**：APK 的 URL 在 Cloudflare 侧缓存 4 小时，沿用旧名会让清单是新的、包却可能命中旧缓存，两边 sha256 对不上时车机直接拒装（2026-09-24 vc11 就踩在这一步之前）。
 
 
+## vc12 = 3.2.1 —— 已发布（2026-10-05 22:43）
+
+正式发布物：**`ZSpaceCarPlayer-3.2.1-code12-debug.apk`**，3,123,085 B，构建于 2026-10-05 22:42:35，
+`sha256=751a5960024aa9da8177fdfc5336a76c874c32f1fae36958630f3c405d391ae8`，
+`aapt2 dump badging` → `package: name='com.ktools.zspacecarplayer' versionCode='12' versionName='3.2.1'`。
+`clean assembleDebug testDebugUnitTest` 通过，**373 条 host 单测全绿（33 个结果文件 / 0 failures / 0 errors）**，
+其中两条新增用例把退避边界钉死（6s/12s、第 3 次与预算外为 0、最坏累计静默 18s）。
+沿用 debug 包的原因见下方铁律：`release` buildType 无 signingConfig，且车机覆盖升级要求同签名。
+
+本版内容两条 fix：① 同曲重试加 6s/12s 退避并把恢复动作收口为唯一拥有者（此前三次尝试挤在两秒内烧光预算后跳歌，
+且看门狗与退避链可在同一时刻各起一次播放）；② 升级检查的 TLS 底座装配移出主线程（Android 4.3 上 X.509 解析
++ TrustManagerFactory 初始化要几秒，`enqueue` 的异步原先只覆盖网络段），并补掉后台化引入的 `cancel()` 打空竞态。
+详见 `changelogs/3.2.1.md`。
+
+公网复核：清单轮询第 1 轮即返回 `versionCode=12`；按 `apkUrl` 实下载 → HTTP 200、
+`application/vnd.android.package-archive`、`content-length` 与清单 `sizeBytes` 一致、
+下载件 sha256 与清单及本地包**三方一致**。发布前现网清单已备份为 `latest.json.bak-20261005-vc11`；
+vc11 包 `ZSpaceCarPlayer-3.2.0-code11b-debug.apk` 原地保留作回滚目标，未移入 `_rejected-*`。
+
+⚠️ **设备侧未闭环**：按本文件铁律「判断是否已部署只认从设备 pull 回来的包哈希」，本次只做到公网三方一致，
+**尚未从 8600 车机 pull 回落地的包核验**，也未做断网恢复的实车听感走表。接手时优先补这一步。
+
 ## 回滚操作
 
 versionCode 不可降级安装，必须先卸载 3.0.0：
