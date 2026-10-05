@@ -166,7 +166,18 @@ vc9 的内容要点（详见 `changelogs/3.1.5.md`）：无损 PCM 一律请服�
 vc11 包 `ZSpaceCarPlayer-3.2.0-code11b-debug.apk` 原地保留作回滚目标，未移入 `_rejected-*`。
 
 ⚠️ **设备侧未闭环**：按本文件铁律「判断是否已部署只认从设备 pull 回来的包哈希」，本次只做到公网三方一致，
-**尚未从 8600 车机 pull 回落地的包核验**，也未做断网恢复的实车听感走表。接手时优先补这一步。
+**尚未从 8600 车机 pull 回落地的包核验**，也未做断网恢复的实车听感走表。接手时优先补这一步
+（2026-10-05 22:48 车机 adb 与 ping 双不通，上报最后写入 21:18，物理上取不到）。
+
+**发布包内容验证（比版本号强，比设备 pull 弱一级）**：解包 dex 后
+`LC_ALL=C tr -c '[:print:]' '\n' < classes.dex > s.txt`，再 `grep -Fc`：
+本次新增的 6 个串 `retry backoff wait=` / `retry backoff fired` / `update-check` /
+`cancelled before bootstrap` / `cancelled during bootstrap` / `streamRetryBackoffPending` 全部命中，
+正对照 `NETWORK_RECOVERY`、`STUCK heartbeat` 非 0（证明检测本身有效），dex 内认证头已是
+`Version="3.2.1"`（CLIENT_VERSION 同步生效的硬证据）。
+⚠️ 别用 `grep -ac "x" classes*.dex | awk -F: '{t+=$2}'`：只有一个 dex 时 grep 不输出 `file:` 前缀，
+`$2` 取空 → 累计恒为 0，连旧版就有的串也会报 0，看着像"包里没有新代码"。
+`Failed to instantiate extractor` 计数 0 属正常——那是系统 MediaExtractor 的异常消息，不是本 app 的字符串。
 
 ## 回滚操作
 
