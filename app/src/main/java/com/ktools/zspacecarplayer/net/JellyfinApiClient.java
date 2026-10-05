@@ -35,6 +35,9 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.HttpsURLConnection;
@@ -58,7 +61,7 @@ public class JellyfinApiClient {
     private static final String CLIENT_NAME = "ZSpaceCarPlayer";
     private static final String DEVICE_NAME = "Geely-iMX6-Car";
     private static final String DEVICE_ID = "CAR-IMX6-001";
-    private static final String CLIENT_VERSION = "3.2.1";
+    private static final String CLIENT_VERSION = "3.2.2";
 
     /** 鉴权持久化统一走这里, Service 后台静默登录与 Activity 必须读写同一份凭据 */
     public static final String PREF_NAME = "zspace_car_player_prefs";
@@ -184,9 +187,26 @@ public class JellyfinApiClient {
     private String serverUrl = DEFAULT_SERVER_URL;
     private String accessToken = "";
     private String userId = "";
-    private OkHttpClient httpClient;
+    private volatile OkHttpClient httpClient;
     /** 交互刷新专用短超时 client, 与 httpClient 共享连接池 (2026-09-12 #4) */
-    private OkHttpClient interactiveClient;
+    private volatile OkHttpClient interactiveClient;
+    /** 底座只构建一次：预热线程与调用方兜底共用这把锁，不会装配两份 trustmanager */
+    private final Object clientLock = new Object();
+    /**
+     * TLS 底座预热线程。装配 = 系统 trustmanager 枚举 + 内置 GTS 根 PEM 解析 +
+     * OkHttp 建 BasicTrustRootIndex (遍历全部内置根证书 DN)，在 8600 上要好几秒。
+     * 2026-10-05 实测 5 次 main_thread_blocked 里 4 次栈顶就是它，原先发生在
+     * MainActivity.onCreate 里那次同步 init —— 故从主线程挪到这里。
+     */
+    private static final ExecutorService CLIENT_WARMUP = Executors.newSingleThreadExecutor(
+            new ThreadFactory() {
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "tls-warmup");
+                    t.setDaemon(true);
+                    return t;
+                }
+            });
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     /** 鉴权状态回调: 拿到新 Token 或登录失败时在主线程通知 (Service 用于挂起的自动起播) */
@@ -219,7 +239,50 @@ public class JellyfinApiClient {
     public synchronized void init(Context context) {
         if (context == null) return;
         this.appContext = context.getApplicationContext();
-        initHttpClient();
+        // 主线程只负责把装配排上队。真正要用 client 的地方一律走 ensureClient()：
+        // 未就绪时在调用方线程同步构建一次 —— 语义与旧实现等价 (旧的必然在调用方线程构建)，
+        // 只是从「每次冷启动必卡主线程几秒」降级成「预热没赶上时才兜底」。
+        CLIENT_WARMUP.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ensureClient();
+                } catch (Throwable t) {
+                    Log.w(TAG, "tls warmup failed", t);
+                }
+            }
+        });
+    }
+
+    /**
+     * 取可用的 HTTP client。已就绪直接返回；否则在当前线程同步构建一次。
+     * 构建耗时与所在线程一并打日志——「预热是否赶上了调用方」只能靠这条判断，
+     * 光看有没有卡顿日志分不出来。
+     */
+    private OkHttpClient ensureClient() {
+        OkHttpClient c = httpClient;
+        if (c != null) {
+            return c;
+        }
+        synchronized (clientLock) {
+            if (httpClient == null) {
+                long startedAt = System.currentTimeMillis();
+                initHttpClient();
+                Log.i(TAG, "tls client built on " + Thread.currentThread().getName()
+                        + " in " + (System.currentTimeMillis() - startedAt) + "ms");
+            }
+            return httpClient;
+        }
+    }
+
+    /** 交互请求走短超时 client；它随底座一起构建，缺失时退回主 client 而不是再造一份。 */
+    private OkHttpClient ensureClient(boolean interactive) {
+        OkHttpClient base = ensureClient();
+        if (!interactive) {
+            return base;
+        }
+        OkHttpClient i = interactiveClient;
+        return i != null ? i : base;
     }
 
     private void initHttpClient() {
@@ -472,7 +535,7 @@ public class JellyfinApiClient {
                 .post(body)
                 .build();
 
-        OkHttpClient client = interactive ? interactiveClient : httpClient;
+        OkHttpClient client = ensureClient(interactive);
         Log.i(TAG, "authenticate: start user=" + username + " interactive=" + interactive);
         client.newCall(request).enqueue(new Callback() {
             @Override
@@ -666,7 +729,7 @@ public class JellyfinApiClient {
         final long deadlineMs = interactive
                 ? System.currentTimeMillis() + INTERACTIVE_TOTAL_BUDGET_MS
                 : Long.MAX_VALUE;
-        final OkHttpClient client = interactive ? interactiveClient : httpClient;
+        final OkHttpClient client = ensureClient(interactive);
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -864,7 +927,7 @@ public class JellyfinApiClient {
                 .get()
                 .build();
 
-        httpClient.newCall(request).enqueue(new Callback() {
+        ensureClient().newCall(request).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
                 if (canFallback) {
@@ -972,7 +1035,7 @@ public class JellyfinApiClient {
             builder.delete();
         }
 
-        httpClient.newCall(builder.build()).enqueue(new Callback() {
+        ensureClient().newCall(builder.build()).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, final IOException e) {
                 mainHandler.post(new Runnable() {

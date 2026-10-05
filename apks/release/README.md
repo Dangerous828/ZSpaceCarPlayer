@@ -179,6 +179,33 @@ vc11 包 `ZSpaceCarPlayer-3.2.0-code11b-debug.apk` 原地保留作回滚目标�
 `$2` 取空 → 累计恒为 0，连旧版就有的串也会报 0，看着像"包里没有新代码"。
 `Failed to instantiate extractor` 计数 0 属正常——那是系统 MediaExtractor 的异常消息，不是本 app 的字符串。
 
+## vc13 = 3.2.2 —— 已发布（2026-10-05 23:15）
+
+正式发布物：**`ZSpaceCarPlayer-3.2.2-code13-debug.apk`**，3,123,427 B，
+`sha256=5b29b7d4e72fbb979cafc7d9b29892c6455f2e764fe97f7eb9358ce83143ffaf`，
+`aapt2 dump badging` → `versionCode='13' versionName='3.2.2'`。
+`clean assembleDebug testDebugUnitTest` 通过，373 条 host 单测 0 失败。
+
+修的正是 vc12 漏掉的那一半：`MainActivity.onCreate` 里同步调的
+`JellyfinApiClient.init() → initHttpClient()`（系统 trustmanager 枚举 + 内置 GTS 根 PEM 解析 +
+OkHttp 建 `BasicTrustRootIndex` 遍历全部内置根 DN）——2026-10-05 当日 5 条 `main_thread_blocked`
+里 4 条栈顶是它，而 vc12 修的 `UpdateChecker.ensureClient()` 只在点「检查更新」时才触发。
+现 `init()` 只把装配排上 `tls-warmup` 单线程队列并立即返回，四处使用点走 `ensureClient()`
+双检 + 同一把锁（构建只发生一次，预热与调用方兜底互斥）。
+
+公网复核：清单轮询第 1 轮即 `versionCode=13`；按 `apkUrl` 实下载 → HTTP 200、3,123,427 B 与
+清单 `sizeBytes` 一致、下载件／清单／本地包**三方 sha256 一致**。发布前清单备份为
+`latest.json.bak-20261005-vc12`，vc12 包原地保留作回滚目标。
+
+包内容验证：dex 抽可打印串后 `tls-warmup`、`tls client built on ` 均命中；正对照 `update-check`、
+`retry backoff wait=`、`NETWORK_RECOVERY` 全部非 0（既证明检测有效，也证明 vc12 的两条修复
+与 vc13 同在这一个包里，车机装 vc13 即一次拿到三项）。
+
+⚠️ **仍未闭环（需车机上线）**：设备侧包哈希未 pull 核验；本版的终判据是升级后 `main_thread_blocked`
+中 `initHttpClient` 栈顶计数归零，以及 logcat 里 `tls client built on <线程>` 是否仍出现在 `main`
+（出现即说明第一批请求赶在预热之前，需把首次拉取也排到 warmup 之后）。vc13 **未走 host 单测**，
+原因是被测对象为 Android 单例 + 线程编排 + Context 依赖，硬造接缝只能测到自己搭的假接口。
+
 ## 回滚操作
 
 versionCode 不可降级安装，必须先卸载 3.0.0：
