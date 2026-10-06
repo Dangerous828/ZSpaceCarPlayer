@@ -254,6 +254,37 @@ cron 任务判据 2 与判据 3，每小时自动跑。vc13 **有意未走 host 
 
 ⚠️ 设备侧仍未 pull 核验（车机 21:48 后离线）。核验由 cron 任务「车机 vc15 升级与六项修复效果自动核验」每小时自动跑，七条判据写死在任务里，含「无法判定就直说、不许推测」。
 
+## vc16 = 3.2.5 发布记录（2026-10-06）
+
+发布物：**`ZSpaceCarPlayer-3.2.5-code16-debug.apk`**，3,126,331 B，
+`sha256=107ef5896a582d2c6a0bdb23055f7c6c31b6f023b1041b1501d2f1213082c734`，
+`aapt2 dump badging` → `versionCode='16' versionName='3.2.5'`。
+`clean :app:testDebugUnitTest :app:assembleDebug` 全量出包，**389 条 host 单测 0 失败**；
+zip 填充 78,630 B（正常形状；本轮另一次增量构建曾产出 5,157,896 B 的包，与 vc5/code8 那次同源）。
+
+本版把"弱网播不好"拆成三类、各给一条判据（详见 `changelogs/3.2.5.md`）：
+① 服务端 404/410 首次即终态（旧行为按网络故障退避 5 轮 + 同曲重试，一个失效 Id 烧约 90s）；
+② 链路追不上无损码率时自动降 **128kbps 流畅档**（实测需 110KB/s 而链路只给 67KB/s 的场景），
+   3 窗口降级 / 5 窗口回升的滞回，只作用下一首，换档不丢 EQ/Bass/声场/混响；
+③ open 看门狗分档：**一个字节都没下来按 4s 快速失败**，有过首字节才按 15s stall（vc15 为救慢流
+   放宽到 15s，结果给最需要快速失败的形态最长耐心，还白占唯一解码线程）。
+
+发布动作：清单与包**由 Mac 经共享盘直写** `Jarvis/data/caddy/web-zspace/update/`
+（= caddy 的 `/data/web-zspace`，无需贾维斯参与；本次先派了一条带全盘 `find` 的单子，22 分钟无果，
+属于自己绕路——落点本来就在映射盘可见处）。发布前清单已备份 `latest.json.bak-20261006-vc15`。
+
+公网复核：清单轮询**第 1 轮**即 `versionCode=16`；按 `apkUrl` 实下载 HTTP 200、3,126,331 B 与
+`sizeBytes` 一致、远端/清单/本地**三方 sha256 一致**。
+包内容验证：dex 片段计数 `no-first-byte=`／`stalled no-progress=`／`deadline=`／
+`-> smooth(128k)`／`start on smooth tier`／`resource gone terminal`／`gone on server, skip`／
+`maxStreamingBitrate` 各 1；旧措辞 `native open blocked` 为 0；vc12~vc15 的
+`retry backoff wait=`／`tls-warmup`／`update-check`／`duration unknown in container` 全部仍在
+——**装 vc16 一次拿全九项**。
+
+⚠️ 设备侧：vc15 已在真车验证（`appVersionCode=15` 上报 + `native open stalled no-progress`／
+`retry backoff fired`／`prepared dur=215527ms` 三条面包屑都在），vc16 需等下次上电自动升级后由
+cron 任务核验。**同一条坑照旧**：核验 dex 时按片段搜，新串是运行时拼接的，按整串 `grep` 会得到 0。
+
 ## 回滚操作
 
 versionCode 不可降级安装，必须先卸载 3.0.0：
