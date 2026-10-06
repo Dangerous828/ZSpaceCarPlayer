@@ -174,15 +174,35 @@ public class BufferingPolicyTest {
         long stall = BufferingPolicy.OPEN_STALL_MS;
         long cap = BufferingPolicy.OPEN_HARD_CAP_MS;
         // 有进展：过了 15s 也不掐——旧判据正是在这里把「慢但活着」的开流做成静音
-        assertFalse(BufferingPolicy.openShouldAbort(true, 0, stall));
-        assertFalse(BufferingPolicy.openShouldAbort(true, 0, cap - 1));
+        assertFalse(BufferingPolicy.openShouldAbort(true, 0, stall, true));
+        assertFalse(BufferingPolicy.openShouldAbort(true, 0, cap - 1, true));
         // 无进展：满 stall 才掐，差一毫秒都不算
-        assertFalse(BufferingPolicy.openShouldAbort(false, stall - 1, stall - 1));
-        assertTrue(BufferingPolicy.openShouldAbort(false, stall, stall));
+        assertFalse(BufferingPolicy.openShouldAbort(false, stall - 1, stall - 1, true));
+        assertFalse(BufferingPolicy.openShouldAbort(false, stall - 1, stall, true));
+        assertTrue(BufferingPolicy.openShouldAbort(false, stall, stall, true));
         // 一直有进展也不能赌死：硬上限一到必须收手，解码线程只有一条
-        assertTrue(BufferingPolicy.openShouldAbort(true, 0, cap));
-        assertTrue(BufferingPolicy.openShouldAbort(false, 0, cap));
+        assertTrue(BufferingPolicy.openShouldAbort(true, 0, cap, true));
+        assertTrue(BufferingPolicy.openShouldAbort(false, 0, cap, true));
         assertTrue("stall 必须严格小于硬上限，否则“有进展就顺延”是空话", stall < cap);
+    }
+
+    /**
+     * 「零字节」与「下得慢」必须分档。真车实测 (2026-10-06)：一首只需 16KB/s 的 128k MP3 也卡住，
+     * 上报是 `native open stalled no-progress=15004ms ... buffered=0B`——旧判据给最需要快速失败的
+     * 形态最长耐心，还把唯一一条解码线程占死 15 秒。
+     */
+    @Test
+    public void zeroByteOpenDiesSoonerThanSlowOpen() {
+        long first = BufferingPolicy.OPEN_FIRST_BYTE_MS;
+        long stall = BufferingPolicy.OPEN_STALL_MS;
+        assertTrue("首字节耐心必须显著短于 stall 耐心，否则这次拆分是空改动", first * 3 < stall);
+        assertFalse(BufferingPolicy.openShouldAbort(false, first - 1, first - 1, false));
+        assertTrue(BufferingPolicy.openShouldAbort(false, first, first, false));
+        // 同一时刻"已经收到过字节"就不能按零字节判死：那是 2026-10-05 修回来的慢流保护
+        assertFalse("4s 时有首字节必须放过（旧行为会在这里误掐）",
+                BufferingPolicy.openShouldAbort(false, first, first, true));
+        // 零字节分支同样受硬上限保护，不因"更快失败"就变成无限等
+        assertTrue(BufferingPolicy.openShouldAbort(false, 0, BufferingPolicy.OPEN_HARD_CAP_MS, false));
     }
 
     @Test
@@ -195,5 +215,22 @@ public class BufferingPolicyTest {
                 BufferingPolicy.isBufferingStable(-1, -1, -1));
         assertTrue(BufferingPolicy.shouldPrefetchNext(-1, -1, 10, false, false, false));
         assertFalse(BufferingPolicy.shouldPrefetchNext(-1, -1, -1, false, false, false));
+    }
+
+    /**
+     * 404/410 是"换 Id 才有救"，必须和 4xx 里的 408/429（现在不行、等一下也许行）分开。
+     * 判错的代价是真车实测过的：按网络故障处理要烧掉下载层 5 轮退避 + 同曲重试 ≈ 90s 才跳歌。
+     */
+    @Test
+    public void onlyGoneStatusesAreTerminal() {
+        assertTrue(BufferingPolicy.isMissingResourceStatus(404));
+        assertTrue(BufferingPolicy.isMissingResourceStatus(410));
+        assertFalse("超时仍属可重试", BufferingPolicy.isMissingResourceStatus(408));
+        assertFalse("限流仍属可重试", BufferingPolicy.isMissingResourceStatus(429));
+        assertFalse(BufferingPolicy.isMissingResourceStatus(403));
+        assertFalse(BufferingPolicy.isMissingResourceStatus(500));
+        assertFalse(BufferingPolicy.isMissingResourceStatus(503));
+        assertFalse(BufferingPolicy.isMissingResourceStatus(200));
+        assertFalse(BufferingPolicy.isMissingResourceStatus(206));
     }
 }

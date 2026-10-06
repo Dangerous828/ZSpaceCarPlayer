@@ -23,6 +23,12 @@ public interface IAudioPlayer {
      * 传 0 表示无信息。系统 MediaPlayer 走 MediaExtractor 自报时长，实现方可忽略。
      */
     void setKnownDurationMs(long durationMs);
+
+    /**
+     * 本轮起播是否被服务端判定「这首已经不存在」(HTTP 404/410)。
+     * 服务层据此跳过同曲重试——只有换 Id 才有救，重试同一个 Id 只会白烧退避预算。
+     */
+    boolean isResourceGone();
     void prepareAsync();
     void start();
     void pause();

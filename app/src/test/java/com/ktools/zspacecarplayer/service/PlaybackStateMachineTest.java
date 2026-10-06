@@ -332,21 +332,43 @@ public class PlaybackStateMachineTest {
     public void transportErrorsNeverSpendAnAttemptOnReauth() {
         Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.PLAIN_RETRY,
                 PlaybackStateMachine.effectiveRetryAction(
-                        PlaybackStateMachine.StreamRetryAction.REAUTH_RETRY, true));
+                        PlaybackStateMachine.StreamRetryAction.REAUTH_RETRY, true, false));
         Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.REAUTH_RETRY,
                 PlaybackStateMachine.effectiveRetryAction(
-                        PlaybackStateMachine.StreamRetryAction.REAUTH_RETRY, false));
+                        PlaybackStateMachine.StreamRetryAction.REAUTH_RETRY, false, false));
         // 重试链耗尽后不得被降级逻辑复活
         Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.GIVE_UP,
                 PlaybackStateMachine.effectiveRetryAction(
-                        PlaybackStateMachine.StreamRetryAction.GIVE_UP, true));
+                        PlaybackStateMachine.StreamRetryAction.GIVE_UP, true, false));
 
         // 端到端: 慢网 (1,-19) 在第 3 次尝试上仍走直接重试而非重新登录
         PlaybackStateMachine.StreamRetryAction third = PlaybackStateMachine.streamRetryAction(
                 PlaybackStateMachine.isTransientTransportError(1, "-19"), 2, true);
         Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.REAUTH_RETRY, third);
         Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.PLAIN_RETRY,
-                PlaybackStateMachine.effectiveRetryAction(third, true));
+                PlaybackStateMachine.effectiveRetryAction(third, true, false));
+    }
+
+    /**
+     * 服务端 404/410 必须抢在一切重试之前终态。真车实测 (2026-10-06 曲库改名后): 按网络故障
+     * 处理时一个失效 Id 要烧掉下载层 5 轮退避 + 同曲重试与 6s/12s 退避 ≈ 90s 才跳歌。
+     */
+    @Test
+    public void missingResourceIsTerminalOnTheFirstAttempt() {
+        // 第 1 次尝试本来是 PLAIN_RETRY，资源缺失要直接 GIVE_UP
+        PlaybackStateMachine.StreamRetryAction first = PlaybackStateMachine.streamRetryAction(true, 0, true);
+        Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.PLAIN_RETRY, first);
+        Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.GIVE_UP,
+                PlaybackStateMachine.effectiveRetryAction(first, false, true));
+
+        // 鉴权重试那条路也不例外：换 Id 才是解，重新登录拿到同一个 Id 仍然 404
+        Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.GIVE_UP,
+                PlaybackStateMachine.effectiveRetryAction(
+                        PlaybackStateMachine.StreamRetryAction.REAUTH_RETRY, true, true));
+
+        // missingResource=false 时不得改变原有判定（防这条新分支把网络故障也判死）
+        Assert.assertEquals(PlaybackStateMachine.StreamRetryAction.PLAIN_RETRY,
+                PlaybackStateMachine.effectiveRetryAction(first, false, false));
     }
 
     @Test

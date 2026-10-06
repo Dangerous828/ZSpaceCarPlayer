@@ -22,6 +22,7 @@ import com.ktools.zspacecarplayer.player.stream.HttpProxyServer;
 
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -41,12 +42,9 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     private static final int MSG_RELEASE = 3;
     private static final int MSG_TEARDOWN = 4;
 
-    /**
-     * 原生解码器 open 的阻塞判据已收口到 {@link BufferingPolicy#openShouldAbort}：
-     * 按「环形缓冲有无增长」判死 (OPEN_STALL_MS)，并有 OPEN_HARD_CAP_MS 封顶，
-     * 不再用单一墙上时间把慢但有进展的开流掐掉。
-     */
-    private static final long NATIVE_OPEN_TIMEOUT_MS = BufferingPolicy.OPEN_STALL_MS;
+    // 原生解码器 open 的阻塞判据全部收口在 {@link BufferingPolicy#openShouldAbort}：
+    // 「一个字节都没下来」按 OPEN_FIRST_BYTE_MS 快速失败，「有字节但不再增长」才按 OPEN_STALL_MS，
+    // 另有 OPEN_HARD_CAP_MS 封顶——不再用单一墙上时间把慢但有进展的开流掐掉。
 
     private String dataSourcePath;
     private OnEventListener eventListener;
@@ -66,6 +64,14 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     private volatile boolean abortPrepare = false;
 
     private volatile int currentDurationMs = 0;
+    /**
+     * 本轮起播是否被服务端判定"曲目已不存在"(HTTP 404/410)。
+     * 与网络故障的区别在于它不可重试：只有换 Id 才有救，所以 {@link #doPrepare()} 见到它就
+     * 直接抛错，不再走系统 MediaCodec 那第二轮（同一个 Id 照样 404，失败后还会留下
+     * "Failed to instantiate extractor" 这种误导归因的现场）。
+     */
+    private volatile boolean resourceGone = false;
+    private volatile int goneHttpStatus = -1;
     /**
      * 入库时已知的曲目时长 (Jellyfin 列表接口的 RunTimeTicks)。流式 FLAC 容器里 dr_flac
      * 拿不到总帧数 (frames=0)，currentDurationMs 就是 0，于是剩余时长算不出、
@@ -140,6 +146,11 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     }
 
     @Override
+    public boolean isResourceGone() {
+        return resourceGone;
+    }
+
+    @Override
     public void setDataSource(String pathOrUrl) throws Exception {
         synchronized (stateLock) {
             this.dataSourcePath = pathOrUrl;
@@ -163,6 +174,8 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             if (isReleased) return;
         }
         abortPrepare = false; // 新一轮 prepare：清除上一首遗留的门槛中止标志
+        resourceGone = false;
+        goneHttpStatus = -1;
 
         // 这条同时是解码线程的存活证明：报告里有 prepareAsync 却没有 doPrepare begin，
         // 说明解码线程被上一次 open 占死，消息根本没排上队
@@ -179,7 +192,13 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                 return;
             }
 
-            // 2. 原生软解未命中或失败，回退到系统 MediaExtractor + MediaCodec
+            // 2. 服务端已判定"这首没了"：系统管线再连同一个 Id 也是同样结果，且它抛回来的
+            //    "Failed to instantiate extractor" 会把归因带偏成解码器问题
+            if (resourceGone) {
+                throw new IOException("resource gone: HTTP " + goneHttpStatus);
+            }
+
+            // 3. 原生软解未命中或失败，回退到系统 MediaExtractor + MediaCodec
             prepareMediaCodec();
             onPrepareSuccess();
 
@@ -244,6 +263,8 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                     final long startedAt = System.currentTimeMillis();
                     long lastBytes = -1L;
                     long lastProgressAt = startedAt;
+                    // open 期间没有消费者，环形缓冲只进不出，所以 lastBytes>0 就是"服务端真的吐过字节"
+                    boolean gotFirstByte = false;
                     while (true) {
                         try {
                             Thread.sleep(BufferingPolicy.OPEN_POLL_MS);
@@ -271,16 +292,24 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                         } else {
                             advanced = false;
                         }
+                        if (bytes > 0L) {
+                            gotFirstByte = true;
+                        }
                         if (!BufferingPolicy.openShouldAbort(advanced,
-                                now - lastProgressAt, now - startedAt)) {
+                                now - lastProgressAt, now - startedAt, gotFirstByte)) {
                             continue;
                         }
-                        Log.e(TAG, "native open stalled: no progress for "
-                                + (now - lastProgressAt) + "ms, total " + (now - startedAt)
-                                + "ms, buffered=" + lastBytes + "B, aborting reader to free decode thread");
+                        String why = gotFirstByte
+                                ? "stalled no-progress=" + (now - lastProgressAt) + "ms"
+                                : "no-first-byte=" + (now - startedAt) + "ms";
+                        Log.e(TAG, "native open aborted: " + why
+                                + " total " + (now - startedAt) + "ms, buffered=" + lastBytes
+                                + "B (deadline=" + (gotFirstByte
+                                        ? BufferingPolicy.OPEN_STALL_MS : BufferingPolicy.OPEN_FIRST_BYTE_MS)
+                                + "ms), freeing decode thread");
                         CrashMonitor.putContext("nativeOpenTimeout", true);
-                        CrashMonitor.breadcrumb("v3", "native open stalled no-progress="
-                                + (now - lastProgressAt) + "ms total=" + (now - startedAt)
+                        CrashMonitor.breadcrumb("v3", "native open " + why
+                                + " total=" + (now - startedAt)
                                 + "ms buffered=" + lastBytes + "B, aborting reader");
                         try {
                             guarded.abort();
@@ -350,6 +379,10 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             Log.w(TAG, "tryPrepareNativeLossless exception, fallback to MediaCodec", t);
             // 捕获的是 Throwable：UnsatisfiedLinkError 之类的 so 加载失败也走这里，
             // 静默回退后现场就没了，必须留痕
+            if (t instanceof BufferedHttpSource.ResourceGoneException) {
+                resourceGone = true;
+                goneHttpStatus = ((BufferedHttpSource.ResourceGoneException) t).httpCode;
+            }
             CrashMonitor.breadcrumb("v3", "native prepare threw, fallback: " + t);
             if (streamReader != null) {
                 try { streamReader.close(); } catch (Throwable ignored) {}

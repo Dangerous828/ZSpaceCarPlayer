@@ -1,0 +1,12 @@
+{
+  "versionCode": 16,
+  "versionName": "3.2.5",
+  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.2.5-code16-debug.apk",
+  "fileName": "ZSpaceCarPlayer-3.2.5-code16-debug.apk",
+  "sizeBytes": 3126331,
+  "sha256": "107ef5896a582d2c6a0bdb23055f7c6c31b6f023b1041b1501d2f1213082c734",
+  "notes": "弱网听感改善：网络追不上无损码率时自动改走流畅档（EQ/音效不变），不再一直抽干；曲目在服务器已不存在时立刻跳过不再空等；开流一直拿不到字节时 4 秒就放手重连。含前几版全部修复。",
+  "minVersionCode": 1,
+  "mandatory": false,
+  "publishedAt": "2026-10-06"
+}

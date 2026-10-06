@@ -85,6 +85,8 @@ public class BufferedHttpSource {
     private boolean remoteAcceptsRanges = false;
     private boolean metaReady = false;   // 首个响应头已解析（contentLength/contentType 可用）
     private String fatalError = null;    // 下载侧不可恢复错误（reset 可清除自愈）
+    /** ≥0 表示本轮被服务端判为"资源已不存在"，读侧要抛可识别的类型而不是普通 IO 异常。 */
+    private volatile int goneHttpStatus = -1;
 
     // ---- 下载线程控制（lock 保护，downloadAbort/volatile 供读循环快速检查） ----
     private Thread downloaderThread;
@@ -224,6 +226,10 @@ public class BufferedHttpSource {
             while (true) {
                 if (cancel != null && cancel.get()) {
                     throw new IOException("readAt cancelled");
+                }
+                if (goneHttpStatus >= 0) {
+                    // 抛可识别的类型：读侧上层据此跳过系统 MediaCodec 那一轮无望的尝试
+                    throw new ResourceGoneException(goneHttpStatus);
                 }
                 if (fatalError != null) {
                     throw new IOException("buffered source error: " + fatalError);
@@ -510,6 +516,16 @@ public class BufferedHttpSource {
         }
     }
 
+    /**
+     * 本流累计已下载到的字节偏移（单调递增；重连续传也继续往上加）。
+     * 与 {@link #getBufferedBytes()} 的区别是它不被窗口淘汰影响，因此可以直接用于速率采样。
+     */
+    public long getDownloadedBytes() {
+        synchronized (lock) {
+            return bufEnd;
+        }
+    }
+
     /** 缓冲进度百分比（0-100；总长未知返回 -1） */
     public int getBufferedPercent() {
         synchronized (lock) {
@@ -666,6 +682,7 @@ public class BufferedHttpSource {
         bufStart = position;
         bufEnd = position;
         fatalError = null;
+        goneHttpStatus = -1;
         lastProgressAtMs = SystemClock.elapsedRealtime();
         disarmStarveLocked();
         lock.notifyAll();
@@ -707,6 +724,16 @@ public class BufferedHttpSource {
                     if (epoch != downloadEpoch) {
                         continue; // 旧连接的失败直接忽略
                     }
+                    if (e instanceof ResourceGoneException) {
+                        // 一次都不重试：0.8+1.6+2.4+3.2+4.0s 的退避只把"这首没了"拖成约 90s 才跳歌
+                        goneHttpStatus = ((ResourceGoneException) e).httpCode;
+                        fatalError = "resource gone: HTTP " + goneHttpStatus;
+                        Log.e(TAG, "fatal: " + fatalError + " url=" + url);
+                        CrashMonitor.breadcrumb("stream", "resource gone terminal: " + fatalError
+                                + " pos=" + bufEnd);
+                        lock.notifyAll();
+                        return;
+                    }
                     retry++;
                     if (retry > MAX_RETRY) {
                         fatalError = "download failed after " + MAX_RETRY + " retries: " + e.getMessage();
@@ -742,6 +769,11 @@ public class BufferedHttpSource {
             }
             int code = c.getResponseCode();
             if (code < 200 || code >= 300) {
+                // 404/410 的含义是"这个 Id 指向的资源已经没了"，重试同一个 Id 永远同样的结果，
+                // 单独抛类型让重试环直接终态，而不是按网络抖动退避五轮。
+                if (BufferingPolicy.isMissingResourceStatus(code)) {
+                    throw new ResourceGoneException(code);
+                }
                 throw new IOException("HTTP " + code);
             }
             boolean partial = (code == HttpURLConnection.HTTP_PARTIAL);
@@ -1005,6 +1037,19 @@ public class BufferedHttpSource {
                 return;
             }
             remaining -= step;
+        }
+    }
+
+    /**
+     * 服务端明确回答"资源不存在"（见 {@link BufferingPolicy#isMissingResourceStatus}）。
+     * 它不是网络故障：换 Id 才有救，对同一个 Id 重连多少次结果都一样。
+     */
+    public static final class ResourceGoneException extends IOException {
+        public final int httpCode;
+
+        ResourceGoneException(int httpCode) {
+            super("HTTP " + httpCode);
+            this.httpCode = httpCode;
         }
     }
 }

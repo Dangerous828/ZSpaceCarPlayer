@@ -458,9 +458,20 @@ public final class PlaybackStateMachine {
         return what == MEDIA_ERROR_UNKNOWN_WHAT && TRANSIENT_TRANSPORT_EXTRA.equals(extra);
     }
 
-    /** 传输层错误与会话有效性无关, 重新登录只会白等一轮鉴权冷却, 降级成直接重试。 */
+    /**
+     * 传输层错误与会话有效性无关, 重新登录只会白等一轮鉴权冷却, 降级成直接重试。
+     *
+     * missingResource（服务端 404/410）优先级最高并直接终态：它不是"还没好"而是"永远不会好"——
+     * 同一个 Id 再连一百次结果一样，只有曲库重新同步换新 Id 才有救。真车实测过按网络故障处理的
+     * 代价（2026-10-06 曲库 wav→flac 改名后）：下载层按退避连打 5 轮 (~12s)，再叠同曲重试与
+     * 6s/12s 退避，一个失效 Id 要烧掉约 90s 才跳歌。
+     */
     public static StreamRetryAction effectiveRetryAction(StreamRetryAction action,
-                                                         boolean transientTransportError) {
+                                                         boolean transientTransportError,
+                                                         boolean missingResource) {
+        if (missingResource) {
+            return StreamRetryAction.GIVE_UP;
+        }
         if (transientTransportError && action == StreamRetryAction.REAUTH_RETRY) {
             return StreamRetryAction.PLAIN_RETRY;
         }

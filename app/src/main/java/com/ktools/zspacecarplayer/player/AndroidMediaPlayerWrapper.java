@@ -88,6 +88,15 @@ public class AndroidMediaPlayerWrapper implements IAudioPlayer {
     public void setKnownDurationMs(long durationMs) {
     }
 
+    /**
+     * 系统MediaPlayer 走的是另一套错误码，没有"服务端判定资源不存在"这条可读通道；
+     * 恒返回 false 让服务层维持原判定。
+     */
+    @Override
+    public boolean isResourceGone() {
+        return false;
+    }
+
     @Override
     public void setDataSource(String pathOrUrl) throws Exception {
         if (mediaPlayer == null) {

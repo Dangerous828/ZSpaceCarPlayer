@@ -171,6 +171,18 @@ public final class HttpProxyServer {
         }
     }
 
+    /** 该远端资源累计下载到的偏移（速率采样用）；无活动源返回 -1。 */
+    public long getDownloadedBytes(String remoteUrl) {
+        synchronized (sourceLock) {
+            for (BufferedHttpSource source : sources.values()) {
+                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
+                    return source.getDownloadedBytes();
+                }
+            }
+            return -1L;
+        }
+    }
+
     /** 远端资源总长（prefill 门槛估算码率用）；无活动源 / 未知返回 -1。 */
     public long getContentLength(String remoteUrl) {
         synchronized (sourceLock) {

@@ -153,6 +153,15 @@ public class AudioPlayerService extends Service {
     /** 是否处于起播 prefill 门槛期间: prepareTransition 置真, handlePrepared 置假;
      *  v3 播放器也会经 onBufferingUpdate 校正。门槛期间不预取、不由 progress 重复上报缓冲。 */
     private volatile boolean prefillInProgress = false;
+
+    /**
+     * 带宽治理器：持续追不上无损码率时，把**下一首**换成服务端 128kbps 流畅档。
+     * 有状态但不跨进程存活——链路状况本来就是当下的事。
+     */
+    private final com.ktools.zspacecarplayer.player.stream.StreamRateGovernor rateGovernor =
+            new com.ktools.zspacecarplayer.player.stream.StreamRateGovernor();
+    /** 只用于"换档那一刻留一行证据"，避免每 tick 刷屏。 */
+    private boolean lastDegradedState = false;
     /** 上次 tick 上报的缓冲 percent / 状态 (2026-09-13 双进度条调查): 变化时打一行诊断日志 */
     private int lastReportedBufferPercent = Integer.MIN_VALUE;
     private boolean lastReportedBuffering = false;
@@ -584,6 +593,20 @@ public class AudioPlayerService extends Service {
         if (url == null || url.length() == 0) return;
         HttpProxyServer proxy = HttpProxyServer.getInstance();
         int percent = proxy.getBufferedPercent(url);
+        // 链路速率采样：累计偏移单调（重连续传也继续加），所以直接喂给治理器即可。
+        // 只在"跨过窗口"时才会真的做一次判定，500ms tick 的密度不会把抖动放大成换档。
+        long downloadedBytes = proxy.getDownloadedBytes(url);
+        if (downloadedBytes >= 0L) {
+            rateGovernor.onProgress(SystemClock.elapsedRealtime(), downloadedBytes);
+            boolean nowDegraded = rateGovernor.isDegraded();
+            if (nowDegraded != lastDegradedState) {
+                lastDegradedState = nowDegraded;
+                long est = rateGovernor.getLastWindowBytesPerSec();
+                CrashMonitor.breadcrumb("play", "bitrate tier "
+                        + (nowDegraded ? "-> smooth(128k)" : "-> lossless")
+                        + " est=" + (est > 0L ? est / 1024L : -1L) + "KB/s");
+            }
+        }
         long remainingSeconds = totalMs > 0 ? Math.max(0, (totalMs - currentMs) / 1000) : -1L;
         long leadSeconds = computeLeadSeconds(percent, currentMs, totalMs);
         // 稳定后仍持续上报 (2026-09-13 双进度条): UI 文字指示靠 visibility 幂等隐藏,
@@ -663,8 +686,7 @@ public class AudioPlayerService extends Service {
                 starving, prefillInProgress, already)) {
             return;
         }
-        String nextUrl = JellyfinApiClient.getInstance()
-                .getStreamUrlForSong(next.getId(), next.getStreamUrl());
+        String nextUrl = resolvePlayUrl(JellyfinApiClient.getInstance(), next.getId(), next.getStreamUrl());
         if (nextUrl == null || nextUrl.length() == 0) return;
         proxy.prefetch(nextUrl);
         prefetchedNextSongId = next.getId();
@@ -692,6 +714,25 @@ public class AudioPlayerService extends Service {
     }
 
     /**
+     * 起播/预取实际用的 URL：默认沿用该曲入库时定下的传输方式；被治理器判定链路持续追不上无损时，
+     * 换服务端 128kbps 流畅档。
+     *
+     * <p>只影响**下一首**：中途换 URL 一定断音。代价说清楚——若档位恰好在"预取之后、消费之前"翻转，
+     * 作废会打空、那次预取白做（由 {@code MAX_SOURCES} 淘汰兜住），不会播错内容。
+     */
+    private String resolvePlayUrl(JellyfinApiClient client, String itemId, String cachedStreamUrl) {
+        if (rateGovernor.isDegraded()) {
+            String degraded = client.getDegradedStreamUrl(itemId);
+            if (degraded != null && degraded.length() > 0) {
+                CrashMonitor.breadcrumb("play", "start on smooth tier id=" + itemId
+                        + " est=" + (rateGovernor.getLastWindowBytesPerSec() / 1024L) + "KB/s");
+                return degraded;
+            }
+        }
+        return client.getStreamUrlForSong(itemId, cachedStreamUrl);
+    }
+
+    /**
      * 只有 songId 时复原该曲的传输方式。
      *
      * 预取源是按 URL 登记与命中的，作废时必须用与预取时完全一致的 URL（含下混与否），
@@ -703,7 +744,7 @@ public class AudioPlayerService extends Service {
             for (int i = 0; i < playlist.size(); i++) {
                 SongItem s = playlist.get(i);
                 if (s != null && songId.equals(s.getId())) {
-                    return client.getStreamUrlForSong(songId, s.getStreamUrl());
+                    return resolvePlayUrl(client, songId, s.getStreamUrl());
                 }
             }
         }
@@ -907,7 +948,7 @@ public class AudioPlayerService extends Service {
                     bindPlayerCallbacks(generation);
                     gainEnvelope.setImmediate(0.0f);
                     // 传输方式由该曲入库时的码率裁定决定（多声道无损走服务端下混），此处只现取 token
-                    String urlToPlay = client.getStreamUrlForSong(song.getId(), song.getStreamUrl());
+                    String urlToPlay = resolvePlayUrl(client, song.getId(), song.getStreamUrl());
                     CrashMonitor.putContext("streamUrl", urlToPlay);
                     // 缓冲 / 预取 (2026-09-12)：记录当前曲远端 URL 供 percent 查询与预取命中；
                     // 作废与新一首无关的旧预取源；重新武装起播门槛态
@@ -1381,6 +1422,9 @@ public class AudioPlayerService extends Service {
         // 曲尾时不能被判成「断点坏了」而从零重播 —— 兜底只针对自动断点续播
         startedWithResumeMs = -1;
         resumeGuardTicks = -1;
+        // 拖进度条会让下载头的累计偏移跳变：窗口基准必须作废重建，否则会算出假的高速率（正向 seek）
+        // 或负速率（往回拖）。只作废窗口，不推翻档位结论——档位是链路属性，seek 不改链路。
+        rateGovernor.rebaseWindow();
         if (player != null && playbackState.isPrepared()) {
             final long generation = playbackState.getGenerationId();
             final long seekOperation = playbackState.beginSeekOperation();
@@ -1994,9 +2038,11 @@ public class AudioPlayerService extends Service {
                 || (what == MediaPlayer.MEDIA_ERROR_IO || what == MEDIA_ERROR_SYSTEM);
         boolean reauthCooldownElapsed =
                 System.currentTimeMillis() - lastReAuthAt > REAUTH_COOLDOWN_MS;
+        // 服务端判定"这首不存在"(404/410)：必须抢在任何重试之前终态，见 effectiveRetryAction 注释
+        boolean missingResource = playerIsV3 && player != null && player.isResourceGone();
         PlaybackStateMachine.StreamRetryAction action = PlaybackStateMachine.effectiveRetryAction(
                 PlaybackStateMachine.streamRetryAction(recoverable, streamRetryCount, reauthCooldownElapsed),
-                transientTransport);
+                transientTransport, missingResource);
         if (action != PlaybackStateMachine.StreamRetryAction.GIVE_UP) {
             streamRetryCount++;
             final SongItem failedSong = getCurrentSong();
@@ -2069,9 +2115,13 @@ public class AudioPlayerService extends Service {
         SongItem abandoned = getCurrentSong();
         String abandonedName = abandoned != null ? abandoned.getName() : "当前曲目";
         if (stateChangeListener != null) {
-            stateChangeListener.onError("多次重试仍无法播放，已跳过: " + abandonedName);
+            stateChangeListener.onError(missingResource
+                    ? "曲目已不在服务器, 已跳过: " + abandonedName
+                    : "多次重试仍无法播放，已跳过: " + abandonedName);
         }
-        CrashMonitor.breadcrumb("play", "GIVE_UP after " + streamRetryCount + " retries, skip " + abandonedName);
+        CrashMonitor.breadcrumb("play", missingResource
+                ? "gone on server, skip " + abandonedName
+                : "GIVE_UP after " + streamRetryCount + " retries, skip " + abandonedName);
         silentErrorStreak = 0;
         streamRetryCount = 0;
         if (abandoned != null) {

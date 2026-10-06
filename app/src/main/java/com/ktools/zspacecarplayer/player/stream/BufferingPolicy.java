@@ -93,17 +93,30 @@ public final class BufferingPolicy {
      */
     public static boolean openShouldAbort(boolean progressAdvanced,
                                           long msSinceProgress,
-                                          long msSinceOpenStart) {
+                                          long msSinceOpenStart,
+                                          boolean gotFirstByte) {
         if (msSinceOpenStart >= OPEN_HARD_CAP_MS) {
             return true;
+        }
+        if (!gotFirstByte) {
+            // 连一个字节都没下来：这不是"下得慢"，是根本没通。再等 15s 只是让车主多听 15s 静音，
+            // 而且这段时间占着唯一的解码线程，点下一首都排不上队。
+            return msSinceOpenStart >= OPEN_FIRST_BYTE_MS;
         }
         return !progressAdvanced && msSinceProgress >= OPEN_STALL_MS;
     }
 
     /** open 看门狗轮询间隔：够密以免拖长判死，够稀以免白读环形缓冲游标。 */
     public static final long OPEN_POLL_MS = 500L;
-    /** 连续这么久环形缓冲零增长才掐——这才是「真卡住」的语义。 */
+    /** 已有首字节、但连续这么久环形缓冲零增长才掐——这才是「慢但活着 vs 真卡住」的分界。 */
     public static final long OPEN_STALL_MS = 15_000L;
+    /**
+     * 一个字节都没下来的耐心：远短于 {@link #OPEN_STALL_MS}。
+     * 2026-10-06 真车实测到一种旧判据治不了的形态——一首只需 16 KB/s 的 128kbps MP3 也卡住，
+     * 上报里是 {@code native open stalled no-progress=15004ms ... buffered=0B}，即 15 秒零字节。
+     * 旧判据把"零字节"和"下得慢"用同一个 15s 处理，等于给最需要快速失败的形态最长的耐心。
+     */
+    public static final long OPEN_FIRST_BYTE_MS = 4_000L;
     /** 即便一直有进展也最多等这么久：解码线程只有一条，不能赌死。 */
     public static final long OPEN_HARD_CAP_MS = 45_000L;
 
@@ -195,5 +208,23 @@ public final class BufferingPolicy {
         }
         // 剩余时长已不足一个稳定领先量：后面没有可担心的抽干，视为稳定
         return remainingSeconds >= 0 && remainingSeconds <= BUFFERING_STABLE_LEAD_SECONDS;
+    }
+
+    // ------------------------------------------------------------------ //
+    //  4) 服务端响应状态：哪些是"再连也没用"
+    // ------------------------------------------------------------------ //
+
+    /**
+     * 该 HTTP 状态是否表示"这个 Id 指向的资源不在了"。
+     *
+     * 曲库文件被改名或删除后 Jellyfin 就是这样回答的。它和网络故障的区别是决定性的：
+     * 换 Id 才有救，对同一个 Id 重连多少次结果都一样。2026-10-06 曲库 wav→flac 改名后
+     * 车机实测到 `download retry 2/5..4/5 from 0: java.io.IOException: HTTP 404`——
+     * 按网络抖动退避五轮 (~12s) 再叠同曲重试与退避，一个失效 Id 要烧掉约 90s 才跳歌。
+     *
+     * 408/429 虽然也是 4xx，但它们是"现在不行、等一下也许行"，必须继续走重试。
+     */
+    public static boolean isMissingResourceStatus(int httpCode) {
+        return httpCode == 404 || httpCode == 410;
     }
 }
