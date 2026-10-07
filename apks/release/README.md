@@ -347,3 +347,23 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 ⚠️ 设备侧未核验（车机需下次上电自动升级 + 车主确认安装）。核验交给 cron，判据换成 vc17 的十条
 （见 `changelogs/3.2.6.md`「实车判据」），重点三条：**不该再有 `bitrate tier -> smooth(128k)`、
 不该再有 `prepared dur=0ms`、不该出现无解释的自动跳歌**。
+
+## vc18 = 3.2.7 发布记录（2026-10-07）
+
+发布物：**`ZSpaceCarPlayer-3.2.7-code18-debug.apk`**，3,129,009 B，
+`sha256=b568c4c0f0a84bafe0fb29cf7ed999c7328ed80b0018d2700b5432a85a05435d`，
+`aapt2 dump badging` → `versionCode='18' versionName='3.2.7'`。
+`clean :app:testDebugUnitTest :app:assembleDebug` → **400 条单测 0 失败**。
+
+本版只动布局与发版纪律（清单 `notes` 留空），没有新增判定逻辑，因此包体只比 vc17 大 42 B。
+布局改动**在二进制里核过**：`aapt2 dump xmltree --file res/layout/dialog_update.xml`
+可见 `android:maxLines=2`、`android:ellipsize=3`（平台 attrs.xml 里 `end=3`，不是 middle）。
+注意 `--file` 要写 `res/layout/...`，写 `layout/...` 会报 `failed to find file.`。
+
+清单实况（发布后从公网回读）：`versionCode=18`、`sizeBytes=3,129,009`、**`notes` 长度 = 0**、
+`mandatory=False`。备份 `latest.json.bak-20261007-vc17`。
+公网复核：清单轮询第 1 轮即 18；按 `apkUrl` 实下载 HTTP 200、3,129,009 B；
+**仓内 / 发布目录 / 公网下载 / 清单四方 sha256 一致**。
+
+⚠️ 设备侧未核验：车机需下次上电自动升级并手动确认安装。这条布局修复的最终判据只能在真屏上看——
+弹窗里「立即下载 / 稍后」必须完整可见（见 `changelogs/3.2.7.md` 实车判据 1）。
