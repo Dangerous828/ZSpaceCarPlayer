@@ -51,12 +51,22 @@
         android:textSize="@dimen/card_sub_size"
         android:visibility="gone" />
 
+    <!--
+      更新说明必须**限高**：整个对话框是 wrap_content 的竖向 LinearLayout，说明区不设上限时
+      长文案会把下面两个按钮顶出 720p 横屏之外——车主原话「弹窗太高了，导致点不到更新按钮」
+      (2026-10-07 vc17 发布时我写的 notes 就有这么长)。
+      真正的规矩是**清单里 notes 一律留空**（完整变更记录在仓内 changelogs/，见
+      apks/release/README.md 的发版纪律）；这里的 maxLines + ellipsize 只是兜底，
+      防的是以后谁在服务端写了一大段又把升级入口挤没。
+    -->
     <TextView
         android:id="@+id/tvUpdateNotes"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
+        android:ellipsize="end"
         android:lineSpacingExtra="3dp"
+        android:maxLines="2"
         android:text="本次更新说明"
         android:textColor="@color/ink_dim"
         android:textSize="@dimen/card_title_size" />
