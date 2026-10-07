@@ -191,23 +191,83 @@ public final class BufferingPolicy {
     public static final int BUFFERING_STABLE_PERCENT = 95;
     /** 领先秒数 ≥ 该值即视为「稳定播放」。 */
     public static final long BUFFERING_STABLE_LEAD_SECONDS = 30L;
+    /** 位置在这个时长内推进过一次就算「还在出声」；比它长就认为声音冻住了。 */
+    public static final long AUDIO_ADVANCE_FRESH_MS = 3_000L;
+
+    /**
+     * 出声进展的纯判定（抽出来是因为本仓纪律：凡裁定都必须能在 host JVM 上单测，
+     * {@code SystemClock.elapsedRealtime()} 在单测里恒为 0，带真实时钟的实例方法推不动）。
+     *
+     * @param nowMs            当前单调时钟
+     * @param lastAdvanceAtMs  位置最近一次前进的时刻；{@code <=0} = 本轮从未推进过
+     * @return {@code true} = 不能断定"声音冻住了"。从未推进时<b>故意返回 true</b>：那可能只是
+     *         刚 prepared，也可能是这台设备的位置通道读不出数，两种都不该凭空显示「缓冲中…」——
+     *         此时判定权交回下载口径（prefill 期 percent 低，照样会显示）
+     */
+    public static boolean audioAdvancedRecently(long nowMs, long lastAdvanceAtMs) {
+        if (lastAdvanceAtMs <= 0L) {
+            return true;
+        }
+        return nowMs - lastAdvanceAtMs <= AUDIO_ADVANCE_FRESH_MS;
+    }
+
+    /**
+     * 测速窗口是否<b>可采</b>（2026-10-07 误判的根因闸门，抽出来钉成断言）。
+     *
+     * <p>三条都得满足，缺一条就是不测量而<b>不是</b>测出 0：
+     * ① {@code percent < 100}：整首已经落地，此后必然零新字节，读成 0B/s 就是"带宽不足"——
+     *    当晚 `percent 87→100`（链路健康、lead 稳 65s）之后 9 秒就被换了档；
+     * ② {@code contentLength > 0}：chunked 转码流没有总长，它的产率是转码器给的，不是链路的；
+     * ③ {@code durationMs > 0}：没有时长就没有"这首需要多少 B/s"，②③合起来就是所需速率。
+     */
+    public static boolean bandwidthSampleIsMeasurable(int percent, long contentLength,
+                                                      long durationMs) {
+        return percent >= 0 && percent < 100 && contentLength > 0L && durationMs > 0L;
+    }
+
+    /** 本曲「不抽干」所需速率 = 资源总长 / 时长；不可测时返回 -1（治理器据此不动任何结论）。 */
+    public static long requiredBytesPerSec(long contentLength, long durationMs) {
+        if (contentLength <= 0L || durationMs <= 0L) {
+            return -1L;
+        }
+        return contentLength * 1000L / durationMs;
+    }
 
     /**
      * 是否已进入稳定播放（可隐藏缓冲指示）。
      *
+     * <p><b>两扇门，任一门说卡就是卡</b>（2026-10-07 车主问「界面上那个缓冲中三个字对不上逻辑
+     * 了吧」——确实对不上，而且是两个相反方向都错）：
+     * <ul>
+     *   <li><b>下载口径</b>：percent / lead / remaining 三个数里任何一个达到稳定线就算下载侧稳。
+     *       它的好处是<b>前瞻</b>——{@code lead} 贴 0 而声音还没停时就能预告抽干，这条能力必须保留。</li>
+     *   <li><b>出声进展</b>：位置还在往前走。旧判据完全不看这一条，于是 {@code percent>=95} 或
+     *       {@code lead>=30} 会在声音真冻住时把指示藏起来（错法一）。</li>
+     * </ul>
+     *
+     * <p>旧判据的反向错法更要命：三个数<b>全都不可判</b>（{@code -1/-1/-1}，chunked 转码流就是
+     * 这样——{@code dur=0ms} 让 {@code remaining} 永远是 -1）时三条守卫全部落空，返回 false，
+     * UI 于是<b>恒亮且没有熄灭条件</b>；当晚上报里 {@code STUCK heartbeat percent=-1 lead=-1s
+     * remaining=-1s} 的那 4 首，声音连续播了两分钟，屏幕上一直挂着「缓冲中…」。所以不可判
+     * <b>不是证据</b>，不能当成"还在缓冲"，只能交给唯一剩下的证据——出声进展。
+     *
      * @param percent          已下载百分比；&lt;0 表示未知
      * @param leadSeconds      领先秒数；&lt;0 表示无法估算
      * @param remainingSeconds 剩余秒数；&lt;0 表示未知（剩余不多时也算稳定，不必再提示）
+     * @param audioAdvancing   播放位置最近是否在推进；{@code false} = 声音冻住了
      */
-    public static boolean isBufferingStable(int percent, long leadSeconds, long remainingSeconds) {
-        if (percent >= 0 && percent >= BUFFERING_STABLE_PERCENT) {
-            return true;
+    public static boolean isBufferingStable(int percent, long leadSeconds, long remainingSeconds,
+                                           boolean audioAdvancing) {
+        if (!audioAdvancing) {
+            return false;
         }
-        if (leadSeconds >= 0 && leadSeconds >= BUFFERING_STABLE_LEAD_SECONDS) {
-            return true;
-        }
-        // 剩余时长已不足一个稳定领先量：后面没有可担心的抽干，视为稳定
-        return remainingSeconds >= 0 && remainingSeconds <= BUFFERING_STABLE_LEAD_SECONDS;
+        boolean downloadStable =
+                (percent >= 0 && percent >= BUFFERING_STABLE_PERCENT)
+                        || (leadSeconds >= 0 && leadSeconds >= BUFFERING_STABLE_LEAD_SECONDS)
+                        // 剩余时长已不足一个稳定领先量：后面没有可担心的抽干，视为稳定
+                        || (remainingSeconds >= 0 && remainingSeconds <= BUFFERING_STABLE_LEAD_SECONDS);
+        boolean nothingKnown = percent < 0 && leadSeconds < 0 && remainingSeconds < 0;
+        return downloadStable || nothingKnown;
     }
 
     // ------------------------------------------------------------------ //

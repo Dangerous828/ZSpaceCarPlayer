@@ -48,11 +48,18 @@ namespace {
         // 每步都阻塞在 JNI 回调等环形缓冲重定位下载，网络卡死时最坏要等 30s 断流检测
         // 才失败，期间渲染线程冻结、与 close 3s 锁超时互相打架。武装后回调超时快速
         // 失败，dr_flac 立刻以读失败退出二分。只在 nativeSeekToFrame 期间武装。
+        //
+        // 2026-10-07 真车复盘：这个"绝对时刻"预算让**每一次**深断点恢复都必然失败——
+        // 一次 seek 要做 ~9 次二分跳读，每次都要重定位下载，10s 是根本不够的。所以拆成
+        // 两个：seekDeadlineMs 是挨饿截止，只在「连续 SEEK_STALL_MS 没有任何字节到达」时到期
+        // （每次成功读/重定位都往后推），seekHardCapMs 是不管多活跃都不许超过的总预算。
+        // 挂死仍然在 8 秒内收手，而慢但在推进的二分不再被误杀。
         std::atomic<long long> seekDeadlineMs;
+        std::atomic<long long> seekHardCapMs;
         long long pos;             // 当前绝对字节位：read 推进 / seek 重定位（单一权威游标）
 
         StreamBridge() : readerGlobal(nullptr), bufGlobal(nullptr), aborted(false),
-                         seekDeadlineMs(0), pos(0) {}
+                         seekDeadlineMs(0), seekHardCapMs(0), pos(0) {}
     };
 
     int detachIfNeeded() {
@@ -73,11 +80,16 @@ namespace {
     }
 
     // ---- 共享读/seek 实现 ----
-    // 单次 seek 的总时长预算。真车暴露：无 seektable 的 FLAC
-    // 走 dr_flac 全文件二分（19MB 约 9 次中点跳读），每次跳读都同步等环形缓冲重定位
-    // 下载；若远端挂死，回调会一直阻塞到 30s 断流检测兜底。超时后让回调立即失败，
-    // dr_flac 当作读失败尽快退出二分，由 Java 层如实上报走断点重试。
-    const long long SEEK_DEADLINE_MS = 10000;
+    // seek 期间的两个预算，缺一不可（2026-10-07 真车复盘把旧的单一 10s 绝对截止拆成这两条）：
+    //   · SEEK_STALL_MS —— 挨饿截止：连续这么久没有任何字节到达才算失败。每次成功读、
+    //     每次成功重定位都重新计时，所以"慢但在推进"的二分跳读不再被误杀。
+    //   · SEEK_TOTAL_MS —— 总预算：不管推进得多勤，一次 seek 也不许占住渲染线程这么久。
+    // 真车暴露：无 seektable 的 FLAC 走 dr_flac 全文件二分（19MB 约 9 次中点跳读），
+    // 旧值 10s 让每一次深断点恢复都必然失败（9 次重定位 × 每次重连+TLS+首字节就超了）；
+    // 而如果完全没有挨饿截止，远端挂死时回调会一直阻塞到 Java 侧 30s 断流检测才醒，
+    // 期间渲染线程冻结、与 close 3s 锁超时互相打架。
+    const long long SEEK_STALL_MS = 8000;
+    const long long SEEK_TOTAL_MS = 30000;
 
     // SEEK_CUR 前向小跳改为顺序读丢弃的上限。
     // 真车暴露：dr_flac open 时 onMeta=NULL，对 PICTURE（嵌入封面 MB 级）/PADDING
@@ -86,6 +98,12 @@ namespace {
     // 经历 3~5 次断连风暴（约 10-20s），这正是「大分类第一首歌加载很久」与断点
     // 恢复 9 次重定位突发的共同根因。上限内的前向跳读改为读入临时缓冲丢弃：
     // 下载线程零断连，代价仅 memcpy 与环形滑动，弱网下比断连重连快一个量级。
+    //
+    // 但这条优化**只适用于 open 期的元数据跳读**（那批字节反正要过网，丢不丢都一样）。
+    // 用户发起的 seek（断点恢复 / 拖进度条）走同一条路的代价是 MB 级的无用流量：实测
+    // 2026-10-07 Bad Romance 38,934,625B / 132,133B/s，断点 56,099ms ≈ 7.4MB，落在 8MB
+    // 上限**以内**，于是它去顺序下载 7.4MB 永远不会播的字节，任何预算内都追不完。
+    // 所以 seek 期间（截止已武装）一律改走一次 Range 重定位。
     const long long FORWARD_SKIP_MAX_BYTES = 8LL * 1024 * 1024;
 
     long long steadyNowMs() {
@@ -96,9 +114,20 @@ namespace {
     // seek 截止已到（或已 abort）：读/seek 回调必须快速失败
     bool callbackDeadlineExceeded(StreamBridge *b) {
         if (b->aborted.load()) return true;
+        long long now = steadyNowMs();
+        long long hardCap = b->seekHardCapMs.load();
+        if (hardCap != 0 && now > hardCap) return true;
         long long deadline = b->seekDeadlineMs.load();
-        return deadline != 0 && steadyNowMs() > deadline;
+        return deadline != 0 && now > deadline;
     }
+
+    // seek 期间每有一点进展就把挨饿截止往后推；未武装（open 期）时什么都不做
+    void refreshSeekStallDeadline(StreamBridge *b) {
+        if (b->seekDeadlineMs.load() != 0) {
+            b->seekDeadlineMs.store(steadyNowMs() + SEEK_STALL_MS);
+        }
+    }
+
 
     // 顺序读固定 from-position=b->pos（dr_* 顺序消费即读即推进；seek 走 bridgeSeek）
     size_t bridgeRead(StreamBridge *b, void *dst, size_t bytesToRead) {
@@ -121,6 +150,7 @@ namespace {
                     static_cast<char *>(dst) + total));
             b->pos += n;
             total += static_cast<size_t>(n);
+            refreshSeekStallDeadline(b);   // 有字节到达就不算挨饿：截止往后推
             if (n < want) break; // 短读：已到可用边界
         }
         attachDetach(nd);
@@ -152,10 +182,16 @@ namespace {
         // 二分 seek 的中点跳读多为前向——每次 reset 都是断连+TLS 握手+Range
         // 响应（弱网数秒），19MB 断点 seek 实测 9 次重定位突发；前向 ≤8MB
         // 一律顺序读丢弃，跳读零断连。后向跳数据流不可回退，仍走重定位。
-        if (origin == 1 && offset > 0 && offset <= FORWARD_SKIP_MAX_BYTES) {
+        //
+        // 例外：**用户发起的 seek（截止已武装）不走丢弃**。那批字节还没下载过，
+        // 丢弃就是把它整段过一遍蜂窝网（实测 7.4MB 断点 = 必然超时），而一次
+        // Range 重定位只要一个来回。open 期截止为 0，元数据跳读维持原样。
+        const bool seekArmed = b->seekDeadlineMs.load() != 0;
+        if (!seekArmed && origin == 1 && offset > 0 && offset <= FORWARD_SKIP_MAX_BYTES) {
             return bridgeSeekForwardByRead(b, offset);
         }
-        if (origin == 0 && offset >= b->pos && offset - b->pos <= FORWARD_SKIP_MAX_BYTES) {
+        if (!seekArmed && origin == 0 && offset >= b->pos
+                && offset - b->pos <= FORWARD_SKIP_MAX_BYTES) {
             return bridgeSeekForwardByRead(b, offset - b->pos);
         }
         long long target;
@@ -182,6 +218,7 @@ namespace {
         attachDetach(nd);
         if (ok != JNI_TRUE) return false;
         b->pos = target;
+        refreshSeekStallDeadline(b);   // 重定位成功就是推进，不该吃进下一次跳读的预算
         return true;
     }
 
@@ -409,10 +446,13 @@ Java_com_ktools_zspacecarplayer_dsp_NativeLosslessDecoder_nativeSeekToFrame(
     std::unique_lock<std::timed_mutex> lk(dec->apiMutex, std::defer_lock);
     if (!lk.try_lock()) return JNI_FALSE;
     if (dec->bridge.aborted.load()) return JNI_FALSE;
-    // 武装 seek 截止：期间任何读/seek 回调超过预算立即失败，杜绝网络挂死时
-    // 二分 seek 拖住渲染线程直至 30s 断流检测才醒（阶段 0 自审预警项，真车显形）
-    dec->bridge.seekDeadlineMs.store(steadyNowMs() + SEEK_DEADLINE_MS);
-    long long startedAt = steadyNowMs();
+    // 武装 seek 截止：期间任何读/seek 连续 SEEK_STALL_MS 拿不到字节就立即失败，杜绝网络
+    // 挂死时二分 seek 拖住渲染线程直至 30s 断流检测才醒（阶段 0 自审预警项，真车显形）；
+    // SEEK_TOTAL_MS 是总预算，不管推进多勤都不许超过。武装期间 bridgeSeek 不再走
+    // "前向顺序丢弃"（见该处注释），深断点改走一次 Range 重定位。
+    long long seekStartedAt = steadyNowMs();
+    dec->bridge.seekDeadlineMs.store(seekStartedAt + SEEK_STALL_MS);
+    dec->bridge.seekHardCapMs.store(seekStartedAt + SEEK_TOTAL_MS);
     bool ok = false;
     if (dec->format == FMT_FLAC) {
         ok = drflac_seek_to_pcm_frame(dec->flac, static_cast<drflac_uint64>(frameIndex)) == DRFLAC_TRUE;
@@ -422,10 +462,11 @@ Java_com_ktools_zspacecarplayer_dsp_NativeLosslessDecoder_nativeSeekToFrame(
         ok = drmp3_seek_to_pcm_frame(dec->mp3, static_cast<drmp3_uint64>(frameIndex)) == DRMP3_TRUE;
     }
     dec->bridge.seekDeadlineMs.store(0);
-    long long elapsed = steadyNowMs() - startedAt;
+    dec->bridge.seekHardCapMs.store(0);
+    long long elapsed = steadyNowMs() - seekStartedAt;
     if (!ok) {
-        LOGE("seek to frame %lld failed after %lldms (deadline %lldms)",
-             (long long) frameIndex, elapsed, SEEK_DEADLINE_MS);
+        LOGE("seek to frame %lld failed after %lldms (stall %lldms / total %lldms)",
+             (long long) frameIndex, elapsed, SEEK_STALL_MS, SEEK_TOTAL_MS);
     } else if (elapsed > 1000) {
         LOGI("seek to frame %lld slow: %lldms (binary-search relocations on weak link)",
              (long long) frameIndex, elapsed);

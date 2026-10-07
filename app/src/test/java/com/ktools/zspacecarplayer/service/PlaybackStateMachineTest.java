@@ -447,6 +447,55 @@ public class PlaybackStateMachineTest {
                 < PlaybackStateMachine.endOfTrackGuardMs());
     }
 
+    /**
+     * 「假播完」判定的输入就是 2026-10-07 真车那晚的真实数字：代理在总长未知时回复
+     * 无 Content-Length 的 close-delimited 流，下载中途放弃 = 抽取器眼里的合法曲尾。
+     */
+    @Test
+    public void prematureCompletionIsJudgedByPositionNotByFlags() {
+        // 219,493ms 的歌在 65,802ms 结束，且本流判过死 → 截断，绝不能当成播完
+        Assert.assertTrue(PlaybackStateMachine.isPrematureCompletion(219493L, 65802L, 0L, true));
+        // 真播完（差 2 秒到曲尾）→ 不得误判
+        Assert.assertFalse(PlaybackStateMachine.isPrematureCompletion(219493L, 217400L, 0L, true));
+        // 曲尾余量之内一律放过：宁可不救，也不把一首正常放完的歌拖进重试
+        Assert.assertFalse(PlaybackStateMachine.isPrematureCompletion(219493L,
+                219493L - PlaybackStateMachine.TRUNCATION_GUARD_MS + 1L, 0L, true));
+        // 元数据缺失（0）= 没有任何"应该播到哪儿"的依据 → 不判
+        Assert.assertFalse(PlaybackStateMachine.isPrematureCompletion(0L, 1000L, 0L, true));
+        // 播放器报回的真实时长优先于元数据：元数据偏大时不得误杀本来就短的歌流
+        Assert.assertFalse(PlaybackStateMachine.isPrematureCompletion(240000L, 101000L, 100000L, true));
+        Assert.assertTrue("真实时长更短时按真实时长判，仍然截得出来",
+                PlaybackStateMachine.isPrematureCompletion(240000L, 40000L, 100000L, true));
+        // 位置读不出来（-1）时不凭空判截断
+        Assert.assertFalse(PlaybackStateMachine.isPrematureCompletion(219493L, -1L, 0L, true));
+    }
+
+    /**
+     * 必须有"这条流出过事"的证据才许判截断。位置差本身不是证据：Jellyfin 的 FLAC 转码流
+     * 元数据常比真实吐出的字节偏大，那种正常播完在只看位置的判据下会被误杀成截断，
+     * 白白重试一次再报一句虚高的「无法播放」（审查发现的假阳性，2026-10-07）。
+     */
+    @Test
+    public void positionGapAloneIsNotEnoughToCallTruncation() {
+        Assert.assertFalse("没有判过死 → 一律当真播完",
+                PlaybackStateMachine.isPrematureCompletion(219493L, 65802L, 0L, false));
+        Assert.assertFalse("元数据偏大的正常结尾同样放过",
+                PlaybackStateMachine.isPrematureCompletion(240000L, 100000L, 0L, false));
+    }
+
+    /** 连着跳歌时那行字必须把"是链路在扩大"说出来，而不是每首各报一遍互不相干的话 */
+    @Test
+    public void giveUpMessageScalesWithTheStreak() {
+        Assert.assertEquals("多次重试仍无法播放，已跳过: A",
+                PlaybackStateMachine.describeGiveUp(1, "A", false));
+        Assert.assertEquals("曲目已不在服务器, 已跳过: A",
+                PlaybackStateMachine.describeGiveUp(1, "A", true));
+        Assert.assertEquals("已连续 2 首无法播放(最近: B), 请检查网络或刷新曲库",
+                PlaybackStateMachine.describeGiveUp(2, "B", false));
+        Assert.assertEquals("已连续 7 首无法播放(最近: G), 请检查网络或刷新曲库",
+                PlaybackStateMachine.describeGiveUp(7, "G", true));
+    }
+
     private PlaybackStateMachine readyToPlayWithFocus(PlaybackStateMachine.FocusState focus) {
         PlaybackStateMachine machine = new PlaybackStateMachine();
         machine.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);

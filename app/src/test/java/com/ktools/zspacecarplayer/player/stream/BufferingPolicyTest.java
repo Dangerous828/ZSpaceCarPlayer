@@ -157,16 +157,63 @@ public class BufferingPolicyTest {
 
     @Test
     public void bufferingStableHidesIndicator() {
-        // 已下载 >= 95% => 稳定
-        assertTrue(BufferingPolicy.isBufferingStable(BufferingPolicy.BUFFERING_STABLE_PERCENT, 0, 300));
-        // 领先 >= 30s => 稳定
-        assertTrue(BufferingPolicy.isBufferingStable(50, BufferingPolicy.BUFFERING_STABLE_LEAD_SECONDS, 300));
-        // 剩余不足一个稳定领先量 => 视为稳定（后面没有可担心的抽干）
-        assertTrue(BufferingPolicy.isBufferingStable(50, 5, BufferingPolicy.BUFFERING_STABLE_LEAD_SECONDS));
-        // 领先不足、剩余还多、百分比也不高 => 仍在缓冲
-        assertFalse(BufferingPolicy.isBufferingStable(50, 5, 300));
-        // 全未知 => 不稳定（继续显示「缓冲中…」）
-        assertFalse(BufferingPolicy.isBufferingStable(-1, -1, -1));
+        // 声音在往前走时，才轮到下载口径决定「能不能说稳定」
+        assertTrue(BufferingPolicy.isBufferingStable(
+                BufferingPolicy.BUFFERING_STABLE_PERCENT, 0, 300, true));
+        assertTrue(BufferingPolicy.isBufferingStable(
+                50, BufferingPolicy.BUFFERING_STABLE_LEAD_SECONDS, 300, true));
+        assertTrue(BufferingPolicy.isBufferingStable(
+                50, 5, BufferingPolicy.BUFFERING_STABLE_LEAD_SECONDS, true));
+        assertFalse(BufferingPolicy.isBufferingStable(50, 5, 300, true));
+        // 全未知 + 声音还在推进 => 稳定。这一条在 vc16 是 assertFalse，当晚被真车证伪：
+        // chunked 流上三个数恒为 -1，false 就是「缓冲中…」亮起来再没有熄灭条件，
+        // 而那 4 首的声音实际连续播了两分钟。不可判不是证据，不能当成还在缓冲。
+        assertTrue("不可判时由出声进展裁决，不许恒亮",
+                BufferingPolicy.isBufferingStable(-1, -1, -1, true));
+    }
+
+    /**
+     * 第二扇门：声音冻住了，下载口径再"好看"也不许把指示藏起来。
+     * 这是「缓冲中」对不上逻辑的反向形态——今晚之前它连看都不看位置。
+     */
+    @Test
+    public void stalledAudioOverridesDownloadArithmetic() {
+        assertFalse("percent 已满但声音不前进，不得判稳定",
+                BufferingPolicy.isBufferingStable(100, 65, 65, false));
+        assertFalse("lead 够长但声音冻住，同样不得判稳定",
+                BufferingPolicy.isBufferingStable(50, 600, 300, false));
+        assertFalse("连不可判也不能替冻住的声音说话",
+                BufferingPolicy.isBufferingStable(-1, -1, -1, false));
+    }
+
+    /**
+     * 测速可采门——今晚误判的根因闸门。特别是「已经下完」这一条：0 新字节是下载完成，
+     * 不是链路给不动。
+     */
+    @Test
+    public void bandwidthSamplingRequiresAKnownStillRunningDownload() {
+        assertTrue(BufferingPolicy.bandwidthSampleIsMeasurable(50, 38_934_625L, 294_661L));
+        assertFalse("整首已落地 → 不可采（今晚就是这里被读成 0B/s 后换了档）",
+                BufferingPolicy.bandwidthSampleIsMeasurable(100, 38_934_625L, 294_661L));
+        assertFalse("chunked 无总长 → 转码产率不是链路能力",
+                BufferingPolicy.bandwidthSampleIsMeasurable(-1, -1L, 0L));
+        assertFalse("时长未知 → 没有『所需速率』可算",
+                BufferingPolicy.bandwidthSampleIsMeasurable(50, 38_934_625L, 0L));
+        assertEquals("所需速率 = 总长/时长（Bad Romance 实测锚点）",
+                132_133L, BufferingPolicy.requiredBytesPerSec(38_934_625L, 294_661L));
+        assertEquals(-1L, BufferingPolicy.requiredBytesPerSec(-1L, 294_661L));
+        assertEquals(-1L, BufferingPolicy.requiredBytesPerSec(38_934_625L, 0L));
+    }
+
+    /** 出声进展：从未推进不算"冻住"，但推进过之后再停下就算。 */
+    @Test
+    public void audioAdvanceFreshnessRule() {
+        long fresh = BufferingPolicy.AUDIO_ADVANCE_FRESH_MS;
+        assertTrue("本轮从未推进（刚 prepared / 位置通道读不出）不得凭空判卡",
+                BufferingPolicy.audioAdvancedRecently(100_000L, 0L));
+        assertTrue(BufferingPolicy.audioAdvancedRecently(100_000L, 100_000L - fresh));
+        assertFalse("推进过之后再静止超过新鲜度窗口 = 声音冻住了",
+                BufferingPolicy.audioAdvancedRecently(100_000L, 100_000L - fresh - 1L));
     }
 
     @Test
@@ -209,10 +256,10 @@ public class BufferingPolicyTest {
     public void knownDurationRestoresNearEndJudgements() {
         // 流式 FLAC 容器里 percent/lead 恒为 -1：时长一旦接回播放器，
         // 「接近结尾算稳定」与「接近结尾无条件预取」两条判据才可能命中。
-        assertTrue(BufferingPolicy.isBufferingStable(-1, -1, 20));
-        assertFalse(BufferingPolicy.isBufferingStable(-1, -1, 300));
-        assertFalse("时长未知时仍是 -1，不许硬造稳定结论",
-                BufferingPolicy.isBufferingStable(-1, -1, -1));
+        assertTrue(BufferingPolicy.isBufferingStable(-1, -1, 20, true));
+        assertFalse(BufferingPolicy.isBufferingStable(-1, -1, 300, true));
+        assertTrue("三个数全不可判而声音在推进时按稳定处理（见 bufferingStableHidesIndicator 的复盘）",
+                BufferingPolicy.isBufferingStable(-1, -1, -1, true));
         assertTrue(BufferingPolicy.shouldPrefetchNext(-1, -1, 10, false, false, false));
         assertFalse(BufferingPolicy.shouldPrefetchNext(-1, -1, -1, false, false, false));
     }

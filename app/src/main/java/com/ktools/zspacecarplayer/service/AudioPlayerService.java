@@ -115,6 +115,27 @@ public class AudioPlayerService extends Service {
     /** lastTickPositionMs 属于哪首歌, 防止把上一首的断点带到新曲目上 */
     private String lastTickTrackId;
     /**
+     * 播放位置最近一次真正前进的时刻 ({@code SystemClock.elapsedRealtime()})；0 = 本轮播放
+     * 还从未推进过。缓冲指示的<b>第二扇门</b>用它：下载口径在 chunked 流上三个数全是 -1
+     * （不可判），那时"声音有没有往前走"是唯一拿得到的证据（2026-10-07「缓冲中」恒亮复盘）。
+     */
+    private long lastAudioAdvanceAtMs = 0L;
+    /** {@link #lastAudioAdvanceAtMs} 的比较基准；-1 = 未初始化（第一 tick 只建基准）。 */
+    private int lastHeardPositionMs = -1;
+    /** 当前发给 UI 的起播状态文字；只为幂等（同一句话不重复刷回调）。 */
+    private String playStatusText = null;
+    /**
+     * 本轮连续放弃了多少首（每次 GIVE_UP +1，任一首发出了声就归零）。
+     * 只为一件事：连着跳歌时让屏幕上那行字说出"这是链路在扩大，不是某一首歌的问题"。
+     */
+    private int giveUpSongStreak = 0;
+    /**
+     * 已经因为「假播完」被救过一次的那首歌 (2026-10-07)。一次性，防止
+     * "起播→截断→重试→又截断"在同一条路上原地打转：{@code handlePrepared} 每次成功
+     * 都会把 {@code streamRetryCount} 归零，所以重试预算本身拦不住这个循环。
+     */
+    private String truncationRetriedTrackId;
+    /**
      * 本次 generation 的「断点起播」目标 (2026-09-12 #1 兜底纠偏的武装条件)。
      * >0 表示这一轮是带着 song_progress 断点起播的 —— 只有这种情况才可能在起播后
      * 直接落到曲尾; 用户从头点播/自动切下一首 (startMs=-1) 一律不武装, 避免误纠偏。
@@ -155,13 +176,15 @@ public class AudioPlayerService extends Service {
     private volatile boolean prefillInProgress = false;
 
     /**
-     * 带宽治理器：持续追不上无损码率时，把**下一首**换成服务端 128kbps 流畅档。
+     * 带宽治理器：累计「链路持续追不上本曲所需速率」的证据。
      * 有状态但不跨进程存活——链路状况本来就是当下的事。
      */
     private final com.ktools.zspacecarplayer.player.stream.StreamRateGovernor rateGovernor =
             new com.ktools.zspacecarplayer.player.stream.StreamRateGovernor();
     /** 只用于"换档那一刻留一行证据"，避免每 tick 刷屏。 */
     private boolean lastDegradedState = false;
+    /** 治理器认定缺口的次数是否已留过痕：每次认定只落一行面包屑 (2026-10-07 流畅档误判复盘)。 */
+    private int lastDeficitConfirmations = 0;
     /** 上次 tick 上报的缓冲 percent / 状态 (2026-09-13 双进度条调查): 变化时打一行诊断日志 */
     private int lastReportedBufferPercent = Integer.MIN_VALUE;
     private boolean lastReportedBuffering = false;
@@ -243,6 +266,17 @@ public class AudioPlayerService extends Service {
          * @param buffering true = 仍在缓冲（应显示指示）；false = 稳定播放（应隐藏指示）
          */
         void onBufferingUpdate(int percent, boolean buffering);
+
+        /**
+         * 起播状态文字（2026-10-07 车主问「缓冲中那三个字对不上逻辑」后新增）。
+         *
+         * <p>带断点起播时，屏幕上原本只有一句含义不明的「缓冲中…」——而这段时间实际发生的事
+         * 是"正在回到上次位置"，弱网下无 seektable 的 FLAC 要做十几次重定位，可能十几秒。
+         * 与其让车主对着一个不动的进度条猜，不如把那件事说出来。
+         *
+         * @param text 要显示的状态文字；{@code null} / 空串 = 撤销这条，交回普通缓冲指示
+         */
+        void onPlayStatus(String text);
     }
 
     public class LocalBinder extends Binder {
@@ -462,6 +496,25 @@ public class AudioPlayerService extends Service {
                     int currentMs = player.getCurrentPosition();
                     int totalMs = player.getDuration();
 
+                    // 出声进展（缓冲指示的第二扇门）。特意不复用下面 stallTicks 的判定：那条
+                    // 还要求 totalMs > 0，而 chunked 流恰好 totalMs=0——正是最需要这条新证据的
+                    // 地方。这里只看位置动没动。
+                    if (lastHeardPositionMs < 0) {
+                        // 第一个 tick 只建基准，不算"前进"：否则刚 prepared 那一帧会把
+                        // 「正在回到上次位置…」当场擦掉，也会让出声进展一直判成"在推进"
+                        lastHeardPositionMs = currentMs;
+                    } else if (currentMs != lastHeardPositionMs) {
+                        lastHeardPositionMs = currentMs;
+                        lastAudioAdvanceAtMs = SystemClock.elapsedRealtime();
+                        // 出声往前走了 = 这一轮的"连续放弃"链断了，计数必须清零，
+                        // 否则下次真出事会报出一个虚高的 N
+                        giveUpSongStreak = 0;
+                        // 真的出声往前走了，"正在回到上次位置"这句话就到站
+                        if (playStatusText != null) {
+                            notifyPlayStatus(null);
+                        }
+                    }
+
                     // 起播后兜底纠偏 (2026-09-12 #1): prepared 回调可能报 0 时长 (流式/
                     // 实时转码拿不到 Content-Length), 系统 MediaPlayer 的真实时长也常在起播
                     // 后几个 tick 才收敛 —— 那两道按时长钳制的防线此时全都拦不住, 断点会
@@ -566,6 +619,10 @@ public class AudioPlayerService extends Service {
                     stallTicks = 0;
                     lastTickPositionMs = -1;
                     lastTickTrackId = null;
+                    // 离开出声态就重建成败基准：暂停/起播前的位置不该被下一个新曲继承，
+                    // 否则新曲第一 tick 一定"位置没变"，被误判成声音冻住
+                    lastHeardPositionMs = -1;
+                    lastAudioAdvanceAtMs = 0L;
                     preparingTicks = 0;
                     deadTicks = 0;
                     // 非出声态 (暂停/未准备) 持续刷新计数挂钟: 恢复播放后第一个
@@ -582,6 +639,31 @@ public class AudioPlayerService extends Service {
     // ---------------- 缓冲 % 上报 / 下一首预取 (2026-09-12 缓冲/预取) ----------------
 
     /**
+     * 发起播状态文字（幂等）。车机是 API 18，这里不能用 {@code java.util.Objects.equals}
+     * （那是 API 19+），所以手写空值比较。
+     */
+    private void notifyPlayStatus(String text) {
+        boolean same = (text == null) ? playStatusText == null : text.equals(playStatusText);
+        if (same) return;
+        playStatusText = text;
+        if (stateChangeListener != null) {
+            stateChangeListener.onPlayStatus(text);
+        }
+    }
+
+    /**
+     * 出声进展：播放位置在 {@link BufferingPolicy#AUDIO_ADVANCE_FRESH_MS} 内是否前进过。
+     *
+     * <p>本轮从未推进过（刚 prepared、或位置通道读不出数）时<b>返回 true</b>——那不是"声音冻住"
+     * 的证据，此时判定权交回下载口径（prefill 期 percent 低，照样会显示缓冲中）。这样写是为了
+     * 不把"读不到位置"这种设备/引擎差异凭空变成一条常驻的「缓冲中…」。
+     */
+    private boolean audioAdvancing() {
+        return BufferingPolicy.audioAdvancedRecently(
+                SystemClock.elapsedRealtime(), lastAudioAdvanceAtMs);
+    }
+
+    /**
      * 播放期间持续驱动缓冲 % 上报：prefill 门槛由播放器上报，进入播放后由本方法接管，
      * 每 tick 上报一次 percent + 是否仍处缓冲（稳定后 buffering=false，但 percent 照报，
      * 供 UI 双进度条的缓冲层持续推进）。跟着 500ms tick 走，频率天然不密。
@@ -594,17 +676,39 @@ public class AudioPlayerService extends Service {
         HttpProxyServer proxy = HttpProxyServer.getInstance();
         int percent = proxy.getBufferedPercent(url);
         // 链路速率采样：累计偏移单调（重连续传也继续加），所以直接喂给治理器即可。
-        // 只在"跨过窗口"时才会真的做一次判定，500ms tick 的密度不会把抖动放大成换档。
+        //
+        // 但**只有「总长已知、还没下完、且本曲时长已知」时才采**（2026-10-07 流畅档误判复盘）：
+        // ① percent=100 表示这首歌已经整首落地，此后必然 0 新字节——那被 vc16 当成 0KB/s 的
+        //    "带宽不足"，实测当晚 percent 87→100、lead 稳在 65s 的健康直播曲 9 秒后就被换档；
+        // ② percent=-1 是 chunked 转码流（无 Content-Length），它既测不出链路能力，也不该拿
+        //    转码产率当链路。两种不可采的时刻都要重开窗口基准，否则下一段真实下载会被
+        //    接到一个过期基准上算出荒谬速率。
+        // 所需速率 = 资源总长 / 本曲时长，即"不抽干"的最小值；治理器在它之上留 15% 上浮。
         long downloadedBytes = proxy.getDownloadedBytes(url);
+        long contentLength = proxy.getContentLength(url);
+        long requiredBytesPerSec = BufferingPolicy.requiredBytesPerSec(contentLength, totalMs);
         if (downloadedBytes >= 0L) {
-            rateGovernor.onProgress(SystemClock.elapsedRealtime(), downloadedBytes);
+            if (BufferingPolicy.bandwidthSampleIsMeasurable(percent, contentLength, totalMs)) {
+                rateGovernor.onProgress(SystemClock.elapsedRealtime(), downloadedBytes,
+                        requiredBytesPerSec);
+            } else {
+                rateGovernor.rebaseWindow();
+            }
+            int deficits = rateGovernor.getDeficitConfirmations();
+            if (deficits != lastDeficitConfirmations) {
+                lastDeficitConfirmations = deficits;
+                CrashMonitor.breadcrumb("play", "bitrate deficit #" + deficits
+                        + " required=" + rateGovernor.getLastRequiredBytesPerSec()
+                        + "B/s est=" + rateGovernor.getLastWindowBytesPerSec() + "B/s"
+                        + " tier=" + (rateGovernor.isDegraded() ? "smooth" : "unchanged"));
+            }
             boolean nowDegraded = rateGovernor.isDegraded();
             if (nowDegraded != lastDegradedState) {
                 lastDegradedState = nowDegraded;
-                long est = rateGovernor.getLastWindowBytesPerSec();
                 CrashMonitor.breadcrumb("play", "bitrate tier "
                         + (nowDegraded ? "-> smooth(128k)" : "-> lossless")
-                        + " est=" + (est > 0L ? est / 1024L : -1L) + "KB/s");
+                        + " required=" + rateGovernor.getLastRequiredBytesPerSec()
+                        + "B/s est=" + rateGovernor.getLastWindowBytesPerSec() + "B/s");
             }
         }
         long remainingSeconds = totalMs > 0 ? Math.max(0, (totalMs - currentMs) / 1000) : -1L;
@@ -612,7 +716,8 @@ public class AudioPlayerService extends Service {
         // 稳定后仍持续上报 (2026-09-13 双进度条): UI 文字指示靠 visibility 幂等隐藏,
         // 不会反复闪烁; 而缓冲进度层需要每 tick 的 percent 跟随下载头持续推进,
         // 像「视频加载」一样长条推进。跟着 500ms tick 走, 频率依然不密。
-        boolean buffering = !BufferingPolicy.isBufferingStable(percent, leadSeconds, remainingSeconds);
+        boolean buffering = !BufferingPolicy.isBufferingStable(percent, leadSeconds, remainingSeconds,
+                audioAdvancing());
         // 变化时打一行 (2026-09-13 双进度条实车调查): 实测 UI 偶现「缓冲 0%」卡住,
         // 用这行日志钉死 tick 查询到的 percent / lead 值, 定位是源查询错还是阈值判定错
         if (percent != lastReportedBufferPercent || buffering != lastReportedBuffering) {
@@ -714,8 +819,9 @@ public class AudioPlayerService extends Service {
     }
 
     /**
-     * 起播/预取实际用的 URL：默认沿用该曲入库时定下的传输方式；被治理器判定链路持续追不上无损时，
-     * 换服务端 128kbps 流畅档。
+     * 起播/预取实际用的 URL：默认沿用该曲入库时定下的传输方式；只有档位被显式切到流畅档
+     * （{@link StreamRateGovernor#forceDegraded()}，或 {@code AUTO_DEGRADE_ENABLED} 被打开）才换
+     * 服务端 128kbps 流畅档。
      *
      * <p>只影响**下一首**：中途换 URL 一定断音。代价说清楚——若档位恰好在"预取之后、消费之前"翻转，
      * 作废会打空、那次预取白做（由 {@code MAX_SOURCES} 淘汰兜住），不会播错内容。
@@ -725,7 +831,7 @@ public class AudioPlayerService extends Service {
             String degraded = client.getDegradedStreamUrl(itemId);
             if (degraded != null && degraded.length() > 0) {
                 CrashMonitor.breadcrumb("play", "start on smooth tier id=" + itemId
-                        + " est=" + (rateGovernor.getLastWindowBytesPerSec() / 1024L) + "KB/s");
+                        + " est=" + rateGovernor.getLastWindowBytesPerSec() + "B/s");
                 return degraded;
             }
         }
@@ -906,6 +1012,16 @@ public class AudioPlayerService extends Service {
         CrashMonitor.breadcrumb("play", "startPlayback " + song.getName()
                 + " id=" + song.getId() + " seek=" + pendingSeekMs
                 + " origin=" + origin + " fade=" + fadeExistingPlayer);
+        // 新一轮起播先把"上一次说过的那句"作废：{@code playStatusText} 是 notifyPlayStatus 的
+        // 幂等键，不清就等于把下一首的同款提示也吞掉（UI 那边在 onSongChanged 里已经自己清了）
+        playStatusText = null;
+        // 用户主动点的歌给一次全新的"假播完救援"机会与一次全新的连续放弃计数；
+        // 自动链路不换（同一首被自动重试时若每次都放行救援，就会变成 prepare→截断→prepare 的无声循环）
+        if (origin == PlaybackStateMachine.PlaybackOrigin.USER_UI
+                || origin == PlaybackStateMachine.PlaybackOrigin.MEDIA_BUTTON) {
+            truncationRetriedTrackId = null;
+            giveUpSongStreak = 0;
+        }
         cancelSeekTimeout();
         activeSeekOperationId = -1L;
         queuedSeekOperationId = -1L;
@@ -1018,6 +1134,46 @@ public class AudioPlayerService extends Service {
                         startedWithResumeMs > 0, playedMs, badResumeCorrected)) {
                     correctBadResumePoint("completed too fast after resume",
                             safePlayerPositionMs(), realDurationMs);
+                    return;
+                }
+                // 兜底之三 (2026-10-07): 「假播完」。本地代理在总长未知时回复的是没有
+                // Content-Length、也没有 chunked 的 close-delimited 流，"连接关了"就是那个响应的
+                // 合法结束——下载中途放弃时抽取器看到的是曲尾，日志里只是一句
+                // 「MediaCodec reached end of audio stream」。真车当晚: 219,493ms 的歌在 65,802ms
+                // "播完"、续播点被当听完清零、静默跳下一首，屏幕上没有任何解释。
+                // 位置取最后一次 tick 的值（此刻再问播放器可能已经归零，而"播到哪儿了"是唯一的证据）。
+                long endedAtMs = lastTickPositionMs >= 0
+                        ? lastTickPositionMs : safePlayerPositionMs();
+                long metaMs = finishedSong != null ? finishedSong.getDurationMs() : 0L;
+                boolean abortDeclared = false;
+                if (currentRemoteUrl != null && currentRemoteUrl.length() > 0) {
+                    abortDeclared = HttpProxyServer.getInstance().isSourceFatalEver(currentRemoteUrl);
+                }
+                if (PlaybackStateMachine.isPrematureCompletion(
+                        metaMs, endedAtMs, realDurationMs, abortDeclared)) {
+                    final String trackId = finishedSong != null ? finishedSong.getId() : null;
+                    final String truncatedName = finishedSong != null ? finishedSong.getName() : "当前曲目";
+                    CrashMonitor.breadcrumb("play", "premature eos at " + endedAtMs + "ms of "
+                            + metaMs + "ms song=" + truncatedName);
+                    if (trackId != null && !trackId.equals(truncationRetriedTrackId)) {
+                        // 第一次: 按 I/O 错误处理，带断点重试本曲（续播点绝不能清零）
+                        truncationRetriedTrackId = trackId;
+                        pendingSeekMs = (int) Math.min(endedAtMs, (long) Integer.MAX_VALUE);
+                        handlePlayerError(MediaPlayer.MEDIA_ERROR_IO,
+                                "stream truncated before its end", generation);
+                        return;
+                    }
+                    // 救过一次还在同一处被截断: 不再原地循环，跳下一首，但要说清原因、
+                    // 并且**不清零**续播点——这首歌根本没听完，下次网络好了该从原处接上
+                    giveUpSongStreak++;
+                    if (stateChangeListener != null) {
+                        stateChangeListener.onError(PlaybackStateMachine.describeGiveUp(
+                                giveUpSongStreak, truncatedName, false));
+                    }
+                    if (currentPlayMode == MODE_SINGLE_REPEAT) {
+                        return; // 单曲循环下不跳歌，等下一次用户操作或看门狗
+                    }
+                    playNext(PlaybackStateMachine.PlaybackOrigin.AUTO_RESUME);
                     return;
                 }
                 // 真播完: 该曲断点必须清零 (2026-09-12 #1 残留根因)。落库是 5s 节流的,
@@ -2005,6 +2161,9 @@ public class AudioPlayerService extends Service {
             startedWithResumeMs = seekMs;
             resumeGuardTicks = 0;
             badResumeCorrected = false;
+            // 弱网下这一步可能占掉十几秒（无 seektable 的 FLAC 二分要十几次重定位），
+            // 屏幕上必须有句话说清"在等什么"，否则只剩一个不动的进度条和一句「缓冲中…」
+            notifyPlayStatus("正在回到上次位置…");
             long seekOperation = playbackState.beginSeekOperation();
             performSeek(seekMs, generation, seekOperation);
             return;
@@ -2030,6 +2189,8 @@ public class AudioPlayerService extends Service {
         playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.ERROR);
         stallRecovering = false;
         invalidateSeekOperations();
+        // 断点没回到位就别再挂着「正在回到上次位置…」——错误自有 toast 说话
+        notifyPlayStatus(null);
         // v3 引擎的负值错误码 (DECODE_FAILED / STREAM_STALL) 一律按可恢复的网络/解码类错误重试;
         // 慢网 (1,-19) 是传输层瞬时错误, 同样可恢复, 否则看门狗每轮重启都复现一次 GIVE_UP
         boolean transientTransport = !playerIsV3
@@ -2114,10 +2275,10 @@ public class AudioPlayerService extends Service {
         // (2026-09-22 上报复盘：断点续播撞 Failed to instantiate extractor 三首全中)。
         SongItem abandoned = getCurrentSong();
         String abandonedName = abandoned != null ? abandoned.getName() : "当前曲目";
+        giveUpSongStreak++;
         if (stateChangeListener != null) {
-            stateChangeListener.onError(missingResource
-                    ? "曲目已不在服务器, 已跳过: " + abandonedName
-                    : "多次重试仍无法播放，已跳过: " + abandonedName);
+            stateChangeListener.onError(PlaybackStateMachine.describeGiveUp(
+                    giveUpSongStreak, abandonedName, missingResource));
         }
         CrashMonitor.breadcrumb("play", missingResource
                 ? "gone on server, skip " + abandonedName

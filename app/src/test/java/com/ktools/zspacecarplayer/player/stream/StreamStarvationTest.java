@@ -1,6 +1,8 @@
 package com.ktools.zspacecarplayer.player.stream;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -97,5 +99,20 @@ public class StreamStarvationTest {
     @Test
     public void clockSkewBackwardsIsOk() {
         assertEquals(OK, BufferedHttpSource.starveVerdict(50_000L, 0L, 50_000L, 0, 20_000L));
+    }
+
+    /**
+     * 只有能用 Range 续传的流，"换个连接从头挨着续下"才是自愈。
+     * 2026-10-07 真车：流畅档（chunked 转码流）不支持 Range，重连等于让服务端从 0 重转、
+     * 客户端丢弃已下字节——两次 stall 的 bufEnd 一模一样（零字节），随后 starve FATAL 把
+     * 一首 219,493ms 的歌在 65,802ms 处打断。所以不可续传的流必须完全不走这条判定。
+     */
+    @Test
+    public void reconnectOnlyHelpsResumableSources() {
+        assertTrue(BufferedHttpSource.starvationReconnectUseful(true, -1L));
+        assertTrue(BufferedHttpSource.starvationReconnectUseful(false, 38_934_625L));
+        assertFalse("chunked 无总长：重连是自伤",
+                BufferedHttpSource.starvationReconnectUseful(false, -1L));
+        assertFalse(BufferedHttpSource.starvationReconnectUseful(false, 0L));
     }
 }

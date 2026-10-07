@@ -85,6 +85,12 @@ public class BufferedHttpSource {
     private boolean remoteAcceptsRanges = false;
     private boolean metaReady = false;   // 首个响应头已解析（contentLength/contentType 可用）
     private String fatalError = null;    // 下载侧不可恢复错误（reset 可清除自愈）
+    /**
+     * 本流是否<b>曾经</b>判过死：{@code requestResetLocked()} 会把 {@link #fatalError} 清成 null
+     * 实现自愈，但"判过死"这件事必须留下记录——上层要靠它区分真播完与假播完（2026-10-07）。
+     * 与 {@code fatalError} 同锁保护，只随本流生灭，不随重定位/重连复位。
+     */
+    private boolean fatalLatched = false;
     /** ≥0 表示本轮被服务端判为"资源已不存在"，读侧要抛可识别的类型而不是普通 IO 异常。 */
     private volatile int goneHttpStatus = -1;
 
@@ -107,6 +113,8 @@ public class BufferedHttpSource {
     private long starvedSinceMs = -1L;
     /** 连续判定为饥饿的次数；某个窗口喂得上就清零 */
     private int starveStallCount = 0;
+    /** 不可续传流上忽略挨饿判定的留痕只写一次，免得每 20s 刷一行 (2026-10-07)。 */
+    private boolean starveSuppressionLogged = false;
 
     // ---- 当前活动下载连接 (用于 abort/reset 时打断阻塞的底层 read) ----
     private HttpURLConnection activeConn = null;
@@ -310,6 +318,13 @@ public class BufferedHttpSource {
      * 带退避续传，已缓冲的窗口内容不丢），给弱网一次自愈机会；仍救不回来才置 fatalError，
      * 让读者的 readAt 抛出，由上层如实报错重试——绝不允许无限静默等待。
      *
+     * <p><b>但这条只适用于能用 Range 续传的流。</b>不可续传时（chunked 转码流）重连不是自愈而是
+     * 自伤：服务端从 0 重转、客户端把已下的整段丢掉再拉一遍，2026-10-07 真车的四条面包屑就是
+     * {@code starve stall 1/2 → 2/2（两次 bufEnd 一模一样 = 零字节）→ starve FATAL}，随后
+     * {@code MediaCodec reached end of audio stream} 把一首 219,493ms 的歌在 65,802ms 处腰斩。
+     * 这种流的"连接真死了"由 {@code readAt} 的 {@link #STALL_TIMEOUT_MS} 无进展判定负责——它读的
+     * 是下载侧的字节推进，那才是本流唯一可信的信号。
+     *
      * @return true 表示已采取动作，调用方须重新走一遍 readAt 判定
      */
     private boolean handleStarvationLocked(long now, long position) {
@@ -317,6 +332,16 @@ public class BufferedHttpSource {
                 && now - starveWindowStartMs >= STARVE_WINDOW_MS;
         int verdict = starveVerdict(starveWindowStartMs, starvedAccumMs, starvedSinceMs,
                 starveStallCount, now);
+        if (verdict != STARVE_OK
+                && !starvationReconnectUseful(remoteAcceptsRanges, contentLength)) {
+            rollStarveWindowLocked(now);
+            if (!starveSuppressionLogged) {
+                starveSuppressionLogged = true;
+                CrashMonitor.breadcrumb("stream", "starve ignored: source not resumable"
+                        + " (chunked, no Range) pos=" + position + " url=" + url);
+            }
+            return false;
+        }
         if (verdict == STARVE_OK) {
             if (windowRolled) {
                 rollStarveWindowLocked(now);
@@ -364,11 +389,25 @@ public class BufferedHttpSource {
         starvedAccumMs = 0L;
         starvedSinceMs = -1L;
         starveStallCount = 0;
+        starveSuppressionLogged = false;
     }
 
     static final int STARVE_OK = 0;
     static final int STARVE_RECONNECT = 1;
     static final int STARVE_FATAL = 2;
+
+    /**
+     * 读者挨饿时，换连接这件事有没有意义：服务端明确回过 206（{@code remoteAcceptsRanges}），
+     * 或资源总长已知（那就是能按字节寻址的原件直传），才有意义。
+     *
+     * <p>两者皆无 = chunked 转码流。实测（2026-10-07，直接拿设备上报里的 URL 打服务端）
+     * {@code stream.mp3?...static=false&maxStreamingBitrate=} 与 {@code stream.flac?...static=false
+     * &audioCodec=flac} 都是 {@code Transfer-Encoding: chunked} + {@code Accept-Ranges: none}，
+     * 带 {@code Range: bytes=1000000-} 重发仍是 200 且首字节回到文件开头。
+     */
+    static boolean starvationReconnectUseful(boolean remoteAcceptsRanges, long contentLength) {
+        return remoteAcceptsRanges || contentLength > 0L;
+    }
 
     /**
      * 纯判定：本窗口是否已滚动，以及滚动后读者挨饿到什么程度该做什么。
@@ -573,6 +612,17 @@ public class BufferedHttpSource {
         }
     }
 
+    /**
+     * 本流此刻判死，<b>或曾经判过死</b>。服务层区分真播完与假播完要用这条，不能用
+     * {@link #hasFatalError()}：重定位（{@code requestResetLocked}）会为了自愈把实时标志清掉，
+     * 而真车当晚恰恰是"判死→重连续下 2MB→假 EOS"，只看实时标志就漏判。
+     */
+    public boolean hasLatchedFatal() {
+        synchronized (lock) {
+            return fatalLatched || fatalError != null;
+        }
+    }
+
     public int getRefCount() {
         synchronized (lock) {
             return refCount;
@@ -681,6 +731,12 @@ public class BufferedHttpSource {
         eof = false;
         bufStart = position;
         bufEnd = position;
+        // **先 latch 再清**：这一句就是 2026-10-07 那晚的取证关键。starve FATAL 之后流又重连
+        // 续下了约 2MB（reader pos 2,213,217 → 4,437,358），等假 EOS 到达时 fatalError 早被这里
+        // 抹平了——只看实时标志会漏判。闩锁只随本新生效，"这条流曾经判过死"从此不会被洗掉。
+        if (fatalError != null) {
+            fatalLatched = true;
+        }
         fatalError = null;
         goneHttpStatus = -1;
         lastProgressAtMs = SystemClock.elapsedRealtime();

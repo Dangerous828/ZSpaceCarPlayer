@@ -927,6 +927,12 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                         if (!isRendering.get()) {
                             break; // 拆机期间的滞留 EOS：不是真播完，别触发自动切歌
                         }
+                        // 这里**不**判断"下载侧是否已判死"来区分真播完与假播完：
+                        // requestResetLocked() 会把 fatalError 清零，而真车的证据是判死之后流
+                        // 又重连续下了约 2MB —— 等 EOS 到达时那个标志早没了。总长未知的
+                        // close-delimited 响应下"中途断"和"播完"在抽取器视角本来就不可区分。
+                        // 裁定放在服务层，用不会被清掉的证据（播到哪儿 vs 应该播到哪儿），
+                        // 见 PlaybackStateMachine.isPrematureCompletion。
                         mainHandler.post(new Runnable() {
                             @Override
                             public void run() {

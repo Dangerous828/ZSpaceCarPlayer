@@ -231,6 +231,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         public void onServiceDisconnected(ComponentName name) {
             isBound = false;
             playerService = null;
+            // 服务都没了，屏幕上那句「缓冲中…」立刻变成谎话；重绑后由状态回调重新决定
+            hideBufferingIndicator();
         }
     };
 
@@ -2171,6 +2173,9 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         // 切歌即给出缓冲反馈 (2026-09-12 缓冲/预取): 起播门槛 / 加载期间先显「缓冲中…」,
         // 后续 onBufferingUpdate 会刷新百分比并在稳定后隐藏
         if (tvBuffering != null) {
+            // 新曲开始时上一首的状态文字作废（服务若要给这一首发「正在回到上次位置…」
+            // 会自己回调 onPlayStatus）
+            playStatusText = null;
             tvBuffering.setText("缓冲中…");
             tvBuffering.setVisibility(View.VISIBLE);
         }
@@ -2220,7 +2225,50 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     @Override
     public void onPlayStateChanged(boolean isPlaying) {
         btnPlayPause.setText(isPlaying ? "||" : "▶");
+        // 暂停态没有任何"正在缓冲"可言，而服务的 tick 此时根本不跑（不会再报 buffering=false
+        // 来收尾），文字会永久挂着 (2026-10-07「缓冲中」熄灭时机补全)。
+        // 例外：服务显式给了一句状态文字（「正在回到上次位置…」）——那正是"没在出声但也没在
+        // 暂停"的断点定位窗口，此时隐藏就等于把要传达的信息删掉。
+        if (!isPlaying && playStatusText == null) {
+            hideBufferingIndicator();
+        }
         saveCurrentState();
+    }
+
+    /**
+     * 「缓冲中…」的<b>唯一</b>隐藏出口 (2026-10-07)。
+     *
+     * <p>这块文字原先只有 {@code onBufferingUpdate(buffering=false)} 一处能把它灭掉，而服务的
+     * tick 只在 {@code isPlaying() && isPrepared()} 时才上报——于是错误、暂停、解绑这三种
+     * "根本没有播放在进行"的时刻，文字会一直挂着，和实际发生的事毫无关系。幂等（先判 visibility）
+     * 是因为这条会在进度回调里被反复调用，不能每帧重设一次布局。
+     */
+    private void hideBufferingIndicator() {
+        playStatusText = null;
+        if (tvBuffering != null && tvBuffering.getVisibility() != View.GONE) {
+            tvBuffering.setVisibility(View.GONE);
+        }
+    }
+
+    /**
+     * 服务下发的起播状态文字（如「正在回到上次位置…」）。非空期间它<b>占住</b>这块文字，
+     * 普通缓冲百分比不再改写——否则 500ms tick 每帧都会把这句话冲成「缓冲中…」，
+     * 车主又回到"对着一个不动的进度条猜"的状态。
+     */
+    private String playStatusText = null;
+
+    @Override
+    public void onPlayStatus(String text) {
+        if (tvBuffering == null) return;
+        if (text == null || text.length() == 0) {
+            hideBufferingIndicator();
+            return;
+        }
+        playStatusText = text;
+        tvBuffering.setText(text);
+        if (tvBuffering.getVisibility() != View.VISIBLE) {
+            tvBuffering.setVisibility(View.VISIBLE);
+        }
     }
 
     /**
@@ -2233,10 +2281,11 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     public void onBufferingUpdate(int percent, boolean buffering) {
         updateSeekBufferFill(percent);
         if (tvBuffering == null) return;
+        if (playStatusText != null) {
+            return; // 状态文字占位期间不接受缓冲百分比改写
+        }
         if (!buffering) {
-            if (tvBuffering.getVisibility() != View.GONE) {
-                tvBuffering.setVisibility(View.GONE);
-            }
+            hideBufferingIndicator();
             return;
         }
         tvBuffering.setText(percent < 0 ? "缓冲中…" : "缓冲 " + percent + "%");
@@ -2357,6 +2406,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
     @Override
     public void onError(String message) {
+        // 错误自有 toast 表达；屏幕上再挂一个「缓冲中…」只会把归因带偏成"还在加载"
+        hideBufferingIndicator();
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 

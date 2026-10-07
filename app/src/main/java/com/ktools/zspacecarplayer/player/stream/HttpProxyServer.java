@@ -220,6 +220,22 @@ public final class HttpProxyServer {
     }
 
     /**
+     * 当前曲的源是否<b>判过死</b>（含已被重定位清掉的那次）。服务层用它与"播到哪儿 vs 应该播到哪儿"
+     * 一起裁定一次 COMPLETED 是真播完还是假播完（总长未知的 close-delimited 响应里，中途放弃与
+     * 曲尾对抽取器不可区分，2026-10-07 真车复盘）。无活动源返回 false。
+     */
+    public boolean isSourceFatalEver(String remoteUrl) {
+        synchronized (sourceLock) {
+            for (BufferedHttpSource source : sources.values()) {
+                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
+                    return source.hasLatchedFatal();
+                }
+            }
+            return false;
+        }
+    }
+
+    /**
      * 预取「下一首」：为 remoteUrl 建一个预取源并预热下载线程，eager 下载到
      * {@link BufferingPolicy#prefetchCapacityBytes()}（约 2MB）即休眠，绝不 free-slide 抢当前曲带宽。
      *

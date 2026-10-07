@@ -479,6 +479,67 @@ public final class PlaybackStateMachine {
     }
 
     /**
+     * 放弃某一首时要给车主看的那句话 (2026-10-07)。
+     *
+     * <p>为什么要把文案放进状态机而不是服务里拼：连着跳歌时"这是同一件事在扩大"这层信息
+     * 必须**长在同一行上**才读得出来——再叠一条独立 toast 只会变成刷屏（服务原本就为此
+     * 设了 {@link #shouldNotifyError} 的闸门）。文案是判据的一部分，所以它该被单测钉住。
+     *
+     * @param consecutiveGiveUps 本轮连续放弃了第几首（从 1 起）
+     */
+    public static String describeGiveUp(int consecutiveGiveUps, String songName,
+                                        boolean missingResource) {
+        String one = missingResource
+                ? "曲目已不在服务器, 已跳过: " + songName
+                : "多次重试仍无法播放，已跳过: " + songName;
+        if (consecutiveGiveUps < 2) {
+            return one;
+        }
+        return "已连续 " + consecutiveGiveUps + " 首无法播放(最近: " + songName + "), 请检查网络或刷新曲库";
+    }
+
+    /** 「离曲尾还差这么多就认为根本没播完」的余量 (2026-10-07)。 */
+    public static final long TRUNCATION_GUARD_MS = 15_000L;
+
+    /**
+     * 「假播完」判定：结束位置离曲尾还差得远时，这不是播完，是流在中途被掐断了。
+     *
+     * <p>为什么需要它（2026-10-07 真车，一首 219,493ms 的歌在 65,802ms 就"播完"并跳下一首，
+     * 屏幕上没有任何解释）：本地代理在<b>资源总长未知</b>时回复的是
+     * {@code 200 OK} + <b>没有 Content-Length、也没有 chunked</b> 的 close-delimited 流
+     * （{@code HttpProxyServer.serveRange}）。对 HTTP/1.1 来说"连接关了"就是这个响应的合法
+     * 结束，所以下载中途放弃 = 抽取器看到曲尾，谁也分不出来。声明了总长的那条路（原件直传
+     * {@code static=true}）反而没这个洞——少发了字节就是协议错误。同一件事还顺带解释了
+     * 上报里的 {@code prepared dur=0ms}：没长度就没时长。
+     *
+     * <p>所以判据不能依赖"下载侧是否已判死"那个标志：{@code BufferedHttpSource.requestResetLocked()}
+     * 会把 {@code fatalError} 清成 null，而当晚的证据就是判死之后流又重连续下了约 2MB——
+     * 等到 EOS 那一刻标志位早没了。**唯一不会被清掉的证据是"播到哪儿了"对"应该播到哪儿"。**
+     *
+     * @param metaDurationMs Jellyfin 元数据时长；{@code <=0} = 没有依据，一律不判截断
+     * @param endedAtMs      结束时的播放位置（服务最后一次 tick 的位置，不是播放器此刻的查询值）
+     * @param realDurationMs 播放器报回的真实时长；{@code >0} 时以它为准（元数据比转码流偏大是老问题，
+     *                       见 {@link #sanitizeProgressForSave}），不许拿元数据误杀一首本来就短的歌
+     * @param streamDeclaredAbort 本流<b>曾经</b>被下载侧判过死（闩锁，不会被重定位清掉）。
+     *                       必须有它才许判截断：位置差本身不是证据——Jellyfin 的 FLAC 转码流
+     *                       元数据常比真实吐出的字节偏大，那种"正常播完"在只看位置的判据下
+     *                       会被误杀成截断，然后白白重试一次、再报一句虚高的「无法播放」。
+     *                       真车当晚（2026-10-07）有这条证据：{@code starve FATAL} 先落下，
+     *                       之后假 EOS 才到
+     */
+    public static boolean isPrematureCompletion(long metaDurationMs, long endedAtMs,
+                                                long realDurationMs, boolean streamDeclaredAbort) {
+        if (!streamDeclaredAbort) {
+            return false;
+        }
+        if (metaDurationMs <= 0L) {
+            return false;
+        }
+        long expectedMs = realDurationMs > 0L ? realDurationMs : metaDurationMs;
+        return endedAtMs >= 0L && endedAtMs < expectedMs - TRUNCATION_GUARD_MS;
+    }
+
+    /**
      * 同一轮起播未成功期间 (errorStreak 从 1 起计) 只提示用户一次。慢网下看门狗按指数退避
      * 反复重启当前曲目, 每次都弹 Toast 会盖满车机屏幕; 后续重复只落日志与面包屑。
      * errorStreak 在起播成功或用户切歌时归零, 因此下一轮仍有提示机会。

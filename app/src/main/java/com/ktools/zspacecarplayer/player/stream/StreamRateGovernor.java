@@ -1,31 +1,43 @@
 package com.ktools.zspacecarplayer.player.stream;
 
 /**
- * 带宽自适应降码率的判定核心。
+ * 带宽缺口的判定核心（只判定；是否据此换档由 {@link #AUTO_DEGRADE_ENABLED} 决定）。
  *
- * <p>存在理由：无损曲目在本库里需要约 100~126 KB/s 的**持续**带宽，而车机蜂窝链路会长时间只给到
- * 这个数的一半（2026-10-06 真车实测：23,021,268B / 204s 的 FLAC 需要 110 KB/s，实测下载 67 KB/s，
- * {@code lead} 从 4s 一路掉到 0s，屏幕上就是「能出声但一直在抽干」）。这种**持续缺口**不是缓冲能
- * 补的——环形窗口再大也只是把饿死往后推几十秒。唯一能真正止住的是换更低码率的流。
+ * <p>存在理由：本库无损曲目需要约 100~151 KB/s 的**持续**带宽（2026-10-07 实测 Bad Romance 的
+ * FLAC 是 44,499,871B / 294,661ms = 151 KB/s），而车机蜂窝链路会长时间只给到这个数的一半
+ * （2026-10-06 真车：23,021,268B / 204s 的 FLAC 需要 110 KB/s，实测下载 67 KB/s，{@code lead}
+ * 从 4s 一路掉到 0s，屏幕上就是「能出声但一直在抽干」）。这种**持续缺口**不是缓冲能补的——
+ * 环形窗口再大也只是把饿死往后推几十秒。
  *
- * <p>判据用<b>固定速率下限</b>而不是「按单曲所需码率」：后者要拿每首的 sizeBytes，而 sizeBytes 不在
- * 车机的曲库缓存里，加一列就要动 SQLite 迁移；而本库无损曲的码率本就均匀（100~126 KB/s），
- * 一个带余量的固定下限更简单，也少一个"算出来但其实不准"的输入。
+ * <p><b>判据必须是「本曲所需速率」，不能是任何固定下限</b>。vc16 用固定 140KB/s，2026-10-07 真车
+ * 两件事同时把它证伪：① 直播一首 MP3 原件天然只跑约 30KB/s，链路完全健康也会被判成带宽不足；
+ * ② 一首下载完成的歌零增长就是 0B/s，同样被判成带宽不足。当晚实测序列是 percent 87→100
+ * （lead 稳在 65s，链路毫无问题）→ 9 秒后 {@code bitrate tier -> smooth(128k) est=-1KB/s}
+ * （那个 -1 就是实测 0）→ 之后 4 首全部在流畅档被腰斩。
  *
- * <p>降级只作用于<b>下一首</b>：中途改 URL 一定会断音，所以这里只出结论，切换由服务层在起播边界执行。
+ * <p><b>自动换档默认关闭</b>：流畅档走 {@code stream.mp3?...static=false&maxStreamingBitrate=}，
+ * 2026-10-07 拿设备自己的 key 打服务端实测它是 <b>chunked、无 Content-Length、
+ * Accept-Ranges: none、Range 请求被忽略</b>。后果连着三条：{@code dur=0ms} 让进度条与剩余时长
+ * 全瞎、seek 失效（续播点丢）、以及任何一次 starve 重连都退化成「服务端从 0 重转 + 客户端丢弃
+ * 已下字节」。也就是说这一档目前比「能出声但一直在抽干」更差，所以这里只累计证据、不动作。
+ *
+ * <p>换档（若启用）只作用于<b>下一首</b>：中途改 URL 一定会断音，所以这里只出结论，
+ * 切换由服务层在起播边界执行。
  */
 public final class StreamRateGovernor {
 
     /** 判定窗口：5 秒一个样本。再短会被一次重连带偏，再长则饿死已经发生了。 */
     public static final long WINDOW_MS = 5_000L;
-    /** 连续这么多个窗口低于下限才降级；单窗口抖动（一次重连、一次红灯）不足以换档。 */
+    /** 连续这么多个窗口追不上所需速率才认定缺口；单窗口抖动（一次重连、一次红灯）不足以定性。 */
     public static final int DEGRADE_CONFIRMATIONS = 3;
-    /** 回到无损要连续这么多窗口高于回升阈值——比降级更保守，避免来回跳档。 */
+    /** 回到无损要连续这么多窗口有富余——比认定缺口更保守，避免来回跳档。 */
     public static final int RESTORE_CONFIRMATIONS = 5;
-    /** 降级下限：本库无损约 110~126 KB/s，留 ~15% 余量。低于它就必然追不上播放消耗。 */
-    public static final long DEGRADE_BELOW_BYTES_PER_SEC = 140_000L;
-    /** 回升阈值刻意高于降级下限，两者之间是滞回带，不在带里做任何切换。 */
-    public static final long RESTORE_ABOVE_BYTES_PER_SEC = 175_000L;
+    /** 认定缺口的上浮：实测 &lt; 所需 ×(1+15%) 即算追不上——播放本身就要吃掉 100% 的所需速率。 */
+    public static final int DEFICIT_MARGIN_PERCENT = 15;
+    /** 认定富余的上浮：实测 &gt; 所需 ×(1+45%) 才算链路真的恢复了。 */
+    public static final int SURPLUS_MARGIN_PERCENT = 45;
+    /** 是否允许按判定结果自动换到流畅档。见类注释：2026-10-07 的证据说明这一档还不能自动接管。 */
+    public static final boolean AUTO_DEGRADE_ENABLED = false;
 
     private boolean degraded = false;
     private int belowStreak = 0;
@@ -34,19 +46,36 @@ public final class StreamRateGovernor {
     private long windowBaseBytes = -1L;
     /** 最近一个完整窗口的实测速率（B/s）；-1 表示还没凑出过窗口。仅用于日志与上报。 */
     private long lastWindowBytesPerSec = -1L;
+    /** 最近一次判定所用的所需速率（B/s），只为把证据写进面包屑。 */
+    private long lastRequiredBytesPerSec = -1L;
+    /** 累计认定「持续追不上」的次数（连续窗口达标算一次）。自动档关闭时这就是在攒的证据。 */
+    private int deficitConfirmations = 0;
 
     /**
-     * 喂一次下载进度。由 {@code BufferedHttpSource} 的进度推进处调用。
+     * 喂一次下载进度。
      *
-     * <p>参数是<b>累计</b>字节数（就是 {@code bufEnd} 本身），不是增量：调用方不需要自己算差值，
-     * 而窗口速率 = (本次累计 - 窗口基准累计) / (本次时间 - 窗口基准时间)，跨窗口不会重复计数。
-     * 不足一个窗口的调用只更新基准之前的累计值，不做判定。
+     * <p>{@code totalBytes} 是<b>累计</b>字节数（就是 {@code bufEnd} 本身），不是增量：调用方不需要
+     * 自己算差值，而窗口速率 = (本次累计 - 窗口基准累计) / (本次时间 - 窗口基准时间)，跨窗口不重复计数。
+     * 不足一个窗口的调用只推进累计值，不做判定。
      *
-     * @param nowMs      单调时钟毫秒（{@code SystemClock.elapsedRealtime()}），必须不回拨
-     * @param totalBytes 本连接开始以来累计下载的字节数
+     * @param nowMs               单调时钟毫秒（{@code SystemClock.elapsedRealtime()}），必须不回拨
+     * @param totalBytes          本连接开始以来累计下载的字节数
+     * @param requiredBytesPerSec 本曲「不抽干」所需的速率 = 资源总字节 / 时长；{@code <= 0} 表示
+     *                            口径不可判（总长或时长任一未知），此时**不做任何判定**——否则一次
+     *                            不可判的采样就会被算成 0B/s 的缺口，那正是 vc16 误判的成因
      */
-    public void onProgress(long nowMs, long totalBytes) {
+    public void onProgress(long nowMs, long totalBytes, long requiredBytesPerSec) {
         if (windowBaseMs < 0) {
+            windowBaseMs = nowMs;
+            windowBaseBytes = totalBytes;
+            return;
+        }
+        if (totalBytes < windowBaseBytes) {
+            // 累计口径的前提被打破：本流被**重定位**了（换曲、后向 seek、或原生二分内部的
+            // 自动重定位——requestResetLocked 会把 bufStart/bufEnd 一起挪到新位置）。
+            // 这跟"链路没给字节"是两件事，绝不能钳成 0B/s 计一个缺口窗口——vc16 就是这么
+            // 在每次换曲时白送一个假缺口的（上一首累计 44MB，新歌从 0 数起）。
+            // 只重建基准、不动任何已有结论；调用方各自的 rebaseWindow() 是锦上添花，不是依赖。
             windowBaseMs = nowMs;
             windowBaseBytes = totalBytes;
             return;
@@ -56,22 +85,28 @@ public final class StreamRateGovernor {
             return;
         }
         long est = (totalBytes - windowBaseBytes) * 1000L / elapsed;
-        if (est < 0L) {
-            est = 0L;   // 上层换了连接、累计值被清零：按无进展处理，不得算出负速率
-        }
         lastWindowBytesPerSec = est;
         windowBaseMs = nowMs;
         windowBaseBytes = totalBytes;
-        evaluate(est);
+        if (requiredBytesPerSec <= 0L) {
+            return;
+        }
+        lastRequiredBytesPerSec = requiredBytesPerSec;
+        evaluate(est, requiredBytesPerSec);
     }
 
-    private void evaluate(long est) {
+    private void evaluate(long est, long required) {
+        long deficitBound = required + required * DEFICIT_MARGIN_PERCENT / 100L;
+        long surplusBound = required + required * SURPLUS_MARGIN_PERCENT / 100L;
         if (!degraded) {
             aboveStreak = 0;
-            if (est < DEGRADE_BELOW_BYTES_PER_SEC) {
+            if (est < deficitBound) {
                 if (++belowStreak >= DEGRADE_CONFIRMATIONS) {
-                    degraded = true;
+                    deficitConfirmations++;
                     belowStreak = 0;
+                    if (AUTO_DEGRADE_ENABLED) {
+                        degraded = true;
+                    }
                 }
             } else {
                 belowStreak = 0;
@@ -79,7 +114,7 @@ public final class StreamRateGovernor {
             return;
         }
         belowStreak = 0;
-        if (est > RESTORE_ABOVE_BYTES_PER_SEC) {
+        if (est > surplusBound) {
             if (++aboveStreak >= RESTORE_CONFIRMATIONS) {
                 degraded = false;
                 aboveStreak = 0;
@@ -89,7 +124,7 @@ public final class StreamRateGovernor {
         }
     }
 
-    /** 当前是否应该用流畅档起播下一首。 */
+    /** 当前是否应该用流畅档起播下一首；自动档关闭时只可能因 {@link #forceDegraded()} 为真。 */
     public boolean isDegraded() {
         return degraded;
     }
@@ -101,24 +136,24 @@ public final class StreamRateGovernor {
         aboveStreak = 0;
     }
 
-    /** 起播/拖动进度条后调用：累计口径被重连或 seek 打断，窗口基准作废重建，但**不推翻已有档位结论**
-     *  —— 档位是链路属性，seek 不会让链路变好或变坏；若这里做 reset()，每次拖条都会把降级状态洗掉。 */
+    /** 起播/拖动进度条后调用：累计口径被重连或 seek 打断，窗口基准作废重建，但**不推翻已有结论**
+     *  —— 档位是链路属性，seek 不会让链路变好或变坏；若这里洗掉状态，用户每拖一次条又要重新
+     *  等 15 秒才判回来。{@link #onProgress} 内部也会自己发现口径倒退并重建基准，这里是显式入口。 */
     public void rebaseWindow() {
         windowBaseMs = -1L;
         windowBaseBytes = -1L;
     }
 
-    /** 切歌/手动刷新等"链路条件可能已变"的时刻调用：丢掉历史窗口，避免用旧速率做新决策。 */
-    public void reset() {
-        degraded = false;
-        belowStreak = 0;
-        aboveStreak = 0;
-        windowBaseMs = -1L;
-        windowBaseBytes = -1L;
-        lastWindowBytesPerSec = -1L;
-    }
-
     public long getLastWindowBytesPerSec() {
         return lastWindowBytesPerSec;
+    }
+
+    public long getLastRequiredBytesPerSec() {
+        return lastRequiredBytesPerSec;
+    }
+
+    /** 认定过多少次「持续追不上」。自动档关闭时，这是当晚链路是否真有缺口的唯一留痕。 */
+    public int getDeficitConfirmations() {
+        return deficitConfirmations;
     }
 }
