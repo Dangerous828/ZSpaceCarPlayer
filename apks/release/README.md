@@ -299,3 +299,44 @@ adb -s 10.212.252.52:5555 install apks/release/ZSpaceCarPlayer-2.3.0-code2-debug
 卸载会清除本地 SQLite 曲库缓存与 SharedPreferences（含音效设置与崩溃熔断锁存），首启自动重新同步，服务端数据不受影响。回滚前建议先执行 `ACTION_STOP_AND_RELEASE`，让功放/DSP 音频通道优雅注销，避免 8600 通道锁死。
 
 **引擎级回退不需要回滚包**：设置页「播放引擎」切回系统即绕过全部 v3 代码路径；崩溃熔断锁存时应用本身已处于该状态。
+
+## vc17 = 3.2.6 发布记录（2026-10-07）
+
+发布物：**`ZSpaceCarPlayer-3.2.6-code17-debug.apk`**，3,128,967 B，
+`sha256=07557715f0fa80e0efe6a68fc9872df287a304ac9e1009b4b5e9ca5263ee54e6`，
+`aapt2 dump badging` → `versionCode='17' versionName='3.2.6'`。
+`clean :app:testDebugUnitTest :app:assembleDebug` 全量出包，**400 条 host 单测 0 失败**；
+zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
+
+**这一版主要是收拾 vc16 自己造成的回归**（详见 `changelogs/3.2.6.md`）：vc16 那条
+「链路追不上无损码率就自动降流畅档」在真车上线 9 秒内就误判——`percent` 爬到 100（下载完成、
+链路健康、lead 稳 65s）之后的零增长被读成 0KB/s，于是整列歌换到一条**无总长、不支持 Range、
+`dur=0ms`、seek 失效**的转码流上，4 首全部被腰斩，而且每次都以「假播完」静默跳歌并清掉续播点。
+
+九项：① 测速改「本曲所需速率」+ 可采门（总长与时长已知**且 `percent<100`**）；② 自动换档默认关闭，
+只留 `bitrate deficit #N` 证据；③ 不可续传的流不再因读者挨饿而重连/判死（重连在 chunked 流上
+= 服务端从 0 重转 + 客户端丢弃已下字节，是自伤）；④ 假播完用「最后 tick 位置 + 闩锁的判死证据」
+裁定，第一次带断点重试、第二次跳歌但不清续播点；⑤ 深断点 seek 预算拆成挨饿截止(8s)+总预算(30s)，
+且 seek 期间不再走「前向顺序丢弃」（今晚 Bad Romance 断点 7.4MB 落在那条 8MB 上限内，等于下载
+7.4MB 永不播放的字节，必败）；⑥「缓冲中」改双门（下载口径**或**出声进展任一说卡就显示，
+不可判不再当成还在缓冲）；⑦ 指示器在错误/暂停/解绑时幂等熄灭；⑧ 断点定位期间显示
+「正在回到上次位置…」；⑨ 连播失败合并成一句「已连续 N 首无法播放…」。
+
+发版前用 `code-review` 两轴审过一遍，7 条发现全部收掉；其中两条是真错：只看位置判截断会误杀
+元数据偏大的正常播完（补了 `fatalLatched` 闩锁证据），以及状态提示的幂等键从不清 + 首 tick
+被当成"已前进"（合起来等于那句话根本显示不出来）。
+
+发布动作：清单与包由 Mac 经共享盘直写 `Jarvis/data/caddy/web-zspace/update/`；
+发布前清单已备份 `latest.json.bak-20261007-vc16`。
+⚠️ 清单键名踩了一次：我先生成的是 `forced`，而 `UpdateManifest.java:140` 解析的是 `mandatory`
+（vc16 那份也是）——发布前自己比对了键集合才发现，已按 vc16 的键顺序重生成。
+
+公网复核：清单轮询**第 1 轮**即 `versionCode=17`；按 `apkUrl` 实下载 HTTP 200、3,128,967 B 与
+`sizeBytes` 一致；**仓内 / 发布目录 / 公网下载 / 清单四方 sha256 一致**。
+包内容验证：dex 片段 `premature eos at `／`bitrate deficit #`／`starve ignored: source not resumable`／
+`正在回到上次位置…`／`已连续 `／`stream truncated before its end`／`isSourceFatalEver`／`hasLatchedFatal`
+各 1；vc16 的 `retry backoff wait=`／`buffered source error: `／`remoteAcceptsRanges` 全部仍在。
+
+⚠️ 设备侧未核验（车机需下次上电自动升级 + 车主确认安装）。核验交给 cron，判据换成 vc17 的十条
+（见 `changelogs/3.2.6.md`「实车判据」），重点三条：**不该再有 `bitrate tier -> smooth(128k)`、
+不该再有 `prepared dur=0ms`、不该出现无解释的自动跳歌**。
