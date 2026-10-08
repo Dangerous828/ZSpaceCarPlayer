@@ -33,8 +33,8 @@ android {
         minSdk 18
         targetSdk 28
         // 发版铁律: 出包前必须先推进 versionCode —— 同版本号会让车机 OTA 判「已最新」而永不拉新包。
-        versionCode 22
-        versionName "3.2.11"
+        versionCode 23
+        versionName "3.2.12"
 
         buildConfigField "String", "JELLYFIN_SERVER_URL", "\"${devServerUrl}\""
         buildConfigField "String", "JELLYFIN_USERNAME", "\"${devUsername}\""

@@ -90,6 +90,47 @@ public class BufferingPolicyTest {
         assertFalse(BufferingPolicy.shouldPrefillStart(-1L, 50, true, 100L));
     }
 
+    // ---------------- 快速起播 / 时长 leadSeconds 判据 ----------------
+
+    @Test
+    public void calculateLeadSecondsPureFunction() {
+        // 132KB/s (约 1.05Mbps 音频)
+        long requiredRate = 132_000L;
+        // 缓冲了 264KB，已读 0KB -> 2.0 秒
+        assertEquals(2.0f, BufferingPolicy.calculateLeadSeconds(264_000L, 0L, requiredRate), 0.001f);
+        // 缓冲了 528KB，已读 264KB -> 2.0 秒
+        assertEquals(2.0f, BufferingPolicy.calculateLeadSeconds(528_000L, 264_000L, requiredRate), 0.001f);
+        // 缓冲落后或已读超过缓冲 -> 0 秒
+        assertEquals(0.0f, BufferingPolicy.calculateLeadSeconds(100_000L, 200_000L, requiredRate), 0.001f);
+        // 无效所需速率 -> 0 秒
+        assertEquals(0.0f, BufferingPolicy.calculateLeadSeconds(264_000L, 0L, 0L), 0.001f);
+    }
+
+    @Test
+    public void shouldFastStartChecksAudioLeadThreshold() {
+        long requiredRate = 132_000L;
+        // 1.2 秒音频时长 = 158,400 字节
+        long targetBytes = (long) (132_000L * BufferingPolicy.LEAD_TARGET_START_SECONDS);
+        assertFalse("未达到 1.2s 音频时长不快速起播", BufferingPolicy.shouldFastStart(targetBytes - 1000, requiredRate));
+        assertTrue("达到 1.2s 音频时长放行快速起播", BufferingPolicy.shouldFastStart(targetBytes, requiredRate));
+        assertFalse("无效参数不放行", BufferingPolicy.shouldFastStart(0, requiredRate));
+        assertFalse("无效速率不放行", BufferingPolicy.shouldFastStart(targetBytes, 0));
+    }
+
+    @Test
+    public void adaptiveBufferTargetSecondsScalesOnWeakNetwork() {
+        long requiredRate = 132_000L;
+        // 正常网速 (200KB/s > 132KB/s) -> 20s
+        assertEquals(BufferingPolicy.BUFFER_TARGET_NORMAL_SECONDS,
+                BufferingPolicy.adaptiveBufferTargetSeconds(200_000L, requiredRate), 0.001f);
+        // 弱网 (100KB/s < 132KB/s) -> 45s (抬高蓄水池，对齐 QQ 音乐)
+        assertEquals(BufferingPolicy.BUFFER_TARGET_SLOW_NETWORK_SECONDS,
+                BufferingPolicy.adaptiveBufferTargetSeconds(100_000L, requiredRate), 0.001f);
+        // 速率未知 -> 常态 20s
+        assertEquals(BufferingPolicy.BUFFER_TARGET_NORMAL_SECONDS,
+                BufferingPolicy.adaptiveBufferTargetSeconds(0L, requiredRate), 0.001f);
+    }
+
     // ---------------- 下一首预取判定 ----------------
 
     /**

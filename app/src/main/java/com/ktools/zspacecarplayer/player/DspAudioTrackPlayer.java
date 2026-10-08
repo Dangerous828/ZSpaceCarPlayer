@@ -545,10 +545,15 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             int capacity = proxy.getWindowCapacity(realUrl);
             if (capacity <= 0) capacity = BufferedHttpSource.DEFAULT_CAPACITY_BYTES;
             long target = BufferingPolicy.prefillTargetBytes(capacity, contentLength, currentDurationMs);
+            long requiredRate = BufferingPolicy.requiredBytesPerSec(contentLength, currentDurationMs);
 
-            if (BufferingPolicy.shouldPrefillStart(bufferedBytes, percent, totalKnown, target)) {
-                Log.i(TAG, "prefill gate reached: buffered=" + bufferedBytes + "B target=" + target
-                        + "B percent=" + percent + " waited="
+            // R3 快速起播：达到 1.2s 音频时长优先快速起播（对齐 Media3 / QQ 音乐 / 喜马拉雅），大幅降低起播静音
+            boolean fastStart = BufferingPolicy.shouldFastStart(bufferedBytes, requiredRate);
+
+            if (fastStart || BufferingPolicy.shouldPrefillStart(bufferedBytes, percent, totalKnown, target)) {
+                Log.i(TAG, "prefill gate reached: fastStart=" + fastStart + " buffered=" + bufferedBytes
+                        + "B target=" + target + "B requiredRate=" + requiredRate
+                        + "B/s percent=" + percent + " waited="
                         + (SystemClock.elapsedRealtime() - startMs) + "ms");
                 reportBuffering(percent, false); // 门槛达标：缓冲指示转「就绪」
                 return;

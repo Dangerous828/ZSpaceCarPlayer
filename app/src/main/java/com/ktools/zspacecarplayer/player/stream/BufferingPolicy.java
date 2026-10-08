@@ -23,6 +23,45 @@ public final class BufferingPolicy {
 
     /** 门槛目标覆盖秒数：起播前至少缓冲这么多秒的音频，兼顾「秒开体感」与「抗抽干」。 */
     public static final int PREFILL_TARGET_SECONDS = 5;
+    /**
+     * R3 纯时长起播目标秒数 (2026-10-08 对齐 Media3 / QQ 音乐 / 喜马拉雅)：
+     * 1.2 秒音频时长即可起播，不再等待 5 秒或 1.0MB，从 13s 静音降至约 1s。
+     */
+    public static final float LEAD_TARGET_START_SECONDS = 1.2f;
+    /** 弱网自适应缓冲目标时长：常态 20s，检测到供给不足时抬高至 45s (R6 对齐 QQ 音乐) */
+    public static final float BUFFER_TARGET_NORMAL_SECONDS = 20.0f;
+    public static final float BUFFER_TARGET_SLOW_NETWORK_SECONDS = 45.0f;
+
+    /**
+     * R3 统一 lead-秒纯函数判据：当前可供播放的时长（秒）。
+     *
+     * @param bufferedBytes       当前已缓冲字节数 (bufEnd - bufStart)
+     * @param playedBytes         当前已消耗/已读字节数
+     * @param requiredBytesPerSec 资源每秒消耗字节率
+     * @return 领先时长（秒），若无法计算则返回 0f
+     */
+    public static float calculateLeadSeconds(long bufferedBytes, long playedBytes, long requiredBytesPerSec) {
+        if (requiredBytesPerSec <= 0L) {
+            return 0f;
+        }
+        long availableBytes = Math.max(0L, bufferedBytes - playedBytes);
+        return (float) availableBytes / (float) requiredBytesPerSec;
+    }
+
+    /**
+     * R6 弱网自适应目标时长纯函数：由实测拉流速率与所需速率决定缓冲目标。
+     *
+     * @param linkRateBytesPerSec 实测网络拉流速率 (B/s)
+     * @param requiredBytesPerSec 播放所需速率 (B/s)
+     * @return 建议的缓冲目标秒数（弱网时抬高目标，不动音质）
+     */
+    public static float adaptiveBufferTargetSeconds(long linkRateBytesPerSec, long requiredBytesPerSec) {
+        if (linkRateBytesPerSec > 0L && requiredBytesPerSec > 0L && linkRateBytesPerSec < requiredBytesPerSec) {
+            return BUFFER_TARGET_SLOW_NETWORK_SECONDS;
+        }
+        return BUFFER_TARGET_NORMAL_SECONDS;
+    }
+
     /** 门槛最大等待：弱网下即使没到门槛也起播，绝不永久卡住（超时仍会留日志）。 */
     public static final long PREFILL_MAX_WAIT_MS = 7000L;
     /** 门槛轮询间隔（运行在播放器解码后台线程，绝不阻塞主线程 / UI）。 */
@@ -77,6 +116,21 @@ public final class BufferingPolicy {
             return bufferedBytes >= PREFILL_MIN_BYTES_UNKNOWN_TOTAL;
         }
         return bufferedBytes >= targetBytes;
+    }
+
+    /**
+     * R3 快速起播判定：是否已达到低延迟起播时长门槛 (1.2s 音频时长)。
+     *
+     * @param bufferedBytes       当前已缓冲字节数
+     * @param requiredBytesPerSec 资源每秒消耗字节率
+     * @return true 表示已满足低延迟起播
+     */
+    public static boolean shouldFastStart(long bufferedBytes, long requiredBytesPerSec) {
+        if (bufferedBytes <= 0 || requiredBytesPerSec <= 0) {
+            return false;
+        }
+        float lead = calculateLeadSeconds(bufferedBytes, 0L, requiredBytesPerSec);
+        return lead >= LEAD_TARGET_START_SECONDS;
     }
 
     /**

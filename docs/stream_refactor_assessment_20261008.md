@@ -228,6 +228,91 @@ minSdk 11**，自带 native 播放内核 `lib/armeabi/libxmediaplayer.so` / `_x.
 
 ---
 
+## 5·六、喜马拉雅车机版一手对照（2026-10-08 夜，同平台 minSdk 11 架构取证）
+
+先前评估只拿 QQ 音乐（ThumbPlayer2，minSdk 21）作对照，面临"Android 4.3 到底能不能做、怎么做"的疑虑。
+本节直接拆解仓内车机实机预装包 `apks/8600/XimalayaForCar.apk`（`com.ximalaya.ting.android.car` 1.6.1，**minSdk 11**），
+深入其底层原生内核 `lib/armeabi/libxmediaplayer.so` 与 `libxmediaplayer_x.so`，提取第一手符号与架构设计。
+
+### 1. 喜马拉雅内核（libxmediaplayer.so）核心实现事实
+
+```
+                     ┌──────────────────────────────────────────────┐
+                     │            Java 数据流 / 缓存调度层            │
+                     └──────────────────────┬───────────────────────┘
+                                            │ JNI 回调 (AVIO 适配器)
+                     ┌──────────────────────▼───────────────────────┐
+                     │              FileManagerThread               │ ◄── 专职网络拉流/文件 IO
+                     │      (状态机: Preparing/Prepared/Started)     │     不参与实时音频解码
+                     └──────────────────────┬───────────────────────┘
+                                            │ 双向通道 (InnerMainCtl2FileManagerChn)
+                                            │ Msg & Trigger 机制，无粗互斥锁争用
+                     ┌──────────────────────▼───────────────────────┐
+                     │                MainCtlThread                 │ ◄── 专职驱动软解 (FFmpeg)
+                     │          (时钟同步 / 音视频解复用)             │     AVIO 读写由 Trigger 唤醒
+                     └──────────────────────┬───────────────────────┘
+                                            │ PCM 队列 (PTQueue)
+                     ┌──────────────────────▼───────────────────────┐
+                     │                OutputManager                 │ ◄── AudioTrack 输出调度
+                     │        (OutputManagerResetPTQueueForSeek)    │
+                     └──────────────────────────────────────────────┘
+```
+
+1. **极度收敛的软解层**：
+   FFmpeg 明确按 `--enable-protocol=file --disable-everything` 裁剪。底层解码器完全不直接发起 Socket/HTTP 网络请求，彻底杜绝了原生层网络挂起导致 ANR 的问题。
+2. **纯回调驱动的 IO（AVIO 机制）**：
+   通过 `FillIoBufferCallBackWrapper` 与 `SeekIoBufferCallBackWrapper` 将读取请求派发给 Java 层注册的 JNI 函数（`dataStreamInputFunCallBackT`、`dataStreamSeekFuncCallBackT`、`dataStreamOutReadyFuncCallBackT`）。
+3. **双线程通道解耦（彻底打破一把大粗锁）**：
+   - `FileManagerThreadRun`：负责与 Java 层交互，管理数据拉流、缓冲水位与持久化状态机。
+   - `MainCtlThreadRun`：专职负责解码调度与时间基准。
+   - 两者之间通过无锁/条件变量的消息通道（`InnerMainCtl2FileManagerChn`）进行通信。解码器缺数据时挂起等待 Trigger，数据就绪后由 FileManager 线程发 Trigger 唤醒，**彻底避免了网络阻塞或磁盘 IO 慢传染给解码线程**。
+4. **门槛事件驱动（Threshold Callback）**：
+   具备 `bufferedDataReachThresholdCallBackT`。缓冲计算并非粗暴的死循环轮询，而是在数据达到特定时间/数据阈值（Threshold）时主动回调通知解码器恢复播放。
+5. **Seek 重置队列而不推倒会话**：
+   Seek 操作仅向通道派发 `Seek` 消息，底层调用 `OutputManagerResetPTQueueForSeek` 清理 PCM 时间队列，复用已有上下文，绝不 fork 新源或销毁重连。
+
+---
+
+## 5·七、融合 QQ 音乐与喜马拉雅后的 V3 完善架构（目标形态）
+
+结合 QQ 音乐的**时长健康判据与弱网蓄水**，以及喜马拉雅的**双线程通道解耦与自定义输入**，形成彻底根治 S1~S4 的重构架构：
+
+```
+                           Jellyfin 服务器 (开放尾 Range)
+                                         │
+                                         ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. 会话与传输调度层 (StreamSession)                                            │
+│    - 单曲唯一会话：彻底消除 obtainSource 的 url#fN fork 分裂 (根治 S1)          │
+│    - 预取一等公民：PreloadSession 享有受保护独立槽位，绝不被播放挤占失效           │
+└──────────────────────┬──────────────────────────────┬───────────────────────┘
+                       │                              │
+                       ▼ 异步落盘队列                  ▼ 滑窗填充
+            ┌──────────────────────┐      ┌───────────────────────────┐
+            │ 磁盘缓存 (DiskSink)   │      │ 内存滑窗 (RAM RingBuffer) │
+            │ 独立 IO 线程，满则丢弃 │      │ 纯字节搬运，无大互斥锁     │
+            │ 不持有解码锁 (根治 S2)│      └─────────────┬─────────────┘
+            └──────────────────────┘                    │
+                                                        ▼ 自定义数据源适配
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 2. 线程隔离解耦层 (对齐 Ximalaya FileManager + MainCtl 通道模型)                │
+│    - 数据流管理线程 (StreamIOThread)：拉流、计算时长水位、触发 Threshold 唤醒   │
+│    - 解码消费线程 (DecoderReaderThread)：单向取流消费，阻塞只等 DataReady 信号  │
+│    - 锁粒度切分：消灭 BufferedHttpSource.lock 粗锁，读者与写者无锁/细粒度同步   │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │
+                                       ▼ 门槛与状态调度
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 3. 门槛驱动与自适应蓄水 (对齐 QQ 音乐 Duration 水位 + 喜马拉雅 ReachThreshold) │
+│    - leadSeconds 单一口径：彻底放弃 percent 字节位置假指标 (根治 S3)           │
+│    - 起播门槛：预填 1.0~1.5 秒音频时长即开播 (消除 13s 静音)                   │
+│    - 弱网自适应：拉流速率 < 码率时，自动抬高目标缓冲至 30~50s (R6，不动音质)    │
+│    - 自动上报：触底/卡顿自动记录 PlayPerformanceReport，消除观测盲区 (R7)       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## 6. 每项的验收口径
 
 | 方案 | 新增纯函数（必须单测） | 真车才能验的 | 回退方式 |
