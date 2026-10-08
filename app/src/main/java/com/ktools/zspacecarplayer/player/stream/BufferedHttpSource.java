@@ -133,6 +133,12 @@ public class BufferedHttpSource {
     private File diskCacheDir;
     private long diskCacheLimitBytes;
     private StreamDiskCache disk;
+    /**
+     * 锁外落盘的暂存位 (2026-10-08)。<b>只有下载线程会读写</b>：{@code writeIntoRingLocked}
+     * 在锁内填，{@code writeToRing} 紧接着在锁外消费，所以不需要额外同步。
+     */
+    private long pendingDiskAt = -1L;
+    private byte[] pendingDiskBytes;
 
     /** ≥0 表示本轮被服务端判为"资源已不存在"，读侧要抛可识别的类型而不是普通 IO 异常。 */
     private volatile int goneHttpStatus = -1;
@@ -1233,7 +1239,42 @@ public class BufferedHttpSource {
      *
      * @return 写入字节数；closed / aborted / epoch 过期返回 -1
      */
+    /**
+     * 落一段进环形窗。<b>磁盘写故意放在锁外</b>（见下面 record 那段注释）。
+     *
+     * @return 写入字节数；closed / aborted / epoch 过期返回 -1
+     */
     private int writeToRing(byte[] chunk, int n, long epoch) {
+        int wrote = writeIntoRingLocked(chunk, n, epoch);
+        if (wrote < 0 || pendingDiskAt < 0L) {
+            return wrote;
+        }
+        long at = pendingDiskAt;
+        byte[] staged = pendingDiskBytes;
+        pendingDiskAt = -1L;
+        pendingDiskBytes = null;
+        StreamDiskCache target = disk;
+        if (target == null || staged == null) {
+            return wrote;
+        }
+        // 边播边存 (A2)：位置取写入前的 bufEnd，与环形窗怎么绕回无关。
+        //
+        // 为什么不放在 lock 里（2026-10-08 真车上报纠偏）：这把 lock 同时也是原生解码器取字节
+        // （{@link #readAt}）要拿的那一把。vc21 把 64KB 的闪存写、外加"每出现新段或每 2MB 一次"
+        // 的账本落盘（里面还带 fsync）整个压在锁内，等于<b>每 64KB 就往读者的通路上插一次闪存
+        // 停顿</b>。上报里那种"窗口 8192KB/8192KB 明明写着满、lead 却是 0s、音频一顿一顿"正是
+        // 这个形状——字节都在，读者拿不到。
+        // 挪出锁不丢正确性：下载线程只有一条，暂存队列就是它自己按序消费；写的是"这段字节属于
+        // 这个绝对位置"，晚一点落地内容仍然是同一份正确数据，区间表只认确实写成功的位置。
+        try {
+            target.record(at, staged, 0, staged.length);
+        } catch (Exception e) {
+            Log.w(TAG, "disk record failed, cache disabled for this stream: " + e);
+        }
+        return wrote;
+    }
+
+    private int writeIntoRingLocked(byte[] chunk, int n, long epoch) {
         synchronized (lock) {
             while (true) {
                 if (closed || downloadAbort || epoch != downloadEpoch) {
@@ -1288,10 +1329,9 @@ public class BufferedHttpSource {
             bufEnd += n;
             lock.notifyAll();
             if (disk != null) {
-                // 边播边存 (A2)。位置取写入前的 bufEnd——这是这段字节在资源里的绝对起点，
-                // 与环形窗怎么绕回无关。锁内落盘是为了和窗口推进保持同一份顺序；
-                // 单次最多 64KB，闪存的毫秒级写入换一个"不会读脏数据"的保证，值。
-                disk.record(wroteAt, chunk, 0, n);
+                // 锁内只拷一份出来，落盘交给 writeToRing 在锁外做（chunk 是复用的缓冲区）
+                pendingDiskAt = wroteAt;
+                pendingDiskBytes = java.util.Arrays.copyOf(chunk, n);
             }
             return n;
         }

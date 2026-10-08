@@ -429,20 +429,26 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 
 ## vc22 = 3.2.11 出包记录（2026-10-08，**未发布**）
 
-包：**`ZSpaceCarPlayer-3.2.11-code22-debug.apk`**，3,148,975 B，
-`sha256=d38b5bbf196434620df640a05f3d91c295da278b2cc91c12a7464a6ce36e7720`，
+包：**`ZSpaceCarPlayer-3.2.11-code22-debug.apk`**，3,149,267 B，
+`sha256=e5e09b1d53400d6bd89731de70795eef7f7cd4bfe00922d6124ec4187465384e`，
 `aapt2` → `versionCode='22' versionName='3.2.11'`，`aapt` → `sdkVersion:'18'`，
 `zipalign -c -v 4` → `Verification successful`；
 `clean :app:testDebugUnitTest :app:assembleDebug` → **441 条 host 单测 0 失败**。
 
-内容 = vc21 首份真车上报（19:03:57《广寒宫》）读出来的五项仪表缺陷修复，逐项论证见
-`changelogs/3.2.11.md`：多源同 URL 时指示器取错源（`pickReporterIndex`，读者数优先）、
+内容 = vc21 首份真车上报（19:03:57《广寒宫》、21:40/21:41 欧美两首）读出来的**五项仪表缺陷
+修复 + 一条我自己的回归**。回归是：vc21 的 A2 把 `disk.record()`（64KB 闪存写，里面还带 fsync）
+压在 `synchronized(lock)` 里，而那把锁正是原生解码器 `readAt` 取字节要拿的同一把 —— 上报里
+`buffered=8192KB/8192KB` 与 `lead=0s` 并存（字节都在 RAM、读者拿不到）就是它的形状。现在锁内只
+`Arrays.copyOf` 暂存、落盘挪到锁外由同一条下载线程按序消费，fsync 只留 `close()` 一次。
+逐项论证见 `changelogs/3.2.11.md`。五项仪表修复是：多源同 URL 时指示器取错源（`pickReporterIndex`，读者数优先）、
 `conns` 会往回退（服务侧按曲记累计最大值 + 新增 `srcs=`）、
 `ctx_prefetchSocketBytes` 取错列（那一项是 discarded）、水位行没有来源身份且窗满时 `rate`
 不等于链路速率（补 `src=/refs=/hasRoom=/head=/tail=`）、A2 写路径不可观测（补 `stored=`）。
 顺带把 vc21 漏改的 `CLIENT_VERSION`（停在 3.2.9）跟上 3.2.11。
 
-包内核验（按 UTF-8 字节搜原始 dex）：新串 `watermark: src=` / ` hasRoom=` / ` head=` / ` tail=` /
+包内核验（按 UTF-8 字节搜原始 dex）：`writeIntoRingLocked`/`pendingDiskBytes`/`copyOf`+
+`Ljava/util/Arrays;` 均命中；另加一条 minSdk 18 红线复核 —— `Ljava/util/Objects;`、`java.time`、
+`Ljava/util/function/` 必须全 0。新串 `watermark: src=` / ` hasRoom=` / ` head=` / ` tail=` /
 ` srcs=` / ` stored=` / `ctx_diskStoredBytes` / `ctx_prefetchDiscardedBytes` / `refs=` 各 1；
 **minSdk 18 红线**：`Ljava/util/Objects;`、`java.time`、`Ljava/util/function/` 均 0
 （我在源码里差点用了 API 19 的 `Objects.equals`，被仓里那条旧注释拦住，改成手写比较并在 dex 里复核）。

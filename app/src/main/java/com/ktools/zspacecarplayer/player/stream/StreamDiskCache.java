@@ -256,8 +256,13 @@ public final class StreamDiskCache {
         return sb.toString();
     }
 
-    /** 把当前区间表写回 sidecar（覆盖写；空表就删掉，不留垃圾）。 */
-    private static void writeSidecar(File runsFile, TreeMap<Long, Long> runs, long contentLength) {
+    /**
+     * 把当前区间表写回 sidecar（覆盖写；空表就删掉，不留垃圾）。
+     *
+     * @param durable true = 收尾那次，额外 fsync；提前落账走 false，不许在热路径上等闪存
+     */
+    private static void writeSidecar(File runsFile, TreeMap<Long, Long> runs, long contentLength,
+                                    boolean durable) {
         if (runsFile == null) {
             return;
         }
@@ -274,7 +279,10 @@ public final class StreamDiskCache {
             try {
                 out.write(text.getBytes("UTF-8"));
                 out.flush();
-                if (out instanceof java.io.FileOutputStream) {
+                // 只有收尾才 fsync：这条是缓存索引，不是用户数据。提前落账那次若也 fsync，
+                // 闪存一次几百毫秒的挂起会直接拖慢下载线程；掉电丢一次账本的代价只是重建缓存，
+                // 而"多一次停顿"的代价是车上听得见的。
+                if (durable && out instanceof java.io.FileOutputStream) {
                     ((java.io.FileOutputStream) out).getFD().sync();
                 }
             } finally {
@@ -616,7 +624,7 @@ public final class StreamDiskCache {
                 < LEDGER_FLUSH_STRIDE_BYTES) {
             return;
         }
-        writeSidecar(runsFile, runs, contentLength);
+        writeSidecar(runsFile, runs, contentLength, false);
         ledgerFlushedEnd = maxEnd;
         ledgerFlushedRunCount = runs.size();
     }
@@ -656,7 +664,7 @@ public final class StreamDiskCache {
                     runs.clear();
                 }
                 try {
-                    writeSidecar(runsFile, runs, contentLength);
+                    writeSidecar(runsFile, runs, contentLength, true);
                 } catch (Exception e) {
                     Log.w(TAG, "close-time ledger write failed: " + e);
                 }
