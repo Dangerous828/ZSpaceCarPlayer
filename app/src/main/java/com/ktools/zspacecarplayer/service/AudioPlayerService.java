@@ -220,6 +220,12 @@ public class AudioPlayerService extends Service {
     private long lastBufferDiagAtMs = 0L;
     /** 已预取的下一首曲目 id: 同一首只预取一次; 让位/切歌时清空以便恢复健康后重试 */
     private volatile String prefetchedNextSongId = null;
+    /**
+     * 预取源自己的 URL (2026-10-08 仪表补漏)。{@code getUpstreamCost} 按 URL 前缀聚合，
+     * 而预取源的 key 是<b>下一首</b>的 URL——所以只看当前曲就永远统计不到预取开了几条连接、
+     * 拉了多少字节，"预取有没有跟当前曲抢带宽"这件事根本没有数据。
+     */
+    private volatile String prefetchedNextUrl = null;
 
     /**
      * 二分排查开关: false = 完全旁路本轮新增的全景/混响代码。
@@ -747,6 +753,14 @@ public class AudioPlayerService extends Service {
                     + "ms socket=" + deliveredBytes + "B disk=" + upstreamCost[3]
                     + "B pos=" + currentMs + "ms");
             CrashMonitor.putContext("ctx_diskServedBytes", String.valueOf(upstreamCost[3]));
+            if (prefetchedNextUrl != null) {
+                // 预取源是另一条 URL，不在上面这笔账里；单列出来才能判"抢不抢带宽"
+                long[] pf = HttpProxyServer.getInstance().getUpstreamCost(prefetchedNextUrl);
+                if (pf != null) {
+                    CrashMonitor.putContext("ctx_prefetchConns", String.valueOf(pf[0]));
+                    CrashMonitor.putContext("ctx_prefetchSocketBytes", String.valueOf(pf[1]));
+                }
+            }
         }
         long requiredBytesPerSec = BufferingPolicy.requiredBytesPerSec(contentLength, totalMs);
         if (requiredBytesPerSec > 0L) {
@@ -851,10 +865,14 @@ public class AudioPlayerService extends Service {
         // 让位当前曲：饥饿 / 断流 / 正在 prefill 时，作废在跑的预取（恢复健康后可重试）
         if ((starving || prefillInProgress) && prefetchedNextSongId != null) {
             abortPrefetchById(prefetchedNextSongId);
+            prefetchedNextUrl = null;
             Log.w(TAG, "prefetch yielded to current song (starving=" + starving
                     + " prefill=" + prefillInProgress + ")");
+            long[] pfCost = HttpProxyServer.getInstance().getUpstreamCost(prefetchedNextUrl);
             CrashMonitor.breadcrumb("buffer", "prefetch yielded starving=" + starving
-                    + " prefill=" + prefillInProgress + " song=" + current.getName());
+                    + " prefill=" + prefillInProgress + " song=" + current.getName()
+                    + (pfCost == null ? "" : " pfConns=" + pfCost[0] + " pfSocket=" + pfCost[1]
+                            + "B pfDisk=" + pfCost[3] + "B"));
             prefetchedNextSongId = null;
             return;
         }
@@ -871,6 +889,7 @@ public class AudioPlayerService extends Service {
         if (nextUrl == null || nextUrl.length() == 0) return;
         proxy.prefetch(nextUrl);
         prefetchedNextSongId = next.getId();
+        prefetchedNextUrl = nextUrl;
         Log.i(TAG, "prefetch next triggered: " + next.getName() + " percent=" + percent
                 + " lead=" + leadSeconds + "s remaining=" + remainingSeconds + "s");
         // 面包屑是必需的：预取只有 Log.i 时，manual_diag 上报里完全看不出它有没有跑过，
@@ -885,6 +904,7 @@ public class AudioPlayerService extends Service {
     private void invalidateStalePrefetch(SongItem newSong) {
         String pfId = prefetchedNextSongId;
         prefetchedNextSongId = null;
+        prefetchedNextUrl = null;
         if (pfId == null) return;
         if (newSong != null && pfId.equals(newSong.getId())) {
             return; // 预取的正是这首：保留，obtainSource 会命中复用，无缝起播
@@ -1270,7 +1290,14 @@ public class AudioPlayerService extends Service {
                     playbackState.setEngineState(generation, PlaybackStateMachine.EngineState.ERROR);
                     pendingSeekMs = -1;
                     if (stateChangeListener != null) {
-                        stateChangeListener.onError("无法加载音频流: " + e.getMessage());
+                        // 屏幕上不给异常原文 (2026-10-08 L5 收口)。这里漏出去过
+                        // "java.io.IOException: Failed to allocate component instance" 这种句子，
+                        // 车主读到只是一串英文，既不知道发生了什么也不知道该做什么。
+                        // 异常本身已经在上面的 Log 与 breadcrumb 里，取证不损失。
+                        SongItem failed = getCurrentSong();
+                        stateChangeListener.onError("无法播放"
+                                + (failed != null ? "《" + failed.getName() + "》" : "")
+                                + "，请重试或换一首");
                     }
                 }
             }

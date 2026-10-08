@@ -158,7 +158,9 @@ Android Auto/AAOS 对媒体应用的硬性要求是 `MediaSession` + `MediaBrows
 | 拔出耳机/断开外放不暂停 | `AudioManager.ACTION_AUDIO_BECOMING_NOISY` 运行时接收器 |
 | 回退闸：地基改动必须能在车上关 | `player/stream/StreamTuning.java` + 设置页「取流优化」「播放缓存」 |
 | 缓存占用可见 + 一键清空 | `StreamDiskCache.dirBytes/clearDir` + 设置页 |
-| 曲库混入视频（236 条） | `JellyfinApiClient.hasVideoStream` 过滤 + 刷新后明示条数 |
+| 预取源的连接/字节代价不可见（自认盲区） | `AudioPlayerService.prefetchedNextUrl` + `ctx_prefetchConns`/`pfConns` |
+| 错误文案漏 Java 异常原文（L5 可做的一半） | `AudioPlayerService` 起播失败分支改成人话；`STATE_ERROR` 那一半 4.3 无 API |
+| 曲库混入视频（236 条，判据 `MediaStreams[].Type=="Video"`） | `JellyfinApiClient.hasVideoStream` 过滤 + 刷新后明示条数 |
 
 **判定为"不适用"，附依据（不是遗漏）**
 
