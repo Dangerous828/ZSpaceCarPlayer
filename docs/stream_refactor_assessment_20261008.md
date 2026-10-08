@@ -140,18 +140,61 @@ fsync 只在收尾）。`lock` 拆成 `ringLock` 与 `ioLock`，读者不再被�
    ├─ 常「srcs≥2」或预取缺键              → 做 R1（源与会话对齐）
    └─ 两者都干净、卡的仍是 required > 供给  → **架构无罪**，转库侧与档位策略（见第 3 步）
 第 2 步（低风险先行，与上面并行不冲突） R3：lead 单一口径 + 起播 1~2 秒，配回退闸
+                    R6（QQ 一手证据支持）：链路差时抬高缓冲目标而非动音质
+                    R7：卡顿自动上报，判据不再依赖车主按键
 第 3 步（属库侧，不是重构，需车主点头） 435 首 wav 按欧美手法位精确转 FLAC（降到 ~120KB/s 档）；
                                         42 首 24bit 是否降位深 = 有损决定，我不擅自动
 第 4 步（有条件）R1 落地后再评估 R4
 ```
 
-一句话结论：**这条链路值得重构，但不该现在就大改。** 真正结构性的是 S1（源≠播放）和
+一句话结论（含 §5 的 QQ 一手对照后仍成立）：**这条链路值得重构，但不该现在就大改。** 真正结构性的是 S1（源≠播放）和
 S3（拿 percent 当健康），这两个都有小切口；S2 的锁传染刚被切掉一处实例，是否还有第二处
 要等 vc22 的数据；S4 是天花板，动它之前必须先用 S1/S3 把观测做干净。
 
 ---
 
-## 5. 每项的验收口径
+## 5. QQ 音乐车机版一手对照（2026-10-08 补，之前这份评估缺这一手）
+
+先前这版评估的 T1 依据是 Media3/mpv/公开带宽口径。本轮直接拆了真包取证，可复核：
+
+- 对象：`/Users/cpuser/Downloads/10200113.apk`，`com.tencent.qqmusiccar`，
+  `versionCode=3140004 / versionName=3.14.0.4`，**`minSdk 21 / targetSdk 33`**，
+  85,999,451 B，`sha256=d3c3f7ccb76615c2b69ee036808894e6f8b8441954be40e2452683d8aae113ca`。
+- 手法：`strings` 取 `lib/arm64-v8a/libTPCore-master.so`（9,952,264 B，腾讯 **ThumbPlayer2** 内核）
+  与五个 `classes*.dex` 的字符串；dex 里的中文必须按 **UTF-8 字节**直接搜。
+  仓内旧文档 `geely_dsp_reverse_analysis.md` 只覆盖了音频焦点与 AudioTrack 序列，**没有一行网络行为**，
+  所以这一节是新增证据，不是转述。
+
+| 维度 | QQ 音乐车机版 3.14.0.4（一手串） | 我们（vc22） | 判定 |
+|---|---|---|---|
+| HTTP 形态 | `Range: bytes=%lu-`（**开放尾 Range，不到定长**）、`http_persistent`、`http_multiple`、`http_seekable`、`Content-Range` | 一条长连接 + 到末尾 Range（A1 改回来的） | **形状一致**，A1 方向被一手证据背书 |
+| 缓冲水位口径 | 全是**时长**：`avplayer_buffer_duration_ms`、`buffer_packet_total_duration_ms`、`prepare_packet_total_duration_ms`、`buffering_filter_threshold_ms`、`buffering_timeout_ms`、`SetAudioLatencyLowWaterMarkUs`、`CalcBufferingEndThresholds: min/default/config/capacity/final(µs)`、`jitter_buffer_params`、`min_left_packet_queue_total_duration_ms_for_switch_data_source` | `percent`（下载头字节位置）当判据，`lead` 由它反推 | 直接证实 **S3**：人家没有一处拿字节当健康判据 |
+| 弱网策略 | **两套缓冲目标**：`..._buffering_for_playback_fast_network_ms` / `..._slow_network_ms`（另见 `buffer_strategy`、`enable_strict_buffering_strategy`）→ 弱网**多缓冲** | 弱网只有 `bitrate deficit` 证据 + 车主手选档 | 见下面 R6，这是我们要补的那一层，而且**不动音质** |
+| 预取 | Java 侧 `PreloadManager`、`preloadNext`、`预加载`(25 处)、`audio_preload` | prefetch 有，但会被 fork 挤占且**无声失效**（今晚 5/6 份上报无 `ctx_prefetchConns`） | 证实 **S1**：预加载在他们那儿是一等模块 |
+| 磁盘缓存 | 内核层就有 `tp2_cache_dir_getter` / `tp2_android_cache_dir_getter`；App 层 `cacheSize`/`maxCache`/`clearCache`/`播放缓存` | `StreamDiskCache`（1GB LRU + 区间账本）刚起步 | 他们是**内核+App 两层**，我们是补充层 → 对应 R4 |
+| 档位体系 | `SQ`(546)、`HQ`(114)、`臻品`(43)、`master`(88)、`hires`(36)、容器 `.flac`/`.ogg`/`.ape`/`.m4a`、`vkey`(83) 取流鉴权 | 两档手选（原件直传 / 服务端 256kbps 转码） | 他们按**文件形态**分档（不同码率不同容器，各自都是无损或有意的有损），不存在"同一首歌服务端现转还没预算"这条路 |
+| 质量遥测 | 专用端点 `…/qmtm2/PlayPerformanceReport` + Beacon 埋点，**播放性能是自动上报的** | 只有车主**手动点上报**，不点就什么都没有 | 这是我们最实际的一条差距 → R7 |
+| 解码 | 内置裁剪版 ffmpeg（该 build 可见 `--enable-decoder=mp3/aac`、`filter=pan/equalizer/anequalizer/loudnorm/dynaudnorm/volume/aresample`）+ `libQmNativeDataSource.so` + `libSuperSound3.so`；FLAC 具体走哪个库本轮未能定位 | `libzspacecarplayer_dsp.so`（vendored dr_flac/dr_wav）+ 自研 DSP | 立项要的"自建软解管线 + 自带音效"这条路是对的；**FLAC 路径未定位，不写成结论** |
+
+**一条必须说清的限制**：QQ 的 `minSdk=21`，我们是 **18（Android 4.3）**。它们内核里那些现代并发/网络设施
+（OkHttp 新版、QUIC `libXquic.so`、Mars `libTMEMars.so`）在 4.3 上不能直接搬，所以"照抄 TP2"不是选项，
+能抄的是**口径与策略**（时长水位、fast/slow 两套缓冲目标、预取一等公民、播放性能自动上报）。
+
+### R6 网络自适应的**缓冲时长**（从 QQ 一手证据来，不是从猜测来）
+在 R3 的 lead 口径之上，把起播/目标缓冲做成两档，由**实测链路速率**选：链路好时按 T1 口径
+（起播 1~2s、目标 20~30s）；链路掉速时把目标缓冲抬高（例如 12~20MB 折算秒数，或"够播 N 秒"里
+N 变大），而不是去动音质。**它规避了车主否决的那条线**：换档=内容变差，多缓冲=只等更久不起播头几秒。
+代价是弱网下起播更慢，所以必须和 R7（自动遥测）一起看效果。
+
+### R7 卡顿自动上报（对齐 `PlayPerformanceReport`）
+现在的判据依赖车主按键，不点就什么都看不见（今晚 5 次上报全是手动，且有一次上传失败）。
+补一个被动触发器：满足"`lead` 触底 / `starve` / `readAt stall` / 窗满却 `lead=0`"任一条件时，
+把**该会话**的上下文与窗口曲线自动发一条精简事件（不带堆栈），按曲 ID+时间去重、限频（如每 10 分钟
+至多一条）。有了它，"到底是我方停顿还是链路"这类问题不必再等车主配合，cron 也能直接读。
+
+---
+
+## 6. 每项的验收口径
 
 | 方案 | 新增纯函数（必须单测） | 真车才能验的 | 回退方式 |
 |---|---|---|---|
@@ -159,3 +202,5 @@ S3（拿 percent 当健康），这两个都有小切口；S2 的锁传染刚被
 | R3 | `leadSeconds(...)`、`startGate(...)` | 起播静音时长、二缓冲次数 | 设置页第五把闸（关=现行 1.0MB 门槛） |
 | R2 | ring 的单生产/单消费游标 | 锁等待时长（需临时打点） | 闸：关掉即回到共用 `lock` |
 | R4 | 盘读路径的区间/洞判定 | 命中字节 vs 网络字节比例 | 直接关磁盘缓存 |
+| R6 | `bufferTargetSeconds(linkRate, required)` 纯函数 | 弱网起播耗时 vs 抽干次数的取舍 | 闸：关掉=单一缓冲目标 |
+| R7 | 触发条件判定（窗满却 lead=0 / starve / readAt stall）+ 去重限频 | 事件是否真在车上落网 | 设置页开关，默认开 |
