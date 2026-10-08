@@ -2840,6 +2840,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         saveCurrentState();
         // 摘掉刷新看门狗: 否则它会在 Activity 销毁后触发, 往死掉的 Context 上弹 Toast
         mainHandler.removeCallbacks(refreshWatchdog);
+        // 睡眠定时的 20 秒自续刷新同理（它只在"定时开着"时才续投，这里兜最后一棒）
+        sleepHandler.removeCallbacks(sleepTicker);
         // 远程升级收尾 (2026-09-12): 停在飞的清单请求与 APK 下载、摘看门狗、关对话框。
         // 不收的话下载会在后台继续吃车机流量, 回调还会往已销毁的 Activity 上弹 Toast。
         cancelUpdateWork();

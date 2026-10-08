@@ -42,8 +42,10 @@ import java.util.TreeMap;
  * </ul>
  *
  * <p>容量：{@link #evictForSpace} 按最后修改时间从旧开始删，删到放得下为止；{@code .dat} 与它的
- * sidecar 算<b>同一条条目</b>一起淘汰，目录仍在 {@code getCacheDir()} 下，沿用
- * {@code CacheSizeManager} 的全局裁剪边界，不另立第二套上限口径。
+ * sidecar 算<b>同一条条目</b>一起淘汰。目录在 {@code getCacheDir()/stream-cache} 下，所以本模块的
+ * 1GB 自管上限是套在 {@code CacheSizeManager} 全局 10GB 应急裁剪<b>之内</b>的更紧一层（全局那道是
+ * 递归扫 {@code getCacheDir()} 的，会把这些文件也算进总量并在超限时按 mtime 删）——
+ * 两层各管一件事，不是一句"沿用同一口径"能糊过去的。
  */
 public final class StreamDiskCache {
 
