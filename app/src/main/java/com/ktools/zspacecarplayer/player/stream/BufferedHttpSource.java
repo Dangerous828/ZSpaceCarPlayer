@@ -182,7 +182,7 @@ public class BufferedHttpSource {
      * 时长就是这个量级；给它一个宽限期，等于用"继续在同一条连接上收字节"换掉"再建一条连接再等
      * 一秒"。再长就是真的没人要这些数据了（切歌/放弃），该让出带宽和唯一的解码线程。
      */
-    static final long IDLE_FILL_GRACE_MS = 8_000L;
+    static final long IDLE_FILL_GRACE_MS = StreamTuning.DEFAULT_IDLE_FILL_GRACE_MS;
 
     /**
      * 纯判定：没有读者挂窗时，下载线程该继续把环形窗填着，还是收手让出连接。
@@ -202,12 +202,12 @@ public class BufferedHttpSource {
      * ③ 摘窗时长还在宽限内。
      */
     static boolean shouldKeepFillingWhileIdle(long nowMs, long idleSinceMs, boolean ringHasRoom,
-                                              boolean held) {
-        if (!held || idleSinceMs < 0L || !ringHasRoom) {
+                                              boolean held, long graceMs) {
+        if (!held || idleSinceMs < 0L || !ringHasRoom || graceMs <= 0L) {
             return false;
         }
         long idleMs = nowMs - idleSinceMs;
-        return idleMs >= 0L && idleMs < IDLE_FILL_GRACE_MS;
+        return idleMs >= 0L && idleMs < graceMs;
     }
 
     /** 预取已达标：预取模式、尚无读者接管、窗口已填到目标。此时下载线程应休眠让出带宽。 */
@@ -314,7 +314,8 @@ public class BufferedHttpSource {
                 if (closed) {
                     throw new IOException("buffered source closed");
                 }
-                int placement = readPlacementAction(position, bufStart, bufEnd, eof);
+                int placement = readPlacementAction(position, bufStart, bufEnd, eof,
+                        StreamTuning.forwardGapWaitEnabled());
                 if (placement == PLACE_IN_WINDOW) {
                     int off = (int) (position % capacity);
                     int avail = (int) (bufEnd - position);
@@ -386,7 +387,8 @@ public class BufferedHttpSource {
     /** 前向缺口在这么多个字节内时等下载追上，而不是重连（约 1 秒可补上）。 */
     static final long FORWARD_GAP_WAIT_MAX_BYTES = 256L * 1024L;
 
-    static int readPlacementAction(long position, long bufStart, long bufEnd, boolean eof) {
+    static int readPlacementAction(long position, long bufStart, long bufEnd, boolean eof,
+                                   boolean forwardGapWait) {
         if (position >= bufStart && position < bufEnd) {
             return PLACE_IN_WINDOW;
         }
@@ -396,7 +398,7 @@ public class BufferedHttpSource {
         if (position == bufEnd) {
             return PLACE_WAIT;
         }
-        if (position > bufEnd
+        if (forwardGapWait && position > bufEnd
                 && position - bufEnd <= FORWARD_GAP_WAIT_MAX_BYTES) {
             return PLACE_WAIT;
         }
@@ -1159,7 +1161,7 @@ public class BufferedHttpSource {
                 if (idleNoReaders()
                         && !shouldKeepFillingWhileIdle(SystemClock.elapsedRealtime(),
                                 idleSinceMs, (bufEnd - bufStart) < capacity - (capacity / 10),
-                                refCount > 0)) {
+                                refCount > 0, StreamTuning.idleFillGraceMs())) {
                     // 读者摘窗且过了宽限（或窗已满）：收手，避免分家后的源在后台空耗带宽。
                     // 宽限之内**继续在同一条连接上收字节填窗**——旧行为是一摘窗就退出并断连，
                     // 解码器跳读回来就得重连再付约 1 秒首字节，实车那 9 次跳读就是这么变成
@@ -1227,7 +1229,8 @@ public class BufferedHttpSource {
                     return -1;
                 }
                 if (idleNoReaders() && !shouldKeepFillingWhileIdle(
-                        SystemClock.elapsedRealtime(), idleSinceMs, true, refCount > 0)) {
+                        SystemClock.elapsedRealtime(), idleSinceMs, true, refCount > 0,
+                        StreamTuning.idleFillGraceMs())) {
                     // 读者全部离开且宽限已过：放弃本次写入，线程随 downloadLoop 休眠。
                     // 必须和 pumpIntoRing 用<b>同一条判定</b>——否则那边刚放行继续填窗，
                     // 这里立刻把写入判死，摘窗宽限就成了空话 (2026-10-08 A1)

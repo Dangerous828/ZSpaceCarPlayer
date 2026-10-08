@@ -32,6 +32,7 @@ import com.ktools.zspacecarplayer.player.DspAudioTrackPlayer;
 import com.ktools.zspacecarplayer.player.AndroidMediaPlayerWrapper;
 import com.ktools.zspacecarplayer.player.IAudioPlayer;
 import com.ktools.zspacecarplayer.player.stream.BufferingPolicy;
+import com.ktools.zspacecarplayer.player.stream.StreamDiskCache;
 import com.ktools.zspacecarplayer.player.stream.HttpProxyServer;
 import com.ktools.zspacecarplayer.model.SongItem;
 import com.ktools.zspacecarplayer.ui.MainActivity;
@@ -65,6 +66,9 @@ public class AudioPlayerService extends Service {
      * <b>没有任何自动切换路径</b>——自动降档已被车主否决。
      */
     public static final String PREF_KEY_STREAM_TIER = "play_stream_tier";
+    /** 取流改造的回退闸 (2026-10-08)：关任何一项就退回 vc20 的既有行为，不用重出包。 */
+    public static final String PREF_KEY_STREAM_TUNING = "stream_tuning_enabled";
+    public static final String PREF_KEY_DISK_CACHE = "disk_cache_enabled";
     private static final boolean DEFAULT_ENGINE_V3 = false; // 默认系统引擎, 车机一次只变一个变量
 
     /** 播放器引擎抽象: 系统 MediaPlayer (兼容模式) / v3 自研 DSP 管线 */
@@ -74,6 +78,12 @@ public class AudioPlayerService extends Service {
     private List<SongItem> playlist = new ArrayList<>();
     private int currentIndex = -1;
     private int currentPlayMode = MODE_SEQUENCE;
+    /** 随机模式的"上一首/下一首"可回溯序列 (2026-10-08)。队列一变即清空。 */
+    private final ShuffleHistory shuffleHistory = new ShuffleHistory();
+    /** 睡眠定时的截止时刻（elapsedRealtime 口径，墙钟改动不影响）；0 = 关。 */
+    private volatile long sleepStopAtElapsedMs = SleepTimer.OFF;
+    /** 耳机/外放拔出时暂停的接收器 (2026-10-08 T1 基准补齐)。 */
+    private android.content.BroadcastReceiver audioNoisyReceiver;
 
     private boolean everPrepared = false;
     private int pendingSeekMs = -1;
@@ -308,11 +318,8 @@ public class AudioPlayerService extends Service {
     public void onCreate() {
         super.onCreate();
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-        // 边播边存 (2026-10-08 T1 重审 A2)：目录仍在 getCacheDir() 下，所以 CacheSizeManager
-        // 的全局裁剪照样管得到它，不另立第二套容量口径。开不了只是回到"没有缓存"，不影响播放。
-        HttpProxyServer.getInstance().configureDiskCache(
-                new java.io.File(getCacheDir(), "stream-cache"),
-                BufferingPolicy.DISK_CACHE_LIMIT_BYTES);
+        applyStreamTuningFromPrefs();
+        registerAudioNoisyReceiver();
         initMediaPlayer();
         loadDspParamsFromPrefs();
         // 立刻把持久化的音效参数灌进 NativeDsp 的静态缓存。此时 native 引擎还没建
@@ -517,6 +524,19 @@ public class AudioPlayerService extends Service {
             @Override
             public void run() {
                 if (player != null && playbackState.isPrepared() && isPlaying()) {
+                    // 睡眠定时到点：立刻暂停并解除定时（留着会在下次播放时又误触发一次）
+                    if (SleepTimer.isExpired(android.os.SystemClock.elapsedRealtime(),
+                            sleepStopAtElapsedMs)) {
+                        sleepStopAtElapsedMs = SleepTimer.OFF;
+                        Log.i(TAG, "sleep timer expired, pausing");
+                        CrashMonitor.breadcrumb("play", "sleep timer expired -> pause");
+                        pause();
+                        if (stateChangeListener != null) {
+                            stateChangeListener.onPlayStatus("睡眠定时到点，已停止播放");
+                        }
+                        progressHandler.postDelayed(this, PlaybackStateMachine.PROGRESS_TICK_MS);
+                        return;
+                    }
                     int currentMs = player.getCurrentPosition();
                     int totalMs = player.getDuration();
 
@@ -888,6 +908,73 @@ public class AudioPlayerService extends Service {
         }
     }
 
+    /** 缓存目录句柄：设置页要显示占用与一键清空。 */
+    public static java.io.File streamCacheDir(android.content.Context ctx) {
+        return new java.io.File(ctx.getCacheDir(), "stream-cache");
+    }
+
+    /**
+     * 把四条回退闸从偏好灌进 {@link com.ktools.zspacecarplayer.player.stream.StreamTuning}，
+     * 并据此挂上/摘下磁盘缓存 (2026-10-08)。启动时调一次，设置页每次切换后再调一次。
+     *
+     * <p>默认全开（= 本批新行为）。关掉任何一项都退回 vc20 的既有行为，<b>只影响下一首</b>：
+     * 正在播的流不能中途改规则。
+     */
+    public void applyStreamTuningFromPrefs() {
+        android.content.SharedPreferences sp =
+                getSharedPreferences(PREF_NAME, MODE_PRIVATE);
+        boolean tuning = sp.getBoolean(PREF_KEY_STREAM_TUNING, true);
+        boolean disk = sp.getBoolean(PREF_KEY_DISK_CACHE, true);
+        com.ktools.zspacecarplayer.player.stream.StreamTuning.configure(
+                tuning ? com.ktools.zspacecarplayer.player.stream.StreamTuning
+                        .DEFAULT_IDLE_FILL_GRACE_MS : 0L,
+                tuning, tuning, disk);
+        HttpProxyServer.getInstance().configureDiskCache(
+                disk ? streamCacheDir(this) : null,
+                BufferingPolicy.DISK_CACHE_LIMIT_BYTES);
+        CrashMonitor.breadcrumb("play", "stream tuning: guards=" + tuning
+                + " diskCache=" + disk);
+    }
+
+    /** 回退闸当前状态（设置页显示用）。 */
+    public boolean isStreamTuningEnabled() {
+        return getSharedPreferences(PREF_NAME, MODE_PRIVATE)
+                .getBoolean(PREF_KEY_STREAM_TUNING, true);
+    }
+
+    /** 磁盘缓存当前状态（设置页显示用）。 */
+    public boolean isDiskCacheEnabled() {
+        return getSharedPreferences(PREF_NAME, MODE_PRIVATE)
+                .getBoolean(PREF_KEY_DISK_CACHE, true);
+    }
+
+    /** 设置页切换回退闸：立刻生效（下一首起），并落到偏好。 */
+    public void setStreamTuningEnabled(boolean enabled) {
+        getSharedPreferences(PREF_NAME, MODE_PRIVATE).edit()
+                .putBoolean(PREF_KEY_STREAM_TUNING, enabled).apply();
+        applyStreamTuningFromPrefs();
+    }
+
+    /** 设置页切换磁盘缓存；关掉时顺手把已有缓存清掉，别在设备上留没人用的字节。 */
+    public void setDiskCacheEnabled(boolean enabled) {
+        getSharedPreferences(PREF_NAME, MODE_PRIVATE).edit()
+                .putBoolean(PREF_KEY_DISK_CACHE, enabled).apply();
+        if (!enabled) {
+            StreamDiskCache.clearDir(streamCacheDir(this));
+        }
+        applyStreamTuningFromPrefs();
+    }
+
+    /** 当前播放缓存占用（字节）。 */
+    public long getStreamCacheBytes() {
+        return StreamDiskCache.dirBytes(streamCacheDir(this));
+    }
+
+    /** 清空播放缓存，返回删掉的字节数。 */
+    public long clearStreamCache() {
+        return StreamDiskCache.clearDir(streamCacheDir(this));
+    }
+
     /** 无损档？只有它才需要在放弃时提示"可以切流畅"。 */
     private boolean isLosslessTier() {
         return getStreamTier() == com.ktools.zspacecarplayer.player.stream.StreamTier.LOSSLESS;
@@ -987,6 +1074,7 @@ public class AudioPlayerService extends Service {
 
     public void setPlaylist(List<SongItem> songs, int startIndex, int startMs,
                             PlaybackStateMachine.PlaybackOrigin origin) {
+        shuffleHistory.reset();
         this.playlist = new ArrayList<>(songs);
         this.currentIndex = startIndex;
         CrashMonitor.putContext("playlistSize", playlist.size());
@@ -1004,6 +1092,7 @@ public class AudioPlayerService extends Service {
      * 媒体库刷新后同步播放列表，保持正在播放的曲目与 index 不会被破坏
      */
     public void updatePlaylist(List<SongItem> newSongs) {
+        shuffleHistory.reset();
         if (newSongs == null) return;
         SongItem current = getCurrentSong();
         this.playlist = new ArrayList<>(newSongs);
@@ -1639,7 +1728,13 @@ public class AudioPlayerService extends Service {
     private void playNext(PlaybackStateMachine.PlaybackOrigin origin) {
         if (playlist.isEmpty()) return;
         if (currentPlayMode == MODE_RANDOM) {
-            currentIndex = new Random().nextInt(playlist.size());
+            // 先走来路：刚被"上一首"退回去过，就应当能"下一首"走回原处，而不是又随机一次
+            int from = shuffleHistory.canGoForward() ? shuffleHistory.goForward()
+                    : new Random().nextInt(playlist.size());
+            if (currentIndex >= 0 && from != currentIndex) {
+                shuffleHistory.pushBack(currentIndex);
+            }
+            currentIndex = from;
         } else {
             currentIndex = (currentIndex + 1) % playlist.size();
         }
@@ -1657,7 +1752,14 @@ public class AudioPlayerService extends Service {
     private void playPrevious(PlaybackStateMachine.PlaybackOrigin origin) {
         if (playlist.isEmpty()) return;
         if (currentPlayMode == MODE_RANDOM) {
-            currentIndex = new Random().nextInt(playlist.size());
+            if (shuffleHistory.canGoBack()) {
+                // 随机模式下"上一首"必须是<b>回到刚才那首</b>。旧实现这里也是
+                // new Random().nextInt(size)，按下去会跳到任意一首（多数是往后），
+                // 用户观感就是"随机模式上一首坏了" (2026-10-08 T1 基准补齐)
+                currentIndex = shuffleHistory.goBack(currentIndex);
+            } else {
+                currentIndex = new Random().nextInt(playlist.size());
+            }
         } else {
             currentIndex = (currentIndex - 1 + playlist.size()) % playlist.size();
         }
@@ -1666,6 +1768,62 @@ public class AudioPlayerService extends Service {
         playbackState.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);
         CrashMonitor.putContext("playlistIndex", currentIndex);
         startPlaybackWithSeek(playlist.get(currentIndex), -1, origin);
+    }
+
+    /**
+     * 拔出耳机/断开外放即暂停 (2026-10-08)。T1 全都有这条，缺它的后果很具体：
+     * 车上拔了耳机音乐继续从功放出来，或者用户把耳机拔了以为停了、回来发现还在响。
+     *
+     * <p>用 {@link AudioManager#ACTION_AUDIO_BECOMING_NOISY}： wired 耳机拔出与多数
+     * A2DP 断开会发它；注册在运行时（4.3 上清单里声明无效）。
+     */
+    private void registerAudioNoisyReceiver() {
+        if (audioNoisyReceiver != null) {
+            return;
+        }
+        audioNoisyReceiver = new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(android.content.Context context, android.content.Intent intent) {
+                if (intent == null || !AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction())) {
+                    return;
+                }
+                if (!isPlaying()) {
+                    return; // 本来就没在播，别把"暂停"提示打在静止态上
+                }
+                Log.i(TAG, "audio output became noisy, pausing playback");
+                CrashMonitor.breadcrumb("play", "audio noisy -> pause");
+                pause();
+                if (stateChangeListener != null) {
+                    stateChangeListener.onPlayStatus("已断开扬声器，播放暂停");
+                }
+            }
+        };
+        try {
+            registerReceiver(audioNoisyReceiver,
+                    new android.content.IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY));
+        } catch (Exception e) {
+            Log.w(TAG, "register noisy receiver failed", e);
+            audioNoisyReceiver = null;
+        }
+    }
+
+    /** 设睡眠定时：minutes<=0 即取消。到点是<b>立即暂停</b>（理由见 {@link SleepTimer}）。 */
+    public void setSleepTimerMinutes(int minutes) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        sleepStopAtElapsedMs = SleepTimer.deadlineFor(now, minutes);
+        CrashMonitor.breadcrumb("play", minutes > 0
+                ? ("sleep timer set " + minutes + "min") : "sleep timer cancelled");
+    }
+
+    /** 定时剩余毫秒；0 表示未开或已结束。设置页轮询它显示倒计时。 */
+    public long getSleepRemainingMs() {
+        return SleepTimer.remainingMs(android.os.SystemClock.elapsedRealtime(),
+                sleepStopAtElapsedMs);
+    }
+
+    /** 是否已设睡眠定时。 */
+    public boolean isSleepTimerActive() {
+        return sleepStopAtElapsedMs > SleepTimer.OFF;
     }
 
     public void seekTo(final int ms) {
@@ -2475,6 +2633,14 @@ public class AudioPlayerService extends Service {
 
     @Override
     public void onDestroy() {
+        if (audioNoisyReceiver != null) {
+            try {
+                unregisterReceiver(audioNoisyReceiver);
+            } catch (Exception ignored) {
+                // 没注册成功过，忽略
+            }
+            audioNoisyReceiver = null;
+        }
         stopAndReleaseAllAudioResources();
         super.onDestroy();
     }

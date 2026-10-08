@@ -346,6 +346,49 @@ public final class StreamDiskCache {
         }
     }
 
+    /** 缓存目录当前占用（字节）。只统计自己前缀的文件，与 {@link #evictForSpace} 同口径。 */
+    public static long dirBytes(File dir) {
+        if (dir == null || !dir.isDirectory()) {
+            return 0L;
+        }
+        File[] kids = dir.listFiles();
+        if (kids == null) {
+            return 0L;
+        }
+        long total = 0L;
+        for (int i = 0; i < kids.length; i++) {
+            File f = kids[i];
+            if (f.isFile() && f.getName().startsWith(FILE_PREFIX)
+                    && f.getName().endsWith(FILE_SUFFIX)) {
+                total += f.length();
+            }
+        }
+        return total;
+    }
+
+    /**
+     * 清空缓存目录，返回删掉的字节数。设置页「清空缓存」用——车主有权知道自己设备里
+     * 存了什么、并一键抹掉，这条不是可选功能。
+     */
+    public static long clearDir(File dir) {
+        if (dir == null || !dir.isDirectory()) {
+            return 0L;
+        }
+        File[] kids = dir.listFiles();
+        if (kids == null) {
+            return 0L;
+        }
+        long freed = 0L;
+        for (int i = 0; i < kids.length; i++) {
+            File f = kids[i];
+            if (f.isFile() && f.getName().startsWith(FILE_PREFIX)
+                    && f.getName().endsWith(FILE_SUFFIX) && f.delete()) {
+                freed += f.length();
+            }
+        }
+        return freed;
+    }
+
     private static String sha1Hex(String s) {
         try {
             byte[] d = MessageDigest.getInstance("SHA-1").digest(s.getBytes("UTF-8"));

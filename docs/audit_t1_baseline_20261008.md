@@ -139,3 +139,49 @@ Android Auto/AAOS 对媒体应用的硬性要求是 `MediaSession` + `MediaBrows
 | A1/A2/A3 | 本次重审新列，**未开工** | 待车主定优先级 |
 | 31 项功能缺口 | 未开工，未排期 | 待车主定优先级 |
 | QQ 音乐音效引擎（SuperSound/蝰蛇） | 一手结论：私有引擎无法复刻（`docs/sound_effect_research_20260903.md:14-16`） | 限制，非欠账 |
+
+## 4. L4 功能差距逐项判定（2026-10-08 收尾，不留"含糊未完成"）
+
+**本次已实现（同批 commit，均有单测）**
+
+| 项 | 落点 |
+|---|---|
+| 随机模式"上一首"是重新随机（真缺陷） | `service/ShuffleHistory.java` + `AudioPlayerService.playPrevious/playNext` |
+| 睡眠定时（到点立即暂停） | `service/SleepTimer.java` + 设置页「睡眠定时」行 |
+| 拔出耳机/断开外放不暂停 | `AudioManager.ACTION_AUDIO_BECOMING_NOISY` 运行时接收器 |
+| 回退闸：地基改动必须能在车上关 | `player/stream/StreamTuning.java` + 设置页「取流优化」「播放缓存」 |
+| 缓存占用可见 + 一键清空 | `StreamDiskCache.dirBytes/clearDir` + 设置页 |
+| 曲库混入视频（236 条） | `JellyfinApiClient.hasVideoStream` 过滤 + 刷新后明示条数 |
+
+**判定为"不适用"，附依据（不是遗漏）**
+
+| 项 | 为什么不做 |
+|---|---|
+| 封面/专辑图 | 车主 3.2.0 主动删封面（`changelogs/3.2.0.md`），不是欠账 |
+| 服务端搜索 | 本仓是全量镜像 + 本地 SQLite 拼音搜索（`SongDao`、`PinyinUtils`），库就 1051 条；服务端搜索解决的是"目录巨大不便全量拉"的问题，我们没有那个问题 |
+| 多服务器配置 | 只有一个家里 NAS，无第二实例需求 |
+| 逐字/卡拉OK 歌词 | Jellyfin 只提供行级歌词（`/Lyrics`），无逐字时间戳数据源 |
+| 私有音效引擎（SuperSound/蝰蛇） | `docs/sound_effect_research_20260903.md:14-16` 一手结论：无法复刻，已用自研 DSP 路线 |
+| MediaSession/AAOS 标准接入 | Android 4.3 无该 API（`AudioPlayerService:432` 注释确认），客观不可能项 |
+| 退避期间 UI 状态 | 车主拍板不做（`docs/stream_retry_backoff_spec_20261005.md:92-94`） |
+
+**判定为"缺依据，不做猜测式实现"**
+
+| 项 | 缺什么 |
+|---|---|
+| 响度归一化 (ReplayGain) | 2026-10-08 实测这台 Jellyfin 的 1051 条**完全没有** `Normalization` / `Loudness` 字段（MediaSources 与 Audio 流两层都空）。没有可信增益值，凭猜做音量拉平会把歌做坏。前置条件：服务端或转换管线里先算出 RG 并落到元数据 |
+
+**需要产品决策后才做（新特性，非本次"改坏/没改完"）**
+
+| 项 | 要先定什么 |
+|---|---|
+| 离线下载 / 边播边存的"下载整首" | 曲库列表与播放页**都没有长按菜单**（全仓无 `OnLongClick`/`AlertDialog` 挂载点），要先定：入口在哪、下载到哪（`filesDir` 还是 cache）、UI 如何显示进度与已下载标记、如何管理/取消 |
+| 歌单增删改 | 现在的"歌单"是库内派生视图（类别/红心/最多播放），要改成 Jellyfin `Playlists` 实体是数据模型变更 |
+| 播放队列可视化编辑（拖拽/移除） | 涉及交互设计，车机 1920x720 上拖拽需另行验证 |
+
+**只能真车验证（本批已实现但效果未证）**
+
+- A1/A2 的全部效果：`upstream conns`、`ttfbMax`、`disk` 三个数必须来自车上一次真实上报。
+- FLAC 无 seektable 的二分次数是否从 ~9 降到 1~2（决定是否动 vendored `dr_flac`，任务 33）。
+- vc19 的"闪退"是否被断路器止住。
+- 设置页新增三行（音质 / 取流优化+播放缓存 / 睡眠定时）的显示与点击：本次无设备接入，只验证了编译、`R.id` 生成与文案进包。

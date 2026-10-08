@@ -149,23 +149,23 @@ public class StreamStarvationTest {
     public void smallForwardGapIsWaitedNotReconnected() {
         // 窗 [1,000,000 - 2,000,000)
         assertEquals(BufferedHttpSource.PLACE_IN_WINDOW,
-                BufferedHttpSource.readPlacementAction(1_500_000L, 1_000_000L, 2_000_000L, false));
+                BufferedHttpSource.readPlacementAction(1_500_000L, 1_000_000L, 2_000_000L, false, true));
         assertEquals("窗尾正好是 bufEnd：等", BufferedHttpSource.PLACE_WAIT,
-                BufferedHttpSource.readPlacementAction(2_000_000L, 1_000_000L, 2_000_000L, false));
+                BufferedHttpSource.readPlacementAction(2_000_000L, 1_000_000L, 2_000_000L, false, true));
         assertTrue("缺口在阈值内必须判成等待",
                 BufferedHttpSource.FORWARD_GAP_WAIT_MAX_BYTES > 0);
         assertEquals(BufferedHttpSource.PLACE_WAIT, BufferedHttpSource.readPlacementAction(
                 2_000_000L + BufferedHttpSource.FORWARD_GAP_WAIT_MAX_BYTES,
-                1_000_000L, 2_000_000L, false));
+                1_000_000L, 2_000_000L, false, true));
         assertEquals("缺口过大才是真重定位", BufferedHttpSource.PLACE_RESET, BufferedHttpSource.readPlacementAction(
                 2_000_001L + BufferedHttpSource.FORWARD_GAP_WAIT_MAX_BYTES,
-                1_000_000L, 2_000_000L, false));
+                1_000_000L, 2_000_000L, false, true));
         assertEquals("回读到已回收区：只能重连", BufferedHttpSource.PLACE_RESET,
-                BufferedHttpSource.readPlacementAction(999_999L, 1_000_000L, 2_000_000L, false));
+                BufferedHttpSource.readPlacementAction(999_999L, 1_000_000L, 2_000_000L, false, true));
         assertEquals("EOF 之后一律是 EOF，不再等一个永远不会来的字节", BufferedHttpSource.PLACE_EOF,
-                BufferedHttpSource.readPlacementAction(2_000_000L, 1_000_000L, 2_000_000L, true));
+                BufferedHttpSource.readPlacementAction(2_000_000L, 1_000_000L, 2_000_000L, true, true));
         assertEquals(BufferedHttpSource.PLACE_EOF,
-                BufferedHttpSource.readPlacementAction(9_000_000L, 1_000_000L, 2_000_000L, true));
+                BufferedHttpSource.readPlacementAction(9_000_000L, 1_000_000L, 2_000_000L, true, true));
     }
 
     /**
@@ -178,18 +178,18 @@ public class StreamStarvationTest {
         long now = 100_000L;
         long grace = BufferedHttpSource.IDLE_FILL_GRACE_MS;
         assertTrue("宽限内、窗还有余量、仍被持有 = 继续填",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, true, true));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, true, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
         assertTrue("宽限边界内一毫秒都不算超",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - grace + 1L, true, true));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - grace + 1L, true, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
         assertFalse("超宽限就收手，让出带宽与唯一的解码线程",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - grace, true, true));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - grace, true, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
         assertFalse("窗满了继续读只会背压阻塞，收手等读者回来再拉起",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, false, true));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, false, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
         assertFalse("已 release（切歌/销毁）：旧源绝不允许在后台吃新歌的带宽",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, true, false));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, true, false, BufferedHttpSource.IDLE_FILL_GRACE_MS));
         assertFalse("从未摘窗（还有读者）不该走这条判定",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, -1L, true, true));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, -1L, true, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
         assertFalse("时钟回拨不认",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now + 1_000L, true, true));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now + 1_000L, true, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
     }
 }

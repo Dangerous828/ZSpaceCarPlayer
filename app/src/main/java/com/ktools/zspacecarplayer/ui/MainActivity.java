@@ -55,6 +55,7 @@ import com.ktools.zspacecarplayer.net.JellyfinApiClient;
 import com.ktools.zspacecarplayer.service.AudioPlayerService;
 import com.ktools.zspacecarplayer.service.MediaButtonReceiver;
 import com.ktools.zspacecarplayer.service.PlaybackStateMachine;
+import com.ktools.zspacecarplayer.service.SleepTimer;
 import com.ktools.zspacecarplayer.util.CacheSizeManager;
 import com.ktools.zspacecarplayer.update.ApkDownloader;
 import com.ktools.zspacecarplayer.update.UpdateChecker;
@@ -974,6 +975,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
         setupEngineToggle();
         setupTierToggle();
+        setupStreamTuningRows();
+        setupSleepTimerRow();
         // 远程升级 (2026-09-12): 「关于与升级」分块 (检查更新 + 启动时自动检查开关)
         setupUpdateSection();
         // 诊断日志手动上报 (2026-09-16): 设置页「立即上报诊断日志」
@@ -1140,6 +1143,138 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         };
         row.setOnClickListener(cycle);
         valueBtn.setOnClickListener(cycle);
+    }
+
+    /**
+     * 取流回退闸 + 播放缓存两行 (2026-10-08)。这两行存在的意义就一句话：这批改的是所有播放
+     * 都要走的地基，真车只有一台又看不到现场日志，所以<b>出问题必须能在车上关掉、且不用重出包</b>。
+     * 缓存行同时给占用与「清空」——车主有权知道设备里存了什么并一键抹掉。
+     */
+    private void setupStreamTuningRows() {
+        if (layoutSettingsPage == null) return;
+        final View tuningRow = layoutSettingsPage.findViewById(R.id.btnSettingTuningToggle);
+        final Button tuningBtn = layoutSettingsPage.findViewById(R.id.btnSettingTuningValue);
+        if (tuningRow != null && tuningBtn != null && playerService != null) {
+            tuningBtn.setText(playerService.isStreamTuningEnabled() ? "开" : "关");
+            final View.OnClickListener cycle = new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    boolean next = !playerService.isStreamTuningEnabled();
+                    playerService.setStreamTuningEnabled(next);
+                    tuningBtn.setText(next ? "开" : "关");
+                    Toast.makeText(MainActivity.this, next
+                            ? "已开启取流优化，下一首歌起生效"
+                            : "已退回旧版取流方式（每次离开窗口就断连），下一首歌起生效",
+                            Toast.LENGTH_LONG).show();
+                }
+            };
+            tuningRow.setOnClickListener(cycle);
+            tuningBtn.setOnClickListener(cycle);
+        }
+
+        final Button cacheBtn = layoutSettingsPage.findViewById(R.id.btnSettingCacheValue);
+        final Button clearBtn = layoutSettingsPage.findViewById(R.id.btnSettingCacheClear);
+        final TextView cacheDesc = layoutSettingsPage.findViewById(R.id.tvSettingCacheDesc);
+        if (cacheBtn != null && playerService != null) {
+            cacheBtn.setText(playerService.isDiskCacheEnabled() ? "开" : "关");
+            updateCacheDesc(cacheDesc);
+            final View.OnClickListener toggle = new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    boolean next = !playerService.isDiskCacheEnabled();
+                    playerService.setDiskCacheEnabled(next);
+                    cacheBtn.setText(next ? "开" : "关");
+                    updateCacheDesc(cacheDesc);
+                    Toast.makeText(MainActivity.this, next
+                            ? "已开启播放缓存，听过的歌回拖与重播不再走网络"
+                            : "已关闭播放缓存，并清掉已存的内容", Toast.LENGTH_LONG).show();
+                }
+            };
+            cacheBtn.setOnClickListener(toggle);
+            if (clearBtn != null) {
+                clearBtn.setOnClickListener(new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        long freed = playerService.clearStreamCache();
+                        updateCacheDesc(cacheDesc);
+                        Toast.makeText(MainActivity.this,
+                                "已清空播放缓存，释放 " + humanMb(freed), Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        }
+    }
+
+    /**
+     * 睡眠定时行 (2026-10-08)：点一下换下一档（关→15→30→45→60→90→关）。
+     * 副标题显示剩余时间，所以有一个 20 秒自续的刷新——定时关掉或到点就自己停，
+     * 不留长期 handler。
+     */
+    private Button sleepValueBtn;
+    private TextView sleepDescView;
+    private int sleepMinutes = 0;
+    private final android.os.Handler sleepHandler = new android.os.Handler();
+    private final Runnable sleepTicker = new Runnable() {
+        @Override
+        public void run() {
+            updateSleepLabel();
+            if (isBound && playerService != null && playerService.isSleepTimerActive()) {
+                sleepHandler.postDelayed(this, 20_000L);
+            }
+        }
+    };
+
+    private void setupSleepTimerRow() {
+        if (layoutSettingsPage == null || playerService == null) return;
+        final View row = layoutSettingsPage.findViewById(R.id.btnSettingSleepToggle);
+        sleepValueBtn = layoutSettingsPage.findViewById(R.id.btnSettingSleepValue);
+        sleepDescView = layoutSettingsPage.findViewById(R.id.tvSettingSleepDesc);
+        if (row == null || sleepValueBtn == null) return;
+        updateSleepLabel();
+        final View.OnClickListener cycle = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                sleepMinutes = SleepTimer.nextPreset(sleepMinutes);
+                playerService.setSleepTimerMinutes(sleepMinutes);
+                updateSleepLabel();
+                sleepHandler.removeCallbacks(sleepTicker);
+                if (sleepMinutes > 0) {
+                    sleepHandler.postDelayed(sleepTicker, 20_000L);
+                    Toast.makeText(MainActivity.this,
+                            "睡眠定时已设为 " + sleepMinutes + " 分钟，到点立即暂停",
+                            Toast.LENGTH_SHORT).show();
+                } else {
+                    Toast.makeText(MainActivity.this, "已取消睡眠定时", Toast.LENGTH_SHORT).show();
+                }
+            }
+        };
+        row.setOnClickListener(cycle);
+        sleepValueBtn.setOnClickListener(cycle);
+    }
+
+    private void updateSleepLabel() {
+        if (sleepValueBtn == null) return;
+        boolean active = isBound && playerService != null && playerService.isSleepTimerActive();
+        sleepValueBtn.setText(active ? (sleepMinutes + " 分") : "关");
+        if (sleepDescView != null) {
+            sleepDescView.setText(active && playerService != null
+                    ? SleepTimer.formatRemaining(playerService.getSleepRemainingMs()) + "，到点立即暂停"
+                    : "到点立即暂停播放");
+        }
+    }
+
+    private void updateCacheDesc(TextView desc) {
+        if (desc == null || playerService == null) return;
+        desc.setText("已用 " + humanMb(playerService.getStreamCacheBytes())
+                + " / 上限 " + humanMb(com.ktools.zspacecarplayer.player.stream
+                .BufferingPolicy.DISK_CACHE_LIMIT_BYTES));
+    }
+
+    private static String humanMb(long bytes) {
+        if (bytes < 1024L) return bytes + " B";
+        if (bytes < 1024L * 1024L) return String.format(java.util.Locale.US, "%.0f KB",
+                bytes / 1024.0);
+        return String.format(java.util.Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0));
     }
 
     /** 读当前档位：服务在就用服务的口径，服务不在就读同一份 SharedPreferences。 */
@@ -1862,6 +1997,14 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 autoReloginAttempted = false;
                 tvServerStatus.setText("已连接");
                 endRefreshChain(epoch, "ok songs=" + (songs == null ? 0 : songs.size()));
+                // 滤掉了多少必须是<b>看得见</b>的：否则用户的观察只是"歌怎么变少了"，
+                // 没有任何地方告诉他这是有意为之以及滤的依据 (2026-10-08 曲库边界)
+                int skippedVideo = JellyfinApiClient.getInstance().getSkippedVideoItems();
+                if (skippedVideo > 0) {
+                    Log.i(TAG, "fetchLibrary: 已滤掉 " + skippedVideo + " 条带视频流的条目");
+                    Toast.makeText(MainActivity.this, "已滤掉 " + skippedVideo
+                            + " 条带画面的文件，不入音乐库", Toast.LENGTH_LONG).show();
+                }
                 if (songs == null || songs.isEmpty()) {
                     Log.i(TAG, "fetchLibrary: 服务器返回空库, 保留现有列表");
                     return;

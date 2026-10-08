@@ -324,9 +324,14 @@ public final class NativeLosslessDecoder {
          *
          * <p>总长未知（chunked 转码流不给 Content-Length）时保持放行，行为与今天完全一致。
          */
-        static boolean seekTargetReachable(long absolutePos, long contentLength) {
+        static boolean seekTargetReachable(long absolutePos, long contentLength,
+                                           boolean eofGuardEnabled) {
             if (absolutePos < 0) {
                 return false;
+            }
+            if (!eofGuardEnabled) {
+                // 回退闸关掉时退回 vc20 行为：不校验越界（dr_flac 会失去"到流尾"的判据）
+                return true;
             }
             if (contentLength <= 0L) {
                 return true;
@@ -338,7 +343,8 @@ public final class NativeLosslessDecoder {
         public boolean seek(long absolutePos) {
             if (closed || cancelled.get()) return false;
             if (absolutePos < 0 || absolutePos > MAX_LIMIT) return false;
-            if (!seekTargetReachable(absolutePos, source.getContentLength())) {
+            if (!seekTargetReachable(absolutePos, source.getContentLength(),
+                    com.ktools.zspacecarplayer.player.stream.StreamTuning.seekEofGuardEnabled())) {
                 // 越界的 seek 交给 dr_flac 当"到流尾了"的信号，让它自己收紧折半上界，
                 // 而不是我们替它去清窗、断连、重下一条永远取不到字节的连接
                 return false;

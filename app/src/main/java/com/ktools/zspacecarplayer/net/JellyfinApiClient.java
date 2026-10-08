@@ -830,6 +830,9 @@ public class JellyfinApiClient {
                                 total = rootJson.get("TotalRecordCount").getAsInt();
                             }
                             JsonArray items = rootJson.getAsJsonArray("Items");
+                            if (page == 0 || start == 0) {
+                                resetSkippedVideoItems();
+                            }
                             pageCount = items != null ? items.size() : 0;
                             if (items != null) {
                                 for (JsonElement el : items) {
@@ -875,9 +878,63 @@ public class JellyfinApiClient {
         }, "jf-fetch-items").start();
     }
 
+    /**
+     * 这条媒体里有没有<b>视频流</b> (2026-10-08 曲库边界)。判据用服务端给的流类型，不用码率猜：
+     * 实测这台 Jellyfin 在列表接口的 {@code MediaSources[].MediaStreams[].Type} 里回了
+     * {@code Audio/Video/EmbeddedImage/Subtitle/Lyric}，那 236 条视频都带 {@code Type=Video}
+     * （h264+aac），而正常的 m4a/flac 带封面也只到 {@code EmbeddedImage}，不会误伤。
+     *
+     * <p><b>保守放行</b>：MediaSources 或 MediaStreams 缺失、结构不认识时返回 false——
+     * 宁可放一首慢歌进来，也不许把真歌丢掉。误滤一首歌用户会当成 bug 上报，误放一首只会卡。
+     */
+    static boolean hasVideoStream(JsonObject itemObj) {
+        if (itemObj == null || !itemObj.has("MediaSources")) return false;
+        JsonElement msEl = itemObj.get("MediaSources");
+        if (msEl == null || !msEl.isJsonArray()) return false;
+        JsonArray sources = msEl.getAsJsonArray();
+        for (int i = 0; i < sources.size(); i++) {
+            JsonElement srcEl = sources.get(i);
+            if (srcEl == null || !srcEl.isJsonObject()) continue;
+            JsonObject src = srcEl.getAsJsonObject();
+            if (!src.has("MediaStreams")) continue;
+            JsonElement stEl = src.get("MediaStreams");
+            if (stEl == null || !stEl.isJsonArray()) continue;
+            JsonArray streams = stEl.getAsJsonArray();
+            for (int j = 0; j < streams.size(); j++) {
+                JsonElement one = streams.get(j);
+                if (one == null || !one.isJsonObject()) continue;
+                JsonElement type = one.getAsJsonObject().get("Type");
+                if (type != null && type.isJsonPrimitive()
+                        && "Video".equalsIgnoreCase(type.getAsString())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** 本轮刷新被"带视频流"滤掉的条目数；刷新方读它决定是否告诉用户。 */
+    private int skippedVideoItems = 0;
+
+    public int getSkippedVideoItems() {
+        return skippedVideoItems;
+    }
+
+    /** 每次整轮刷新开始前清零。 */
+    void resetSkippedVideoItems() {
+        skippedVideoItems = 0;
+    }
+
     /** 包内可见: 传输方式裁定是否正确落到 SongItem 上, 由单测端到端钉住 (见 StreamTransportWiringTest) */
     SongItem parseSongItem(JsonObject itemObj) {
         if (itemObj == null || !itemObj.has("Id")) return null;
+        if (hasVideoStream(itemObj)) {
+            // 曲库里混着视频（2026-10-08 实测 236 条，多是 4K/60 帧的 mp4，单曲要 3.6MB/s）。
+            // 这些在车上永远播不动：不是"卡顿"，是根本没有可播的音频取流形态。当作非音乐条目
+            // 滤掉，别让它进列表去污染"能播的歌"这件事。
+            skippedVideoItems++;
+            return null;
+        }
         String itemId = itemObj.get("Id").getAsString();
         String name = itemObj.has("Name") ? itemObj.get("Name").getAsString() : "未知曲目";
 

@@ -282,17 +282,17 @@ public class LosslessBridgeTest {
     @Test
     public void seekBeyondKnownLengthIsUnreachable() {
         long len = 18_900_000L; // Booty Music 原件实测规模：103784B/s × 181.8s
-        assertTrue(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(0L, len));
+        assertTrue(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(0L, len, true));
         assertTrue("最后一个可读字节仍可达",
-                NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(len - 1L, len));
+                NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(len - 1L, len, true));
         assertFalse("落在 EOF 上不可读，就该报不可达",
-                NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(len, len));
-        assertFalse(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(len + 1L, len));
+                NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(len, len, true));
+        assertFalse(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(len + 1L, len, true));
         assertFalse("负位永远不可达",
-                NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(-1L, len));
+                NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(-1L, len, true));
         // 总长未知（chunked 转码流不给 Content-Length）时保持旧行为：不得凭空判不可达，
         // 否则流畅档会整首起不了播
-        assertTrue(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(999_999_999L, -1L));
-        assertTrue(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(999_999_999L, 0L));
+        assertTrue(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(999_999_999L, -1L, true));
+        assertTrue(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(999_999_999L, 0L, true));
     }
 }
