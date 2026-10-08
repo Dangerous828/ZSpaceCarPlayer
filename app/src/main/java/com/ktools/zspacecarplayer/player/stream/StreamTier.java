@@ -6,7 +6,7 @@ package com.ktools.zspacecarplayer.player.stream;
  * <p>存在理由（2026-10-08 T1 基准重审，{@code docs/audit_t1_baseline_20261008.md} L2）：市面
  * T1 全部把"用哪一档"作为用户可选项，并把所需带宽讲明白（Amazon：HD 1.5–2Mbps、Ultra HD
  * 5–10Mbps；YouTube Music：Wi-Fi / 蜂窝 / 下载三套独立档）。我们此前只有一条自动选择的取流
- * 形态，外加一个<b>已被车主否决</b>的自动降档（见 {@link StreamRateGovernor#AUTO_DEGRADE_ENABLED}）。
+ * 形态，外加一个<b>已被车主否决</b>的自动降档（曾由 `StreamRateGovernor` 持有，现已连同档位状态一起删除）。
  * 这一层把选择权交回去：档位只改<b>下一首</b>的取流 URL，链路撑不起无损时由 app 明示，
  * 换不换由人说。
  *
