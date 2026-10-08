@@ -194,6 +194,40 @@ N 变大），而不是去动音质。**它规避了车主否决的那条线**�
 
 ---
 
+## 5·五、想找"4.3 能跑的 QQ 音乐包"：外部来源普查结论（2026-10-08 夜，别重复跑）
+
+先纠正本文早先的一处框定：**Android 4.3 不是取流/网络优化的障碍**。我写过"QQ 的 minSdk 21
+搬不过来"，那只对它的 QUIC/Mars 二进制库成立；取流策略、缓冲口径、预取、重试全在 Java 层。
+一手反证就在仓里：`apks/8600/XimalayaForCar.apk` = `com.ximalaya.ting.android.car` **1.6.1，
+minSdk 11**，自带 native 播放内核 `lib/armeabi/libxmediaplayer.so` / `_x.so`，串里能看到
+**自定义数据源与 seek 回调**（`DataSeekCallBack`、`dataSeekFromOut`、`AbsSeek`、`AVSEEK_SIZE`）
+和 ffmpeg 的 `analyzeduration`/`probesize` —— 厂商在比 4.3 更老的系统上就自己管取流了。
+
+外部找包的三条路都探过，结论是**网上没有比他手上更完整、可核验的 4.3 包来源**：
+
+| 渠道 | 结果 |
+|---|---|
+| 镜像站程序化读取 | `apkpure.com` 连接失败、`apkpure.net` **403**、`apkcombo.com` 连接失败 —— 拿不到逐版本 minSdk 列表 |
+| 下载站（ququyou / 7xz / 3h3 / qqtn / danji100 / onegreen / 91danji） | 元数据自相矛盾：同一款写 v3.1.0.9 且"安卓4.5+"（不是有效 API）、另站标"13.8.0.10"（那是手机版号）；下载按钮多为 `javascript:;` 占位；**无校验值、不可核验** |
+| archive.org / GitHub 存档 | 搜不到带 checksum 的 `com.tencent.qqmusiccar` 存档；只有车主论坛帖（autohome 有人称在这类主机上装过酷我/QQ 音乐，但没有可下载的包） |
+
+**真正的官方渠道在车上，不在网上**：`apks/8600/com.ecarx.appstore-1.apk` 里读到它的后端
+`https://appstore-api.xchanger.cn/appstore/`（服务活着，返回 `{"message":"no Route matched..."}`），
+客户端含 `SearchApiService` / `ApkDetailApiService` / `MyApkApiService` 等 Retrofit 接口与
+`apkUrl` / `downloadUrl` 字段。**能装进这台 4.3 的那个版本，是由这个商店分发的。**
+我只做了一次公开主机的只读 GET，拿不到路由就停 —— 继续猜别人内部接口路径不在我该做的范围内。
+
+因此取一手证据的正确顺序（都不需要网上下载）：
+
+1. 车连上 adb 时：`pm path com.tencent.qqmusiccar` → 拉 `base.apk`；**同时拉 `.odex`/`.vdex`**
+   （预装件常把代码放在 odex：喜马拉雅那个 APK 里 536 个文件**没有 `classes.dex`**，只下载 APK 看不到 Java 逻辑）。
+2. 或在车机应用中心里搜 QQ 音乐 → 安装/更新 → 再 pull。这条连信任问题都没有。
+3. 我手上 `~/Downloads/10200113.apk`（3.14.0.4，**minSdk 21 / targetSdk 33**）**装不上这台 4.3**，
+   所以它不是车上在跑的那版；它仍可作为"新版 QQ 音乐怎么做取流"的策略参照（本文 §5 的结论来自它，
+   这些结论是策略层的，不受版本差异影响）。
+
+---
+
 ## 6. 每项的验收口径
 
 | 方案 | 新增纯函数（必须单测） | 真车才能验的 | 回退方式 |
