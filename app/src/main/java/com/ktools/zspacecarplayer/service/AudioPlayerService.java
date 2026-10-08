@@ -213,6 +213,17 @@ public class AudioPlayerService extends Service {
     private long lastLosslessRequiredBytesPerSec = -1L;
     /** 上一次落盘的上游连接数，只在变化时留一行痕 (2026-10-08 连接形状复盘)。 */
     private long lastUpstreamConnections = -1L;
+    /**
+     * 本曲的<b>累计</b>上游代价账 (2026-10-08 真车上报后加)。代理侧那份求和只统计"还活着"的源，
+     * 一条 fork 关闭读数就往回退——上报里 0.8 秒内 {@code conns} 从 4 变 1 就是这么来的，
+     * 会让人误判"这首歌只用了一条连接"。这里按 URL 归属取历史最大值，切歌自动复位。
+     */
+    private String costAccountUrl;
+    private long songConnsMax;
+    private long songDiscardedMax;
+    private long songTtfbMaxMs;
+    private long songDiskServedMax;
+    private long songDiskStoredMax;
     /** 上次 tick 上报的缓冲 percent / 状态 (2026-09-13 双进度条调查): 变化时打一行诊断日志 */
     private int lastReportedBufferPercent = Integer.MIN_VALUE;
     private boolean lastReportedBuffering = false;
@@ -743,23 +754,49 @@ public class AudioPlayerService extends Service {
         // 上游连接账 (2026-10-08)：同一首歌一条长连接取 5MB 实测 246KB/s，拆成 20 条独立请求只剩
         // 74KB/s。所以"链路只有 60~90KB/s"到底是链路还是我自己的重连，得靠这两个数判，不靠我猜。
         long[] upstreamCost = proxy.getUpstreamCost(url);
-        if (upstreamCost != null && upstreamCost[0] != lastUpstreamConnections) {
-            lastUpstreamConnections = upstreamCost[0];
-            CrashMonitor.putContext("ctx_upstreamConns", String.valueOf(upstreamCost[0]));
-            CrashMonitor.putContext("ctx_upstreamDiscardedBytes", String.valueOf(upstreamCost[1]));
-            CrashMonitor.putContext("ctx_upstreamTtfbMaxMs", String.valueOf(upstreamCost[2]));
-            CrashMonitor.breadcrumb("stream", "upstream conns=" + upstreamCost[0]
-                    + " discarded=" + upstreamCost[1] + "B ttfbMax=" + upstreamCost[2]
-                    + "ms socket=" + deliveredBytes + "B disk=" + upstreamCost[3]
-                    + "B pos=" + currentMs + "ms");
-            CrashMonitor.putContext("ctx_diskServedBytes", String.valueOf(upstreamCost[3]));
+        if (upstreamCost != null) {
+            // 车机是 API 18，java.util.Objects.equals 是 API 19+，这里手写比较
+            if (costAccountUrl == null ? url != null : !costAccountUrl.equals(url)) {
+                costAccountUrl = url;   // 换曲：累计账清零
+                songConnsMax = 0L;
+                songDiscardedMax = 0L;
+                songTtfbMaxMs = 0L;
+                songDiskServedMax = 0L;
+                songDiskStoredMax = 0L;
+            }
+            songConnsMax = Math.max(songConnsMax, upstreamCost[0]);
+            songDiscardedMax = Math.max(songDiscardedMax, upstreamCost[1]);
+            songTtfbMaxMs = Math.max(songTtfbMaxMs, upstreamCost[2]);
+            songDiskServedMax = Math.max(songDiskServedMax, upstreamCost[3]);
+            songDiskStoredMax = Math.max(songDiskStoredMax, upstreamCost[4]);
+            // 只在累计值真的变了时落一行，避免每 tick 刷同一条
+            if (songConnsMax != lastUpstreamConnections) {
+                lastUpstreamConnections = songConnsMax;
+                CrashMonitor.putContext("ctx_upstreamConns", String.valueOf(songConnsMax));
+                CrashMonitor.putContext("ctx_upstreamDiscardedBytes",
+                        String.valueOf(songDiscardedMax));
+                CrashMonitor.putContext("ctx_upstreamTtfbMaxMs", String.valueOf(songTtfbMaxMs));
+                CrashMonitor.putContext("ctx_diskServedBytes", String.valueOf(songDiskServedMax));
+                CrashMonitor.putContext("ctx_diskStoredBytes", String.valueOf(songDiskStoredMax));
+                CrashMonitor.breadcrumb("stream", "upstream conns=" + songConnsMax
+                        + " srcs=" + upstreamCost[5] + " discarded=" + songDiscardedMax
+                        + "B ttfbMax=" + songTtfbMaxMs + "ms socket=" + deliveredBytes
+                        + "B disk=" + songDiskServedMax + "B stored=" + songDiskStoredMax
+                        + "B pos=" + currentMs + "ms");
+            }
             if (prefetchedNextUrl != null) {
-                // 预取源是另一条 URL，不在上面这笔账里；单列出来才能判"抢不抢带宽"
-                long[] pf = HttpProxyServer.getInstance().getUpstreamCost(prefetchedNextUrl);
+                // 预取源是另一条 URL，不在上面这笔账里；单列出来才能判"抢不抢带宽"。
+                // ⚠️ socket 字节必须单独问代理：getUpstreamCost 的第 2 项是 discarded，
+                // 上一版把它当 socket 落进 ctx_prefetchSocketBytes，所以上报里那个 0 是"作废字节"
+                // 而不是"预取收了多少字节"（2026-10-08 真车上报核出来的标签错）。
+                HttpProxyServer pfProxy = HttpProxyServer.getInstance();
+                long[] pf = pfProxy.getUpstreamCost(prefetchedNextUrl);
                 if (pf != null) {
                     CrashMonitor.putContext("ctx_prefetchConns", String.valueOf(pf[0]));
-                    CrashMonitor.putContext("ctx_prefetchSocketBytes", String.valueOf(pf[1]));
+                    CrashMonitor.putContext("ctx_prefetchDiscardedBytes", String.valueOf(pf[1]));
                 }
+                CrashMonitor.putContext("ctx_prefetchSocketBytes",
+                        String.valueOf(pfProxy.getSocketBytes(prefetchedNextUrl)));
             }
         }
         long requiredBytesPerSec = BufferingPolicy.requiredBytesPerSec(contentLength, totalMs);

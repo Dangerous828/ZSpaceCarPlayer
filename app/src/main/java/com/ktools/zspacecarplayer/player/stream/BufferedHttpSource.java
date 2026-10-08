@@ -72,6 +72,17 @@ public class BufferedHttpSource {
     private final String url;
     private final int capacity;
     private final byte[] ring;
+    /**
+     * 本条流的日志身份 (2026-10-08 真车上报后加)：同一首歌同一时刻可以有多条源
+     * （重定位 fork、预取晋升），水位行原来不带任何身份，两行 {@code buffered=8192KB/8192KB}
+     * 到底是谁说的无法判定——这次就靠它把"窗满"与"lead=0"这对矛盾拆开。
+     */
+    private final int sourceId;
+    private static int sNextSourceId = 0;
+
+    private static synchronized int nextSourceId() {
+        return ++sNextSourceId;
+    }
 
     private final Object lock = new Object();
     /** 每个活动读方（连接）的当前读取位置，用于窗口头部回收 */
@@ -256,6 +267,7 @@ public class BufferedHttpSource {
                               long prefetchEagerTargetBytes) {
         this.url = url;
         this.capacity = Math.max(CHUNK_SIZE * 2, capacityBytes);
+        this.sourceId = nextSourceId();
         this.ring = new byte[this.capacity];
         long initPos = Math.max(0L, initialPosition);
         synchronized (lock) {
@@ -1302,9 +1314,15 @@ public class BufferedHttpSource {
     /**
      * 每 5s 打一行窗口水位与供给速率。调用方已持 lock 且确认 epoch 当前。
      *
-     * 判读：水位持续 <1MB → 供给不足（服务器发送节奏/带宽），抖动来自网络侧；
-     * 水位贴满 capacity → 供给充足，若仍停顿则问题在消费侧（解码/AudioTrack）。
-     * rate 单调偏低（<消费码率）同样指向供给不足。
+     * <p>判读（2026-10-08 纠正过一次，别再照着旧话读）：
+     * <ul>
+     *   <li>水位持续 &lt;1MB 且 {@code hasRoom=true} → 供给不足（带宽/服务端发送节奏）。</li>
+     *   <li>水位贴满 capacity（{@code hasRoom=false}）→ <b>{@code rate} 不再是链路速率</b>：
+     *       下载线程被窗口背压卡住，它只会等于消费速率。这种时刻还停顿，问题在消费侧
+     *       （解码 / AudioTrack），不在网络。所以读 rate 之前必须先确认 {@code hasRoom}。</li>
+     *   <li>{@code refs=} 是这条流的读者数；同一首歌可能有几条源在打这行日志，
+     *       靠 {@code src=} 区分，别把两行不同 src 的数当同一条流的历史比。</li>
+     * </ul>
      */
     private void logWatermarkLocked(long epoch) {
         long now = SystemClock.elapsedRealtime();
@@ -1319,8 +1337,11 @@ public class BufferedHttpSource {
         }
         long buffered = bufEnd - bufStart;
         long rateKbps = (bufEnd - lastWatermarkBytes) * 8L / elapsed; // kbit/s
-        Log.i(TAG, "watermark: buffered=" + (buffered / 1024) + "KB/" + (capacity / 1024)
-                + "KB rate=" + rateKbps + "kbps eof=" + eof + " fatal=" + fatalError
+        Log.i(TAG, "watermark: src=" + sourceId + " refs=" + readPosMap.size()
+                + " buffered=" + (buffered / 1024) + "KB/" + (capacity / 1024)
+                + "KB hasRoom=" + (buffered < capacity - CHUNK_SIZE)
+                + " head=" + bufEnd + " tail=" + bufStart
+                + " rate=" + rateKbps + "kbps eof=" + eof + " fatal=" + fatalError
                 + " epoch=" + epoch);
         lastWatermarkLogAtMs = now;
         lastWatermarkBytes = bufEnd;

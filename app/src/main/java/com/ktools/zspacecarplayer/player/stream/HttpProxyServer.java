@@ -163,51 +163,109 @@ public final class HttpProxyServer {
         }
     }
 
+    /**
+     * 同一 URL 上可能同时挂着<b>多条活动源</b>：重定位会分家出 {@code url#fN} 的 fork 源，预取源
+     * 晋升后也沿用同一个远端 URL。指示器和状态查询必须问"<b>正在喂播放的那条</b>"，否则读数会
+     * 自相矛盾 —— 2026-10-08 真车上报里就这样：相隔 0.8 秒的两行 {@code upstream conns=4
+     * socket=900627B} 与 {@code conns=1 socket=5209600B}，其实分别是两条不同的源，而旧源一关，
+     * "这首歌建过几条连接"还会<b>往回退</b>。
+     *
+     * <p>选取规则（纯函数，单测覆盖）：① 读者多的优先（有读者=正在被消费）；② 并列取下载头更靠前的
+     * （进度更大的那条）；② 再并列取最先登记的。全部读者为 0 时退化成 ②，与"预取源尚未被接管"
+     * 的旧行为一致。
+     *
+     * @return 选中的下标；空输入返回 -1
+     */
+    static int pickReporterIndex(int[] readerCounts, long[] progress) {
+        if (readerCounts == null || progress == null || readerCounts.length == 0) {
+            return -1;
+        }
+        if (readerCounts.length != progress.length) {
+            return -1;
+        }
+        int best = 0;
+        for (int i = 1; i < readerCounts.length; i++) {
+            if (readerCounts[i] > readerCounts[best]) {
+                best = i;
+            } else if (readerCounts[i] == readerCounts[best]
+                    && progress[i] > progress[best]) {
+                best = i;
+            }
+        }
+        return best;
+    }
+
+    /** 按 {@link #pickReporterIndex} 找出该远端 URL 当前该被问的那条源；没有返回 null。 */
+    private BufferedHttpSource findReporterLocked(String remoteUrl) {
+        if (remoteUrl == null) {
+            return null;
+        }
+        java.util.ArrayList<BufferedHttpSource> live = new java.util.ArrayList<BufferedHttpSource>();
+        for (BufferedHttpSource source : sources.values()) {
+            if (!source.isClosed() && remoteUrl.equals(source.getUrl())) {
+                live.add(source);
+            }
+        }
+        if (live.isEmpty()) {
+            return null;
+        }
+        int[] readers = new int[live.size()];
+        long[] progress = new long[live.size()];
+        for (int i = 0; i < live.size(); i++) {
+            BufferedHttpSource source = live.get(i);
+            readers[i] = source.getRefCount();
+            long downloaded = source.getDownloadedBytes();
+            progress[i] = downloaded > 0L ? downloaded : 0L;
+        }
+        int idx = pickReporterIndex(readers, progress);
+        return idx >= 0 ? live.get(idx) : null;
+    }
+
+    /** 该远端 URL 当前有几条活动源（上报里 {@code srcs=}）；0 表示这首歌此刻没有活着的流。 */
+    public int liveSourceCount(String remoteUrl) {
+        synchronized (sourceLock) {
+            if (remoteUrl == null) {
+                return 0;
+            }
+            int n = 0;
+            for (BufferedHttpSource source : sources.values()) {
+                if (!source.isClosed() && remoteUrl.equals(source.getUrl())) {
+                    n++;
+                }
+            }
+            return n;
+        }
+    }
+
     /** 供调试 / 状态上报：当前某远端 URL 的缓冲百分比（无活动源返回 -1） */
     public int getBufferedPercent(String remoteUrl) {
         synchronized (sourceLock) {
-            for (BufferedHttpSource source : sources.values()) {
-                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
-                    return source.getBufferedPercent();
-                }
-            }
-            return -1;
+            BufferedHttpSource source = findReporterLocked(remoteUrl);
+            return source == null ? -1 : source.getBufferedPercent();
         }
     }
 
     /** 已缓冲字节数（prefill 门槛判定用）；无活动源返回 -1。（2026-09-12 缓冲/预取） */
     public long getBufferedBytes(String remoteUrl) {
         synchronized (sourceLock) {
-            for (BufferedHttpSource source : sources.values()) {
-                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
-                    return source.getBufferedBytes();
-                }
-            }
-            return -1L;
+            BufferedHttpSource source = findReporterLocked(remoteUrl);
+            return source == null ? -1L : source.getBufferedBytes();
         }
     }
 
     /** 该远端资源累计下载到的偏移（速率采样用）；无活动源返回 -1。 */
     public long getDownloadedBytes(String remoteUrl) {
         synchronized (sourceLock) {
-            for (BufferedHttpSource source : sources.values()) {
-                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
-                    return source.getDownloadedBytes();
-                }
-            }
-            return -1L;
+            BufferedHttpSource source = findReporterLocked(remoteUrl);
+            return source == null ? -1L : source.getDownloadedBytes();
         }
     }
 
     /** 链路真实交付的累计字节（测速唯一可信口径）；无活动源返回 -1。 */
     public long getSocketBytes(String remoteUrl) {
         synchronized (sourceLock) {
-            for (BufferedHttpSource source : sources.values()) {
-                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
-                    return source.getSocketBytes();
-                }
-            }
-            return -1L;
+            BufferedHttpSource source = findReporterLocked(remoteUrl);
+            return source == null ? -1L : source.getSocketBytes();
         }
     }
 
@@ -215,10 +273,45 @@ public final class HttpProxyServer {
      * 这首歌总共建过多少次上游连接、因此作废过多少字节、以及最慢的一次首字节 (2026-10-08)。
      *
      * <p>同一 URL 的 fork 源（key 形如 {@code url#f1}）全部计入，因为"这首歌重连了几次"问的
-     * 就是总账。返回 {@code long[]{connections, discardedBytes, ttfbMaxMs, diskServedBytes}}；无源时返回
-     * {@code null}。三个数一起看才有意义：连接数是代价的个数，TTFB 是每个的单价，作废字节
-     * 是白烧的流量。
+     * 就是总账。返回 {@code long[]{connections, discardedBytes, ttfbMaxMs, diskServedBytes,
+     * diskStoredBytes, liveSources}}；无源时返回 {@code null}。三个数一起看才有意义：连接数是代价的
+     * 个数，TTFB 是每个的单价，作废字节是白烧的流量；后两项（2026-10-08 真车上报后补）分别回答
+     * "边播边存到底写没写进盘"（A2 的写路径原先完全不可观测）与"这笔账摊在几条源上"——
+     * 少了 {@code liveSources}，一条源关闭时 {@code connections} 会凭空变小，读数看起来像
+     * "连接数还会退回去"。
      */
+    public long[] getUpstreamCost(String remoteUrl) {
+        if (remoteUrl == null) {
+            return null;
+        }
+        synchronized (sourceLock) {
+            long conns = 0L;
+            long discarded = 0L;
+            long ttfbMax = 0L;
+            long diskServed = 0L;
+            long diskStored = 0L;
+            int live = 0;
+            for (java.util.Map.Entry<String, BufferedHttpSource> e : sources.entrySet()) {
+                BufferedHttpSource source = e.getValue();
+                if (source.isClosed() || !e.getKey().startsWith(remoteUrl)) {
+                    continue;
+                }
+                conns += source.getUpstreamConnections();
+                discarded += source.getDiscardedBytes();
+                diskServed += source.getDiskServedBytes();
+                diskStored += source.getDiskStoredBytes();
+                live++;
+                long[] ttfb = source.getTtfbStats();
+                if (ttfb[1] > ttfbMax) {
+                    ttfbMax = ttfb[1];
+                }
+            }
+            return live > 0 ? new long[]{conns, discarded, ttfbMax, diskServed, diskStored, live}
+                    : null;
+        }
+    }
+
+    /** 给新建的源挂上磁盘缓存（关着就是 dir=null，完全不碰盘）。 */
     private void attachDiskCache(BufferedHttpSource created) {
         java.io.File dir;
         long cap;
@@ -231,79 +324,35 @@ public final class HttpProxyServer {
         }
     }
 
-    public long[] getUpstreamCost(String remoteUrl) {
-        if (remoteUrl == null) {
-            return null;
-        }
-        synchronized (sourceLock) {
-            long conns = 0L;
-            long discarded = 0L;
-            long ttfbMax = 0L;
-            long diskServed = 0L;
-            boolean any = false;
-            for (java.util.Map.Entry<String, BufferedHttpSource> e : sources.entrySet()) {
-                BufferedHttpSource source = e.getValue();
-                if (source.isClosed() || !e.getKey().startsWith(remoteUrl)) {
-                    continue;
-                }
-                conns += source.getUpstreamConnections();
-                discarded += source.getDiscardedBytes();
-                diskServed += source.getDiskServedBytes();
-                long[] ttfb = source.getTtfbStats();
-                if (ttfb[1] > ttfbMax) {
-                    ttfbMax = ttfb[1];
-                }
-                any = true;
-            }
-            return any ? new long[]{conns, discarded, ttfbMax, diskServed} : null;
-        }
-    }
-
     /** 环形窗口是否还有余量（饱和=背压，此时任何速率样本都不代表链路能力）。无活动源返回 false。 */
     public boolean sourceRingHasRoom(String remoteUrl) {
         synchronized (sourceLock) {
-            for (BufferedHttpSource source : sources.values()) {
-                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
-                    return source.ringHasRoom();
-                }
-            }
-            return false;
+            BufferedHttpSource source = findReporterLocked(remoteUrl);
+            return source == null ? false : source.ringHasRoom();
         }
     }
 
     /** 远端资源总长（prefill 门槛估算码率用）；无活动源 / 未知返回 -1。 */
     public long getContentLength(String remoteUrl) {
         synchronized (sourceLock) {
-            for (BufferedHttpSource source : sources.values()) {
-                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
-                    return source.getContentLength();
-                }
-            }
-            return -1L;
+            BufferedHttpSource source = findReporterLocked(remoteUrl);
+            return source == null ? -1L : source.getContentLength();
         }
     }
 
     /** 窗口容量（prefill 门槛按容量比例算目标用）；无活动源返回 -1。 */
     public int getWindowCapacity(String remoteUrl) {
         synchronized (sourceLock) {
-            for (BufferedHttpSource source : sources.values()) {
-                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
-                    return source.getCapacityBytes();
-                }
-            }
-            return -1;
+            BufferedHttpSource source = findReporterLocked(remoteUrl);
+            return source == null ? -1 : source.getCapacityBytes();
         }
     }
 
     /** 当前曲是否饥饿 / 断流（预取让位判定用）；无活动源返回 false。 */
     public boolean isSourceStarving(String remoteUrl) {
         synchronized (sourceLock) {
-            for (BufferedHttpSource source : sources.values()) {
-                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
-                    return source.isStarving();
-                }
-            }
-            return false;
+            BufferedHttpSource source = findReporterLocked(remoteUrl);
+            return source == null ? false : source.isStarving();
         }
     }
 
@@ -314,12 +363,8 @@ public final class HttpProxyServer {
      */
     public boolean isSourceFatalEver(String remoteUrl) {
         synchronized (sourceLock) {
-            for (BufferedHttpSource source : sources.values()) {
-                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
-                    return source.hasLatchedFatal();
-                }
-            }
-            return false;
+            BufferedHttpSource source = findReporterLocked(remoteUrl);
+            return source == null ? false : source.hasLatchedFatal();
         }
     }
 

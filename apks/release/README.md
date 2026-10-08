@@ -426,3 +426,28 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 **发版必须 `clean` + `assembleDebug`（release 无 signingConfig）**，
 且系统默认 java 已是 JDK 25，必须显式 `JAVA_HOME=…/openjdk@21/…`，否则 gradle 报
 `Unsupported class file major version 69`。
+
+## vc22 = 3.2.11 出包记录（2026-10-08，**未发布**）
+
+包：**`ZSpaceCarPlayer-3.2.11-code22-debug.apk`**，3,148,975 B，
+`sha256=d38b5bbf196434620df640a05f3d91c295da278b2cc91c12a7464a6ce36e7720`，
+`aapt2` → `versionCode='22' versionName='3.2.11'`，`aapt` → `sdkVersion:'18'`，
+`zipalign -c -v 4` → `Verification successful`；
+`clean :app:testDebugUnitTest :app:assembleDebug` → **441 条 host 单测 0 失败**。
+
+内容 = vc21 首份真车上报（19:03:57《广寒宫》）读出来的五项仪表缺陷修复，逐项论证见
+`changelogs/3.2.11.md`：多源同 URL 时指示器取错源（`pickReporterIndex`，读者数优先）、
+`conns` 会往回退（服务侧按曲记累计最大值 + 新增 `srcs=`）、
+`ctx_prefetchSocketBytes` 取错列（那一项是 discarded）、水位行没有来源身份且窗满时 `rate`
+不等于链路速率（补 `src=/refs=/hasRoom=/head=/tail=`）、A2 写路径不可观测（补 `stored=`）。
+顺带把 vc21 漏改的 `CLIENT_VERSION`（停在 3.2.9）跟上 3.2.11。
+
+包内核验（按 UTF-8 字节搜原始 dex）：新串 `watermark: src=` / ` hasRoom=` / ` head=` / ` tail=` /
+` srcs=` / ` stored=` / `ctx_diskStoredBytes` / `ctx_prefetchDiscardedBytes` / `refs=` 各 1；
+**minSdk 18 红线**：`Ljava/util/Objects;`、`java.time`、`Ljava/util/function/` 均 0
+（我在源码里差点用了 API 19 的 `Objects.equals`，被仓里那条旧注释拦住，改成手写比较并在 dex 里复核）。
+版本串 `3.2.11` 命中 2 处、旧 `3.2.9` 归零。
+
+**状态：清单草稿 `latest-3.2.11-code22.json` 已按线上形状备齐十个键（顺序逐键一致、`notes` 留空），
+包体在 `apks/release/`，NAS 发布目录与线上 `latest.json` 一个字节都没动 —— 发不发等你点头。**
+线上此刻仍是 vc21 / 3.2.10（`94662545…`）。
