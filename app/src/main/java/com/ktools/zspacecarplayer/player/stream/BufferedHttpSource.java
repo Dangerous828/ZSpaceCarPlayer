@@ -91,6 +91,15 @@ public class BufferedHttpSource {
      * 与 {@code fatalError} 同锁保护，只随本流生灭，不随重定位/重连复位。
      */
     private boolean fatalLatched = false;
+    /**
+     * 从 socket 真实读到的累计字节数（跨重连累加，<b>不受环形窗口背压影响</b>）。
+     *
+     * <p>为什么必须单独有这一个计数器（2026-10-08 真车）：测速若拿 {@code bufEnd} 当"下载了多少"，
+     * 窗口满的时候它只跟着读者走——8MB 环形窗一饱和，`est` 就等于播放消耗速率而不是链路速率，
+     * 于是"健康链路"也必然测出 `est ≈ 所需速率 < 所需×1.15`，被判成持续缺口。当晚车主用同一条
+     * 链路 10 秒内下完 3.1MB 的 OTA 包（>300KB/s），而我这边"测"出来的是 107KB/s——就是这个假口径。
+     */
+    private long socketBytes = 0L;
     /** ≥0 表示本轮被服务端判为"资源已不存在"，读侧要抛可识别的类型而不是普通 IO 异常。 */
     private volatile int goneHttpStatus = -1;
 
@@ -565,6 +574,23 @@ public class BufferedHttpSource {
         }
     }
 
+    /** 链路真实交付的累计字节数（不受窗口背压影响），测速只能用它。 */
+    public long getSocketBytes() {
+        synchronized (lock) {
+            return socketBytes;
+        }
+    }
+
+    /**
+     * 环形窗口是否还有余量收新字节。饱和时下载被读者拽着走（背压），
+     * 此时<b>任何速率样本都不代表链路能力</b>，测速必须让路。
+     */
+    public boolean ringHasRoom() {
+        synchronized (lock) {
+            return (bufEnd - bufStart) < capacity - (capacity / 10);
+        }
+    }
+
     /** 缓冲进度百分比（0-100；总长未知返回 -1） */
     public int getBufferedPercent() {
         synchronized (lock) {
@@ -929,6 +955,10 @@ public class BufferedHttpSource {
             }
             if (n == 0) {
                 continue;
+            }
+            // 先记账再写环：这个计数代表"链路真给了多少"，不能被环形窗口的背压改写。
+            synchronized (lock) {
+                socketBytes += n;
             }
             if (writeToRing(chunk, n, epoch) < 0) {
                 return; // closed / aborted / epoch 过期

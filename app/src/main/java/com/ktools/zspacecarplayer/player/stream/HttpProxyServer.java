@@ -183,6 +183,30 @@ public final class HttpProxyServer {
         }
     }
 
+    /** 链路真实交付的累计字节（测速唯一可信口径）；无活动源返回 -1。 */
+    public long getSocketBytes(String remoteUrl) {
+        synchronized (sourceLock) {
+            for (BufferedHttpSource source : sources.values()) {
+                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
+                    return source.getSocketBytes();
+                }
+            }
+            return -1L;
+        }
+    }
+
+    /** 环形窗口是否还有余量（饱和=背压，此时任何速率样本都不代表链路能力）。无活动源返回 false。 */
+    public boolean sourceRingHasRoom(String remoteUrl) {
+        synchronized (sourceLock) {
+            for (BufferedHttpSource source : sources.values()) {
+                if (!source.isClosed() && source.getUrl().equals(remoteUrl)) {
+                    return source.ringHasRoom();
+                }
+            }
+            return false;
+        }
+    }
+
     /** 远端资源总长（prefill 门槛估算码率用）；无活动源 / 未知返回 -1。 */
     public long getContentLength(String remoteUrl) {
         synchronized (sourceLock) {

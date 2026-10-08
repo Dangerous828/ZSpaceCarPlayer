@@ -192,13 +192,17 @@ public class BufferingPolicyTest {
      */
     @Test
     public void bandwidthSamplingRequiresAKnownStillRunningDownload() {
-        assertTrue(BufferingPolicy.bandwidthSampleIsMeasurable(50, 38_934_625L, 294_661L));
+        assertTrue(BufferingPolicy.bandwidthSampleIsMeasurable(50, 38_934_625L, 294_661L, true));
         assertFalse("整首已落地 → 不可采（今晚就是这里被读成 0B/s 后换了档）",
-                BufferingPolicy.bandwidthSampleIsMeasurable(100, 38_934_625L, 294_661L));
+                BufferingPolicy.bandwidthSampleIsMeasurable(100, 38_934_625L, 294_661L, true));
         assertFalse("chunked 无总长 → 转码产率不是链路能力",
-                BufferingPolicy.bandwidthSampleIsMeasurable(-1, -1L, 0L));
+                BufferingPolicy.bandwidthSampleIsMeasurable(-1, -1L, 0L, true));
         assertFalse("时长未知 → 没有『所需速率』可算",
-                BufferingPolicy.bandwidthSampleIsMeasurable(50, 38_934_625L, 0L));
+                BufferingPolicy.bandwidthSampleIsMeasurable(50, 38_934_625L, 0L, true));
+        // 第四条：8MB 环形窗一饱和，bufEnd 只跟着读者走，此时任何样本都是"播放消耗速率"。
+        // 这是 2026-10-08 那个 107KB/s 假缺口的真正来源（车主同一条链路 10 秒下完 3.1MB 的包）。
+        assertFalse("窗口饱和 = 背压，样本代表不了链路",
+                BufferingPolicy.bandwidthSampleIsMeasurable(50, 38_934_625L, 294_661L, false));
         assertEquals("所需速率 = 总长/时长（Bad Romance 实测锚点）",
                 132_133L, BufferingPolicy.requiredBytesPerSec(38_934_625L, 294_661L));
         assertEquals(-1L, BufferingPolicy.requiredBytesPerSec(-1L, 294_661L));

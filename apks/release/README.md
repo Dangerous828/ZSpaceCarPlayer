@@ -367,3 +367,15 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 
 ⚠️ 设备侧未核验：车机需下次上电自动升级并手动确认安装。这条布局修复的最终判据只能在真屏上看——
 弹窗里「立即下载 / 稍后」必须完整可见（见 `changelogs/3.2.7.md` 实车判据 1）。
+
+## vc19 / vc20 发布记录（2026-10-08，一次回滚）
+
+- **vc19 = 3.2.8**：3,129,064 B，`sha256=41fb1b5099313e3e…`。上线约 20 分钟后真车连续两条
+  `abnormal_exit`（08:48:34、08:51:30，`appVersionCode=19`，`stackTrace` 0 字节 = 崩在原生）。
+  可疑改动是本版把时长兜底接进 MediaCodec 分支（放行了一次"对不支持 Range 的 chunked 流做 seek"）。
+- **vc20 = 3.2.9**：3,129,291 B，`sha256=e6e272d1aa3efd714bbac60693c03ab38e311252e0db837cdca5a60b9a588565`，
+  `aapt2` 核 `versionCode=20 versionName=3.2.9`，401 条单测 0 失败，zip 填充 78,626。
+  内容 = 撤回 vc19 的时长兜底与自动换档 + 把测速口径改成 socket 真收字节（窗口饱和时不采）。
+  包内核验：`duration unknown in MediaCodec stream` 计数 **0**（确认撤回），`getSocketBytes`/`socketBytes` 各 1。
+- 两次发布清单 `notes` 长度都是 0（新铁律生效）。备份链：`latest.json.bak-20261008-vc18`、`latest.json.bak-20261008-vc19`。
+- 公网复核：清单轮询第 1 轮即命中；按 `apkUrl` 实下载 200、字节数一致、**三方 sha256 一致**。

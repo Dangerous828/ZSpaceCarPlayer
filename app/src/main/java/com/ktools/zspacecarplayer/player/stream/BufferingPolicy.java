@@ -212,17 +212,20 @@ public final class BufferingPolicy {
     }
 
     /**
-     * 测速窗口是否<b>可采</b>（2026-10-07 误判的根因闸门，抽出来钉成断言）。
+     * 测速窗口是否<b>可采</b>（2026-10-07 / 10-08 两连续晚的误判都栽在这道门上，四条缺一不可）。
      *
-     * <p>三条都得满足，缺一条就是不测量而<b>不是</b>测出 0：
-     * ① {@code percent < 100}：整首已经落地，此后必然零新字节，读成 0B/s 就是"带宽不足"——
-     *    当晚 `percent 87→100`（链路健康、lead 稳 65s）之后 9 秒就被换了档；
-     * ② {@code contentLength > 0}：chunked 转码流没有总长，它的产率是转码器给的，不是链路的；
-     * ③ {@code durationMs > 0}：没有时长就没有"这首需要多少 B/s"，②③合起来就是所需速率。
+     * <p>① {@code percent < 100}：整首已经落地，此后必然零新字节，读成 0B/s 就是"带宽不足"
+     *    ——10-07 那次 `percent 87→100`（链路健康）9 秒后就被换了档。
+     * <p>② 窗口有余量（{@code ringRoom}）：8MB 环形窗一饱和，写入被读者拽着走，
+     *    <b>任何速率样本都变成了"播放消耗速率"</b>而不是链路能力，于是健康链路也永远测出
+     *    `est ≈ 所需 < 所需×1.15`，必然误判。10-08 就是这么"测"出 107KB/s 的——车主同一条链路
+     *    10 秒下完 3.1MB 的包（>300KB/s）。
+     * <p>③④ {@code contentLength > 0} 且 {@code durationMs > 0}：没有总长就没有"这首需要多少
+     *    B/s"，chunked 转码流两条都拿不到（它的产率还是转码器的，不是链路的）。
      */
     public static boolean bandwidthSampleIsMeasurable(int percent, long contentLength,
-                                                      long durationMs) {
-        return percent >= 0 && percent < 100 && contentLength > 0L && durationMs > 0L;
+                                                      long durationMs, boolean ringRoom) {
+        return percent >= 0 && percent < 100 && contentLength > 0L && durationMs > 0L && ringRoom;
     }
 
     /** 本曲「不抽干」所需速率 = 资源总长 / 时长；不可测时返回 -1（治理器据此不动任何结论）。 */

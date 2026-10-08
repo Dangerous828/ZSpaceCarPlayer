@@ -684,12 +684,15 @@ public class AudioPlayerService extends Service {
         //    转码产率当链路。两种不可采的时刻都要重开窗口基准，否则下一段真实下载会被
         //    接到一个过期基准上算出荒谬速率。
         // 所需速率 = 资源总长 / 本曲时长，即"不抽干"的最小值；治理器在它之上留 15% 上浮。
-        long downloadedBytes = proxy.getDownloadedBytes(url);
+        // 口径只认 socket 真收字节（proxy.getDownloadedBytes 是 bufEnd，窗口饱和时它等于播放
+        // 消耗速率，测出来必然"贴着所需但不及"——10-08 那个 107KB/s 的假缺口就是这么来的）
+        long deliveredBytes = proxy.getSocketBytes(url);
         long contentLength = proxy.getContentLength(url);
         long requiredBytesPerSec = BufferingPolicy.requiredBytesPerSec(contentLength, totalMs);
-        if (downloadedBytes >= 0L) {
-            if (BufferingPolicy.bandwidthSampleIsMeasurable(percent, contentLength, totalMs)) {
-                rateGovernor.onProgress(SystemClock.elapsedRealtime(), downloadedBytes,
+        if (deliveredBytes >= 0L) {
+            if (BufferingPolicy.bandwidthSampleIsMeasurable(percent, contentLength, totalMs,
+                    proxy.sourceRingHasRoom(url))) {
+                rateGovernor.onProgress(SystemClock.elapsedRealtime(), deliveredBytes,
                         requiredBytesPerSec);
             } else {
                 rateGovernor.rebaseWindow();

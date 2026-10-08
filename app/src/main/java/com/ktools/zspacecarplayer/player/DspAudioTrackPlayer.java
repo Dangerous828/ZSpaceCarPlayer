@@ -445,18 +445,12 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         } else {
             currentDurationMs = 0;
         }
-        // 时长兜底要在**这条分支也做**：原生分支早就有（见 tryPrepareNativeLossless 里那句
-        // knownDurationMs），但走系统 MediaCodec 的恰恰是转码流——`static=false` 的产物是
-        // chunked 且无总长，抽取器给的 KEY_DURATION 经常是 0 或缺失，于是上报里满屏
-        // `prepared dur=0ms`：剩余时长算不出（remaining 恒 -1）、进度条与拖条全废、
-        // 「缓冲中」也失去唯一可用的判据（2026-10-08 真车流畅档复盘）。
-        if (currentDurationMs <= 0 && knownDurationMs > 0) {
-            currentDurationMs = knownDurationMs;
-            Log.i(TAG, "duration unknown in MediaCodec stream, use library duration "
-                    + knownDurationMs + "ms");
-            CrashMonitor.breadcrumb("v3", "duration unknown in container, use library "
-                    + knownDurationMs + "ms");
-        }
+        // **不要**在这条分支拿 knownDurationMs 兜时长（vc19 加过，因真车闪退当天撤回）：
+        // currentDurationMs 一旦非 0，`isEffectivelyAtEnd` 与断点下发那道时长闸门就会放行，
+        // 于是对一条 chunked、不支持 Range 的转码流发起 seek —— Android 4.3 上这烧的是
+        // mediaserver 原生进程：现场是"卡住然后整个 App 没了"，Java 侧 stackTrace 为空
+        // （2026-10-08 vc19 两条 abnormal_exit 正是这个形状，都在自动换档之后）。
+        // 进度条全瞎（dur=0ms）确实难受，但那是显示问题；先让那条流本身可 seek 再谈显示时长。
 
         Log.i(TAG, "MediaCodec Audio format: " + mime + ", sr=" + sampleRate + ", ch=" + channelCount + ", dur=" + currentDurationMs);
 

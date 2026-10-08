@@ -90,29 +90,31 @@ public class StreamRateGovernorTest {
     }
 
     /**
-     * 自动换档**是开着的**，且开着的前提要钉住：
-     * ① 认定缺口必须用「本曲所需速率」，不许再用固定 140KB/s（那是 10-07 误判的根因，
-     *    由 {@link #directPlayMp3ThroughputIsNotADeficit} 与 {@link #unknownRequiredRateNeverJudges} 守着）；
-     * ② 10-08 重新打开的理由是"拦着它的两个理由没了"——vc17 的③不再对不可续传流做 Range 重连、
-     *    ④会拦住假播完。这两条各自有自己的测试。
+     * 自动换档关着的理由**只剩一个，而且很硬**：测速口径还不可信。
+     *
+     * <p>10-07 关它是怕流畅档腰斩（那两条 vc17 已经修了）；10-08 我据此打开，当天就被车主一个
+     * 数字推翻——同一条链路 10 秒下完 3.1MB 的包（>300KB/s），而我"测"出来 107KB/s，因为样本
+     * 取自 {@code bufEnd}：窗口饱和时它等于播放消耗速率，于是健康链路也必然满足
+     * {@code est < 所需×1.15}。所以关着是"不许用坏数字接管档位"，等 socket 口径的
+     * {@code bitrate deficit} 在真车上重新出现并可信，再谈打开。
      */
     @Test
-    public void autoDegradeIsArmedAndJudgedRelativeToTheTrack() {
-        Assert.assertTrue(StreamRateGovernor.AUTO_DEGRADE_ENABLED);
+    public void autoDegradeStaysOffWhileTheSampleIsUntrustworthy() {
+        Assert.assertFalse(StreamRateGovernor.AUTO_DEGRADE_ENABLED);
         StreamRateGovernor g = governed();
-        // 需要 132KB/s 只给 60KB/s：连 3 个窗口必须换档（10-08 真车就是这个形态，实测 39~123KB/s）
-        feed.windows(g, StreamRateGovernor.DEGRADE_CONFIRMATIONS, 60_000L, LOSSLESS_REQUIRED);
-        Assert.assertTrue("真缺口必须真的换档，不能再只留证据", g.isDegraded());
-        Assert.assertEquals(1, g.getDeficitConfirmations());
+        feed.windows(g, StreamRateGovernor.DEGRADE_CONFIRMATIONS * 4, 20_000L, LOSSLESS_REQUIRED);
+        Assert.assertTrue("缺口照样要累计成证据", g.getDeficitConfirmations() >= 3);
+        Assert.assertFalse("但不许据此换档", g.isDegraded());
     }
 
     @Test
-    public void autoDegradeDoesNotFireOnAHealthyLink() {
-        // 同一份代码路径，链路够快时一次都不许换档——这条是 10-07 事故的直接反面
+    public void forceDegradeStillWorksRegardlessOfTheSample() {
+        // 手动档不依赖测速：这是将来给"优先流畅"开关留的路，也是验证回升逻辑唯一的机会
         StreamRateGovernor g = governed();
-        feed.windows(g, StreamRateGovernor.DEGRADE_CONFIRMATIONS * 4, 200_000L, LOSSLESS_REQUIRED);
-        Assert.assertFalse(g.isDegraded());
-        Assert.assertEquals(0, g.getDeficitConfirmations());
+        g.forceDegraded();
+        Assert.assertTrue(g.isDegraded());
+        feed.windows(g, StreamRateGovernor.RESTORE_CONFIRMATIONS, 300_000L, LOSSLESS_REQUIRED);
+        Assert.assertFalse("富余够 5 个窗口必须能回无损", g.isDegraded());
     }
 
     @Test
