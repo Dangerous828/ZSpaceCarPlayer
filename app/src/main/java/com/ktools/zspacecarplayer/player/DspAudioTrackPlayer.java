@@ -445,6 +445,18 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
         } else {
             currentDurationMs = 0;
         }
+        // 时长兜底要在**这条分支也做**：原生分支早就有（见 tryPrepareNativeLossless 里那句
+        // knownDurationMs），但走系统 MediaCodec 的恰恰是转码流——`static=false` 的产物是
+        // chunked 且无总长，抽取器给的 KEY_DURATION 经常是 0 或缺失，于是上报里满屏
+        // `prepared dur=0ms`：剩余时长算不出（remaining 恒 -1）、进度条与拖条全废、
+        // 「缓冲中」也失去唯一可用的判据（2026-10-08 真车流畅档复盘）。
+        if (currentDurationMs <= 0 && knownDurationMs > 0) {
+            currentDurationMs = knownDurationMs;
+            Log.i(TAG, "duration unknown in MediaCodec stream, use library duration "
+                    + knownDurationMs + "ms");
+            CrashMonitor.breadcrumb("v3", "duration unknown in container, use library "
+                    + knownDurationMs + "ms");
+        }
 
         Log.i(TAG, "MediaCodec Audio format: " + mime + ", sr=" + sampleRate + ", ch=" + channelCount + ", dur=" + currentDurationMs);
 

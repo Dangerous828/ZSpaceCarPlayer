@@ -257,7 +257,13 @@ public class BufferingPolicyTest {
         // 流式 FLAC 容器里 percent/lead 恒为 -1：时长一旦接回播放器，
         // 「接近结尾算稳定」与「接近结尾无条件预取」两条判据才可能命中。
         assertTrue(BufferingPolicy.isBufferingStable(-1, -1, 20, true));
-        assertFalse(BufferingPolicy.isBufferingStable(-1, -1, 300, true));
+        // remaining 单独已知**不算下载侧的证据**：chunked 转码流补上时长兜底之后就是这个形状
+        // （percent=-1, lead=-1, remaining 几百秒）。拿它当证据就会让「缓冲中」再次恒亮，
+        // 那正是 2026-10-07 被投诉的样子——10-08 把时长接回这条分支时必须同步改这里。
+        assertTrue("下载侧只有 remaining 时不投票，交给出声进展",
+                BufferingPolicy.isBufferingStable(-1, -1, 300, true));
+        assertFalse("但出声一冻住，remaining 再大也得显示",
+                BufferingPolicy.isBufferingStable(-1, -1, 300, false));
         assertTrue("三个数全不可判而声音在推进时按稳定处理（见 bufferingStableHidesIndicator 的复盘）",
                 BufferingPolicy.isBufferingStable(-1, -1, -1, true));
         assertTrue(BufferingPolicy.shouldPrefetchNext(-1, -1, 10, false, false, false));

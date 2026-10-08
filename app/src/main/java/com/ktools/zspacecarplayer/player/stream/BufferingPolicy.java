@@ -261,13 +261,18 @@ public final class BufferingPolicy {
         if (!audioAdvancing) {
             return false;
         }
-        boolean downloadStable =
-                (percent >= 0 && percent >= BUFFERING_STABLE_PERCENT)
-                        || (leadSeconds >= 0 && leadSeconds >= BUFFERING_STABLE_LEAD_SECONDS)
-                        // 剩余时长已不足一个稳定领先量：后面没有可担心的抽干，视为稳定
-                        || (remainingSeconds >= 0 && remainingSeconds <= BUFFERING_STABLE_LEAD_SECONDS);
-        boolean nothingKnown = percent < 0 && leadSeconds < 0 && remainingSeconds < 0;
-        return downloadStable || nothingKnown;
+        // 下载侧只有拿到 percent 或 lead 才有投票权。只剩 remaining（时长已知但流没有长度，
+        // chunked 转码流就是这样）时它对"是否在缓冲"其实一无所知——让它投票就等于恒亮，
+        // 而恒亮正是 2026-10-07 车主投诉的样子。（10-08 补：那天我把时长兜底只接在原生分支，
+        // 补上之后 remaining 变已知，这条判据若不同步改就会以另一种方式复发。）
+        boolean downloadKnowsSomething = percent >= 0 || leadSeconds >= 0;
+        if (!downloadKnowsSomething) {
+            return true;
+        }
+        return (percent >= BUFFERING_STABLE_PERCENT)
+                || (leadSeconds >= BUFFERING_STABLE_LEAD_SECONDS)
+                // 剩余时长已不足一个稳定领先量：后面没有可担心的抽干，视为稳定
+                || (remainingSeconds >= 0 && remainingSeconds <= BUFFERING_STABLE_LEAD_SECONDS);
     }
 
     // ------------------------------------------------------------------ //

@@ -36,8 +36,20 @@ public final class StreamRateGovernor {
     public static final int DEFICIT_MARGIN_PERCENT = 15;
     /** 认定富余的上浮：实测 &gt; 所需 ×(1+45%) 才算链路真的恢复了。 */
     public static final int SURPLUS_MARGIN_PERCENT = 45;
-    /** 是否允许按判定结果自动换到流畅档。见类注释：2026-10-07 的证据说明这一档还不能自动接管。 */
-    public static final boolean AUTO_DEGRADE_ENABLED = false;
+    /**
+     * 是否允许按判定结果自动换到流畅档。
+     *
+     * <p>2026-10-07 起 false（那条流当时会被自伤重连搞成腰斩），2026-10-08 重新打开——
+     * **不是因为流畅档变好了，而是拦着它的两个理由都没了**：③不再对不可续传的流做 Range 重连
+     * （那正是昨晚 4 首被腰斩的自伤路径），④假播完现在会被裁定并保留续播点且说话。
+     * 同时当天真车实测把"证据"补齐了：所需 127~212 KB/s、实测 39~123 KB/s，连续 18 次认定缺口，
+     * 每首都在抽干——车主原话「无论什么歌都会卡」。流畅档只要 16 KB/s。
+     *
+     * <p>已知且接受的行为：一旦降级，**本次会话内不会自动回无损**——流畅档是 chunked 无总长，
+     * 在上面测出来的产率是转码器的、不是链路的，所以"回升阈值"永远拿不到样本。重新上电/进程重启
+     * 会从头判定（每次开车第一首都是无损）。
+     */
+    public static final boolean AUTO_DEGRADE_ENABLED = true;
 
     private boolean degraded = false;
     private int belowStreak = 0;
