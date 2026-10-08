@@ -37,17 +37,4 @@ public class StreamTierTest {
         assertEquals("无损", StreamTier.label(StreamTier.LOSSLESS));
         assertEquals("流畅", StreamTier.label(StreamTier.SMOOTH));
     }
-
-    /**
-     * 提示的闸门：只在"确实量出持续缺口 + 当前是无损"时说那句话。
-     * 流畅档自己不再提示切流畅；没量到缺口一律不提示（坏口径曾把健康链路判成缺口）。
-     */
-    @Test
-    public void smoothHintRequiresLosslessTierAndConfirmedDeficit() {
-        assertTrue(StreamTier.shouldHintSmooth(StreamTier.LOSSLESS, true));
-        assertFalse("缺口没确认就不许提——这正是 vc16 误判的那类抢答",
-                StreamTier.shouldHintSmooth(StreamTier.LOSSLESS, false));
-        assertFalse("已经在流畅档，提切流畅没有意义",
-                StreamTier.shouldHintSmooth(StreamTier.SMOOTH, true));
-    }
 }

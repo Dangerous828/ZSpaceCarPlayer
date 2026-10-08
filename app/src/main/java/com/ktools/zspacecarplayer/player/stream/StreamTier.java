@@ -58,15 +58,4 @@ public final class StreamTier {
     public static int next(int tier) {
         return clamp(tier) == SMOOTH ? LOSSLESS : SMOOTH;
     }
-
-    /**
-     * 是否该给车主提示"可以换流畅档"。
-     *
-     * <p>只在<b>已经量出持续缺口</b>且当前是无损档时说这句话——不是自动降级，也不许在
-     * 采样不可信时抢答（判据与可采门见 {@link StreamRateGovernor} 与
-     * {@link BufferingPolicy#bandwidthSampleIsMeasurable}）。
-     */
-    public static boolean shouldHintSmooth(int tier, boolean deficitConfirmed) {
-        return clamp(tier) == LOSSLESS && deficitConfirmed;
-    }
 }

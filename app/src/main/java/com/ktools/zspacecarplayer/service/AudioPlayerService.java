@@ -33,6 +33,7 @@ import com.ktools.zspacecarplayer.player.AndroidMediaPlayerWrapper;
 import com.ktools.zspacecarplayer.player.IAudioPlayer;
 import com.ktools.zspacecarplayer.player.stream.BufferingPolicy;
 import com.ktools.zspacecarplayer.player.stream.StreamDiskCache;
+import com.ktools.zspacecarplayer.player.stream.StreamTier;
 import com.ktools.zspacecarplayer.player.stream.HttpProxyServer;
 import com.ktools.zspacecarplayer.model.SongItem;
 import com.ktools.zspacecarplayer.ui.MainActivity;
@@ -203,8 +204,6 @@ public class AudioPlayerService extends Service {
      */
     private final com.ktools.zspacecarplayer.player.stream.StreamRateGovernor rateGovernor =
             new com.ktools.zspacecarplayer.player.stream.StreamRateGovernor();
-    /** 只用于"换档那一刻留一行证据"，避免每 tick 刷屏。 */
-    private boolean lastDegradedState = false;
     /** 治理器认定缺口的次数是否已留过痕：每次认定只落一行面包屑 (2026-10-07 流畅档误判复盘)。 */
     private int lastDeficitConfirmations = 0;
     /**
@@ -757,7 +756,7 @@ public class AudioPlayerService extends Service {
         if (deliveredBytes >= 0L) {
             boolean measurable = BufferingPolicy.bandwidthSampleIsMeasurable(
                     percent, contentLength, totalMs, proxy.sourceRingHasRoom(url));
-            if (!measurable && rateGovernor.isDegraded() && BufferingPolicy.smoothTierSampleIsMeasurable(
+            if (!measurable && isOnSmoothTier() && BufferingPolicy.smoothTierSampleIsMeasurable(
                     lastLosslessRequiredBytesPerSec, proxy.sourceRingHasRoom(url))) {
                 // 流畅档 chunked 没有总长 ⇒ 上面那道门永远过不去。若就此 rebase，档位会被永久
                 // 钉在 128k（回家也不会回升）。链路速率本身与总长无关，所以拿降档前实测到的
@@ -776,16 +775,9 @@ public class AudioPlayerService extends Service {
                 CrashMonitor.breadcrumb("play", "bitrate deficit #" + deficits
                         + " required=" + rateGovernor.getLastRequiredBytesPerSec()
                         + "B/s est=" + rateGovernor.getLastWindowBytesPerSec() + "B/s"
-                        + " tier=" + (rateGovernor.isDegraded() ? "smooth" : "unchanged"));
+                        + " tier=" + StreamTier.label(getStreamTier()));
             }
-            boolean nowDegraded = rateGovernor.isDegraded();
-            if (nowDegraded != lastDegradedState) {
-                lastDegradedState = nowDegraded;
-                CrashMonitor.breadcrumb("play", "bitrate tier "
-                        + (nowDegraded ? "-> smooth(128k)" : "-> lossless")
-                        + " required=" + rateGovernor.getLastRequiredBytesPerSec()
-                        + "B/s est=" + rateGovernor.getLastWindowBytesPerSec() + "B/s");
-            }
+            // 档位只由车主手选（StreamTier），切换那一刻在设置页已留痕；这里不再有自动档状态可监视
         }
         long remainingSeconds = totalMs > 0 ? Math.max(0, (totalMs - currentMs) / 1000) : -1L;
         long leadSeconds = computeLeadSeconds(percent, currentMs, totalMs);
@@ -886,7 +878,7 @@ public class AudioPlayerService extends Service {
         CrashMonitor.breadcrumb("buffer", "prefetch next=" + next.getName()
                 + " percent=" + percent + " lead=" + leadSeconds + "s"
                 + " remaining=" + remainingSeconds + "s"
-                + " tier=" + (rateGovernor.isDegraded() ? "smooth" : "lossless"));
+                + " tier=" + StreamTier.label(getStreamTier()));
     }
 
     /** 切歌 / 换列表 / 手动跳歌：作废与新一首无关的旧预取源，避免留着占内存 / 带宽。 */
@@ -977,7 +969,12 @@ public class AudioPlayerService extends Service {
 
     /** 无损档？只有它才需要在放弃时提示"可以切流畅"。 */
     private boolean isLosslessTier() {
-        return getStreamTier() == com.ktools.zspacecarplayer.player.stream.StreamTier.LOSSLESS;
+        return getStreamTier() == StreamTier.LOSSLESS;
+    }
+
+    /** 车主当前选的是流畅档？测速的不可采分支要靠它，不能靠已删掉的自动档状态。 */
+    private boolean isOnSmoothTier() {
+        return getStreamTier() == StreamTier.SMOOTH;
     }
 
     /** 当前生效的音质档位（车主手选，默认无损）。 */
@@ -1007,15 +1004,12 @@ public class AudioPlayerService extends Service {
      */
     private String resolvePlayUrl(JellyfinApiClient client, String itemId, String cachedStreamUrl) {
         int tier = getStreamTier();
-        if (tier == com.ktools.zspacecarplayer.player.stream.StreamTier.SMOOTH) {
-            String degraded = client.getDegradedStreamUrl(itemId);
-            if (degraded != null && degraded.length() > 0) {
-                CrashMonitor.breadcrumb("play", "start on smooth tier (user picked) id=" + itemId
-                        + " est=" + rateGovernor.getLastWindowBytesPerSec() + "B/s");
-                return degraded;
-            }
+        String url = client.getStreamUrlForTier(itemId, cachedStreamUrl, tier);
+        if (tier == StreamTier.SMOOTH) {
+            CrashMonitor.breadcrumb("play", "start on smooth tier (user picked) id=" + itemId
+                    + " est=" + rateGovernor.getLastWindowBytesPerSec() + "B/s");
         }
-        return client.getStreamUrlForSong(itemId, cachedStreamUrl);
+        return url;
     }
 
     /**
@@ -1349,7 +1343,6 @@ public class AudioPlayerService extends Service {
                     // 救过一次还在同一处被截断: 不再原地循环，跳下一首，但要说清原因、
                     // 并且**不清零**续播点——这首歌根本没听完，下次网络好了该从原处接上
                     giveUpSongStreak++;
-                    giveUpSmoothTierIfNeeded();
                     if (stateChangeListener != null) {
                         stateChangeListener.onError(PlaybackStateMachine.describeGiveUp(
                                 giveUpSongStreak, truncatedName, false, isLosslessTier()));
@@ -1996,21 +1989,6 @@ public class AudioPlayerService extends Service {
         }
     }
 
-    /**
-     * 放弃当前曲时，顺手把流畅档退回无损 (2026-10-08)。
-     *
-     * <p>自动降档是为了"链路撑不起无损时至少能听完整首"。如果连降档后的歌都救不回来（这里已经
-     * 是带断点重试过一次仍失败），继续留着这一档只会把后面每一首一起拖下去——10-07 那晚档位
-     * 翻转后连着 4 首全部腰斩就是没有止损阀的代价。最坏只损失一首，之后链路确实差还会再降回去。
-     */
-    private void giveUpSmoothTierIfNeeded() {
-        if (rateGovernor.abortDegrade()) {
-            CrashMonitor.breadcrumb("play", "smooth tier aborted after give-up -> lossless"
-                    + " required=" + rateGovernor.getLastRequiredBytesPerSec()
-                    + "B/s est=" + rateGovernor.getLastWindowBytesPerSec() + "B/s");
-            lastDegradedState = false;
-        }
-    }
 
     /**
      * 坏断点的最后一道兜底 (2026-09-12 #1): 起播后发现自己落在贴尾, 就清库 + 从头重播本曲。
@@ -2546,7 +2524,6 @@ public class AudioPlayerService extends Service {
         SongItem abandoned = getCurrentSong();
         String abandonedName = abandoned != null ? abandoned.getName() : "当前曲目";
         giveUpSongStreak++;
-        giveUpSmoothTierIfNeeded();
         if (stateChangeListener != null) {
             stateChangeListener.onError(PlaybackStateMachine.describeGiveUp(
                     giveUpSongStreak, abandonedName, missingResource, isLosslessTier()));

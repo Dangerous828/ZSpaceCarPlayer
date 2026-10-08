@@ -382,10 +382,10 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 
 ## vc21 = 3.2.10 出包记录（2026-10-08，**未发布**）
 
-包：**`ZSpaceCarPlayer-3.2.10-code21-debug.apk`**，3,146,698 B，
-`sha256=5f4f0d6202f9b390a0ef8ea1f32ad92a4a8c3c9fb8c869d650e3e381240f8b9b`，
+包：**`ZSpaceCarPlayer-3.2.10-code21-debug.apk`**，3,145,655 B，
+`sha256=4868c2516ee029aacf85baa03e8321ffa84f7ba9a9296899411c713de25435b3`，
 `aapt2 dump badging` → `versionCode='21' versionName='3.2.10'`，minSdk 18，zip 填充 78,626（正常形状）。
-`clean :app:testDebugUnitTest :app:assembleDebug` → **436 条 host 单测 0 失败**。
+`clean :app:testDebugUnitTest :app:assembleDebug` → **431 条 host 单测 0 失败**。
 
 **状态：包与清单草稿（`latest-3.2.10-code21.json`，`notes` 依铁律留空）都已入仓，
 但线上 `latest.json` 与发布目录里的包体一个字节都没动 —— 车主指令是「全部都做完才 commit」，
