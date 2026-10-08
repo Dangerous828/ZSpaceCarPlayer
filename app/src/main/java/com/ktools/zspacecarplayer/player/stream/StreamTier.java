@@ -28,9 +28,6 @@ public final class StreamTier {
     /** 默认档：不动音质。降级是车主的权利，不是我们的默认行为。 */
     public static final int DEFAULT = LOSSLESS;
 
-    /** 流畅档实测所需速率下界（B/s）：5,819,950B ÷ 181.812s。只用于文案与判据参考。 */
-    public static final long SMOOTH_MEASURED_BYTES_PER_SEC = 32_000L;
-
     private StreamTier() {
     }
 

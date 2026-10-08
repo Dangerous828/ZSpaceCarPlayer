@@ -2,8 +2,8 @@
   "versionCode": 21,
   "versionName": "3.2.10",
   "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.2.10-code21-debug.apk",
-  "sizeBytes": 3145655,
-  "sha256": "4868c2516ee029aacf85baa03e8321ffa84f7ba9a9296899411c713de25435b3",
+  "sizeBytes": 3145621,
+  "sha256": "22986112cff72a420176d55f14fe5854f65fa2b1ff006efd5de42dfb29e7b8ce",
   "minVersionCode": 1,
   "mandatory": false,
   "notes": ""

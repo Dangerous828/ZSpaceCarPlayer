@@ -382,8 +382,8 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 
 ## vc21 = 3.2.10 出包记录（2026-10-08，**未发布**）
 
-包：**`ZSpaceCarPlayer-3.2.10-code21-debug.apk`**，3,145,655 B，
-`sha256=4868c2516ee029aacf85baa03e8321ffa84f7ba9a9296899411c713de25435b3`，
+包：**`ZSpaceCarPlayer-3.2.10-code21-debug.apk`**，3,145,621 B，
+`sha256=22986112cff72a420176d55f14fe5854f65fa2b1ff006efd5de42dfb29e7b8ce`，
 `aapt2 dump badging` → `versionCode='21' versionName='3.2.10'`，minSdk 18，zip 填充 78,626（正常形状）。
 `clean :app:testDebugUnitTest :app:assembleDebug` → **431 条 host 单测 0 失败**。
 

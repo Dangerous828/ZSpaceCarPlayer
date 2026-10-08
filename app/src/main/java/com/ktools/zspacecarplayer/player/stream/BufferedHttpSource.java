@@ -157,7 +157,7 @@ public class BufferedHttpSource {
     private long lastUsedAtMs = 0L;
     /** 是否曾有读者登记过：区分「从未被读（需预取元数据）」和「读者已全部离开（应休眠）」 */
     private boolean everHadReader = false;
-    /** 读者全部摘窗的时刻 (elapsedRealtime)；-1 = 还有读者挂着。见 {@link #IDLE_FILL_GRACE_MS}。 */
+    /** 读者全部摘窗的时刻 (elapsedRealtime)；-1 = 还有读者挂着。见 {@link StreamTuning#idleFillGraceMs()}。 */
     private long idleSinceMs = -1L;
 
     // ---- 预取模式（2026-09-12 缓冲/预取，lock 保护）----
@@ -182,8 +182,6 @@ public class BufferedHttpSource {
      * 时长就是这个量级；给它一个宽限期，等于用"继续在同一条连接上收字节"换掉"再建一条连接再等
      * 一秒"。再长就是真的没人要这些数据了（切歌/放弃），该让出带宽和唯一的解码线程。
      */
-    static final long IDLE_FILL_GRACE_MS = StreamTuning.DEFAULT_IDLE_FILL_GRACE_MS;
-
     /**
      * 纯判定：没有读者挂窗时，下载线程该继续把环形窗填着，还是收手让出连接。
      *
@@ -1166,7 +1164,7 @@ public class BufferedHttpSource {
                     // 读者摘窗且过了宽限（或窗已满）：收手，避免分家后的源在后台空耗带宽。
                     // 宽限之内**继续在同一条连接上收字节填窗**——旧行为是一摘窗就退出并断连，
                     // 解码器跳读回来就得重连再付约 1 秒首字节，实车那 9 次跳读就是这么变成
-                    // 9 条短连接的（见 IDLE_FILL_GRACE_MS）
+                    // 9 条短连接的（见 {@link StreamTuning#idleFillGraceMs()}）
                     return;
                 }
                 if (prefetchSatisfiedLocked()) {

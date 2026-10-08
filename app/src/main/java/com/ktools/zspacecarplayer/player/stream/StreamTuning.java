@@ -23,7 +23,7 @@ package com.ktools.zspacecarplayer.player.stream;
  */
 public final class StreamTuning {
 
-    /** 摘窗宽限默认值，与 {@code BufferedHttpSource.IDLE_FILL_GRACE_MS} 同源。 */
+    /** 摘窗宽限默认值；设置页「取流优化」关掉时生效值变为 0（=一摘窗就收手）。 */
     public static final long DEFAULT_IDLE_FILL_GRACE_MS = 8_000L;
 
     private static volatile long idleFillGraceMs = DEFAULT_IDLE_FILL_GRACE_MS;

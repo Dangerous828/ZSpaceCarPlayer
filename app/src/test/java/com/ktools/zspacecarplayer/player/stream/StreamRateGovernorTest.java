@@ -186,8 +186,6 @@ public class StreamRateGovernorTest {
         // 2026-10-08 同一首歌实测：maxStreamingBitrate/audioBitRate 七种写法都返回同样的
         // 5,819,950B = 256.1kbps = 31.3KB/s（服务端固定 256k，忽略参数），
         // 而本库无损原件实测需 100~151KB/s——省约 3 倍，这才是不许写"128k"进文案的原因。
-        Assert.assertTrue("流畅档实测所需必须低于无损需求的一半，否则换了等于没换",
-                StreamTier.SMOOTH_MEASURED_BYTES_PER_SEC < LOSSLESS_REQUIRED / 2);
         Assert.assertEquals("档位标签不许谎报码率",
                 "服务端转码 256kbps，约需 32KB/s", StreamTier.describe(StreamTier.SMOOTH));
     }

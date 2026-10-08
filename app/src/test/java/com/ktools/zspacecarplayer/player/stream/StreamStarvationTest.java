@@ -176,20 +176,20 @@ public class StreamStarvationTest {
     @Test
     public void idleFillKeepsConnectionButNeverOutlivesTheHolder() {
         long now = 100_000L;
-        long grace = BufferedHttpSource.IDLE_FILL_GRACE_MS;
+        long grace = StreamTuning.DEFAULT_IDLE_FILL_GRACE_MS;
         assertTrue("宽限内、窗还有余量、仍被持有 = 继续填",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, true, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, true, true, grace));
         assertTrue("宽限边界内一毫秒都不算超",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - grace + 1L, true, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - grace + 1L, true, true, grace));
         assertFalse("超宽限就收手，让出带宽与唯一的解码线程",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - grace, true, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - grace, true, true, grace));
         assertFalse("窗满了继续读只会背压阻塞，收手等读者回来再拉起",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, false, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, false, true, grace));
         assertFalse("已 release（切歌/销毁）：旧源绝不允许在后台吃新歌的带宽",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, true, false, BufferedHttpSource.IDLE_FILL_GRACE_MS));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, true, false, grace));
         assertFalse("从未摘窗（还有读者）不该走这条判定",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, -1L, true, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, -1L, true, true, grace));
         assertFalse("时钟回拨不认",
-                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now + 1_000L, true, true, BufferedHttpSource.IDLE_FILL_GRACE_MS));
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now + 1_000L, true, true, grace));
     }
 }
