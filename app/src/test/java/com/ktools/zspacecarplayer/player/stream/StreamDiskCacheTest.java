@@ -52,8 +52,13 @@ public class StreamDiskCacheTest {
                 StreamDiskCache.shouldCache(-1L, 1024L));
         assertFalse(StreamDiskCache.shouldCache(0L, 1024L));
         assertTrue(StreamDiskCache.shouldCache(1024L, 1024L));
-        assertFalse("超过上限就不缓存（曲库里那些 4K mp4 属于这类）",
+        assertFalse("超过单文件上限就不缓存（360MB 的巨型文件会把常听歌挤光）",
                 StreamDiskCache.shouldCache(1025L, 1024L));
+        assertTrue("本库正常音频（44MB）必须在 100MB 单文件上限内",
+                StreamDiskCache.shouldCache(44L * 1024 * 1024,
+                        BufferingPolicy.DISK_CACHE_MAX_FILE_BYTES));
+        assertFalse("360MB 那类必须被拒", StreamDiskCache.shouldCache(360L * 1024 * 1024,
+                BufferingPolicy.DISK_CACHE_MAX_FILE_BYTES));
     }
 
     /** 区间表：合并必须保守——宁可留洞，绝不能把两段之间的洞说成连续。 */
@@ -85,7 +90,7 @@ public class StreamDiskCacheTest {
     /** 落盘/读回的硬约束：只读确认连续的范围，跨过洞必须停下来而不是把洞当数据。 */
     @Test
     public void readNeverCrossesAHole() {
-        StreamDiskCache cache = StreamDiskCache.open(tmp.getRoot(), URL_A, 10_000L, 1_000_000L);
+        StreamDiskCache cache = StreamDiskCache.open(tmp.getRoot(), URL_A, 10_000L, 1_000_000L, 10_000_000L);
         assertNotNull(cache);
         byte[] payload = new byte[512];
         for (int i = 0; i < payload.length; i++) {
@@ -109,14 +114,14 @@ public class StreamDiskCacheTest {
     /** 同一首歌重播：第二段必须从盘上读出来，而不是重新建一条上游连接。 */
     @Test
     public void reopeningTheSameUrlServesFromDisk() {
-        StreamDiskCache first = StreamDiskCache.open(tmp.getRoot(), URL_A, 10_000L, 1_000_000L);
+        StreamDiskCache first = StreamDiskCache.open(tmp.getRoot(), URL_A, 10_000L, 1_000_000L, 10_000_000L);
         byte[] blob = new byte[2048];
         blob[2047] = 77;
         first.record(0L, blob, 0, 2048);
         first.close();
 
         StreamDiskCache second = StreamDiskCache.open(
-                tmp.getRoot(), URL_B, 10_000L, 1_000_000L); // 换 token 也算同一首
+                tmp.getRoot(), URL_B, 10_000L, 1_000_000L, 10_000_000L); // 换 token 也算同一首
         assertNotNull(second);
         byte[] dest = new byte[2048];
         assertEquals("重播同一首：整段都该命中", 2048, second.readInto(0L, dest, 0, 2048));

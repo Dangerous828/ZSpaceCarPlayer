@@ -184,9 +184,16 @@ public final class StreamDiskCache {
      * 打开（或接着用）一条流的缓存文件。任何失败都只意味着"这次没缓存"，不影响播放。
      *
      * @param dir 缓存目录（{@code getCacheDir()/stream-cache}）
+     * @param maxFileBytes 单个文件上限，超过就不缓存
+     * @param capBytes 整个缓存目录的 LRU 上限
      */
-    static StreamDiskCache open(File dir, String url, long contentLength, long capBytes) {
-        if (dir == null || !shouldCache(contentLength, capBytes)) {
+    static StreamDiskCache open(File dir, String url, long contentLength, long maxFileBytes,
+                                long capBytes) {
+        if (dir == null || !shouldCache(contentLength, maxFileBytes)) {
+            if (contentLength > maxFileBytes) {
+                Log.i(TAG, "skip disk cache: file " + contentLength + "B over per-file cap "
+                        + maxFileBytes + "B " + url);
+            }
             return null;
         }
         String key = cacheKeyFor(url, contentLength);

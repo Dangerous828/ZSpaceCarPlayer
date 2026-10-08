@@ -1105,9 +1105,10 @@ public class BufferedHttpSource {
                 lock.notifyAll();
             }
             if (disk == null && diskCacheDir != null && StreamDiskCache.shouldCache(
-                    contentLength, diskCacheLimitBytes)) {
+                    contentLength, BufferingPolicy.DISK_CACHE_MAX_FILE_BYTES)) {
                 // 只有总长已知才缓存：chunked 转码流长度进不了键、洞也判不出来
-                disk = StreamDiskCache.open(diskCacheDir, url, contentLength, diskCacheLimitBytes);
+                disk = StreamDiskCache.open(diskCacheDir, url, contentLength,
+                        BufferingPolicy.DISK_CACHE_MAX_FILE_BYTES, diskCacheLimitBytes);
                 if (disk != null) {
                     Log.i(TAG, "disk cache attached: " + contentLength + "B " + url);
                 }

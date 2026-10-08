@@ -382,14 +382,17 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 
 ## vc21 = 3.2.10 出包记录（2026-10-08，**未发布**）
 
-包：**`ZSpaceCarPlayer-3.2.10-code21-debug.apk`**，3,146,286 B，
-`sha256=61e071470b58b808c16c8258b83ed2b7ee629ffcec2bde2d0101a3619fb68dd0`，
+包：**`ZSpaceCarPlayer-3.2.10-code21-debug.apk`**，3,146,698 B，
+`sha256=5f4f0d6202f9b390a0ef8ea1f32ad92a4a8c3c9fb8c869d650e3e381240f8b9b`，
 `aapt2 dump badging` → `versionCode='21' versionName='3.2.10'`，minSdk 18，zip 填充 78,626（正常形状）。
 `clean :app:testDebugUnitTest :app:assembleDebug` → **436 条 host 单测 0 失败**。
 
 **状态：包与清单草稿（`latest-3.2.10-code21.json`，`notes` 依铁律留空）都已入仓，
 但线上 `latest.json` 与发布目录里的包体一个字节都没动 —— 车主指令是「全部都做完才 commit」，
 发版要另外点头。** 内容见 `changelogs/3.2.10.md` 与 `docs/audit_t1_baseline_20261008.md`。
+同版本内还有第二批 commit `17d6f32`（`StreamTuning` 四把回退闸、设置页三行新 UI、曲库滤掉
+236 条带视频流的文件、随机模式"上一首"历史栈、睡眠定时、拔耳机暂停），最终包即上面这只。
+逐项"已做/不适用/缺依据/需车主决策"判定见 `docs/audit_t1_baseline_20261008.md` §4。
 
 出包过程中第三次踩到同一个坑：不带 `clean` 的增量构建产出 5,172,820 B（填充 2,116,886）的胖包，
 `clean` 后回到 3.14MB。规则照旧：**发版必须 `clean` + `assembleDebug`（release 无 signingConfig）**，

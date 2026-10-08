@@ -150,6 +150,12 @@ public final class BufferingPolicy {
      * 全局裁剪是 10GB/8GB，不能跟它抢口径。
      */
     public static final long DISK_CACHE_LIMIT_BYTES = 1024L * 1024L * 1024L;
+    /**
+     * 单个文件的缓存上限 100MB (2026-10-08)。必须与目录上限分开：只给一个 1GB 的话，
+     * 曲库里那类 360MB 的巨型文件会把常听的歌全挤出去，LRU 反而变成"缓存了个没用的"。
+     * 本库正常音频实测 20~44MB，100MB 已经留了三倍余量。
+     */
+    public static final long DISK_CACHE_MAX_FILE_BYTES = 100L * 1024L * 1024L;
 
     /** 预取源的小窗口容量（字节）。 */
     public static int prefetchCapacityBytes() {
