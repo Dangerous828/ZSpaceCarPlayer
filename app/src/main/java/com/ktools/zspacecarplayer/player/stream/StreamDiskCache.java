@@ -2,12 +2,17 @@ package com.ktools.zspacecarplayer.player.stream;
 
 import android.util.Log;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStreamReader;
 import java.io.RandomAccessFile;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -26,34 +31,57 @@ import java.util.TreeMap;
  *       解析出 {@code /Audio/{itemId}/} 就用 {@code itemId + 总长}，解不出就退化成
  *       "去掉 query 的 URL 摘要 + 总长"。总长进键是廉价的内容指纹——服务端换文件（比如我们
  *       把 wav 转成 flac 原地替换）时字节数会变，旧条目自然作废，宁可多下。</li>
- *   <li><b>只读已知连续段</b>：环形缓冲被重定位过，落盘的位置序列是<b>一段一段</b>的，中间有洞。
- *       所以用区间表记账，读取时先确认 {@code [position, position+n)} 真的连续，绝不跨过洞
- *       （跨过去就是把没下过的字节当数据交给解码器，表现为"歌里冒杂音"，比卡顿难查十倍）。</li>
+ *   <li><b>只读已知连续段，且账本必须落盘</b>：环形缓冲被重定位过，落盘的位置序列是<b>一段一段</b>的，
+ *       中间有洞。所以用区间表记账，读取时先确认 {@code [position, position+n)} 真的连续，绝不跨过洞
+ *       （跨过去就是把没下过的字节当数据交给解码器，表现为"歌里冒杂音"，比卡顿难查十倍）。
+ *       <b>区间表存在 sidecar（{@code stream_<key>.runs}）里，绝不允许从 {@code .dat} 的文件长度
+ *       反推</b>：跳写后文件长度是"最后写到的位置"，中间那一片是零填充的洞，按长度反推就等于
+ *       把零字节当音频交出去（2026-10-08 自查时正是踩在这个坑上）。sidecar 缺失/解析失败/与
+ *       {@code .dat} 长度或总长不一致，一律整份作废重建——宁可重下一遍。</li>
  *   <li><b>转码流不缓存</b>：chunked 流没有总长，长度进不了键、洞也判不出来，直接跳过。</li>
  * </ul>
  *
- * <p>容量：{@link #evictForSpace} 按最后修改时间从旧开始删，删到放得下为止；目录仍在
- * {@code getCacheDir()} 下，沿用 {@code CacheSizeManager} 的全局裁剪边界，不另立第二套上限口径。
+ * <p>容量：{@link #evictForSpace} 按最后修改时间从旧开始删，删到放得下为止；{@code .dat} 与它的
+ * sidecar 算<b>同一条条目</b>一起淘汰，目录仍在 {@code getCacheDir()} 下，沿用
+ * {@code CacheSizeManager} 的全局裁剪边界，不另立第二套上限口径。
  */
 public final class StreamDiskCache {
 
     private static final String TAG = "StreamDiskCache";
     private static final char[] HEX = "0123456789abcdef".toCharArray();
 
-    /** 缓存文件前缀，`evictForSpace` 与清理都认它。 */
+    /** 缓存文件前缀，{@code evictForSpace} 与清理都认它。 */
     static final String FILE_PREFIX = "stream_";
     static final String FILE_SUFFIX = ".dat";
+    /** 区间表 sidecar：{@code stream_<key>.runs}，与同名 {@code .dat} 成对。 */
+    static final String RUNS_SUFFIX = ".runs";
+    /** sidecar 首行魔数＋总长，格式变了老文件必须自动作废而不是猜。 */
+    private static final String RUNS_HEADER_PREFIX = "v1 ";
+    /** 提前落账的步长：太小会把下载线程变成频繁小文件写，太大就保不住并发实例的进度。 */
+    private static final long LEDGER_FLUSH_STRIDE_BYTES = 2L * 1024 * 1024;
 
     private final Object ioLock = new Object();
     private final TreeMap<Long, Long> runs = new TreeMap<Long, Long>();
     private final File file;
+    private final File runsFile;
     private final long contentLength;
     private RandomAccessFile raf;
     private long servedBytes;
     private boolean broken;
+    /**
+     * 上次落账时的水位（最大 run 末尾 / 段数），用来决定要不要提前写 sidecar。
+     *
+     * <p>只在 {@code close()} 写账本是不够的：预取那一首的实例还开着（没 close）时，主播放会为
+     * 同一个 itemId 再开一个实例，看不到账本就把正在写的那份 {@code .dat} 当孤儿删掉——省下的
+     * 一次重连反而变成两次重连。所以<b>每出现新段、或连续段每推进
+     * {@link #LEDGER_FLUSH_STRIDE_BYTES} 就先落一次账</b>，顺带也让进程被杀/断电后已下的部分仍可用。
+     */
+    private long ledgerFlushedEnd = -1L;
+    private int ledgerFlushedRunCount = 0;
 
-    private StreamDiskCache(File file, long contentLength) {
+    private StreamDiskCache(File file, File runsFile, long contentLength) {
         this.file = file;
+        this.runsFile = runsFile;
         this.contentLength = contentLength;
     }
 
@@ -134,54 +162,289 @@ public final class StreamDiskCache {
     }
 
     /**
+     * 区间表 → sidecar 文本（纯函数，单测覆盖）。
+     *
+     * <p>首行带总长：服务端把文件原地换过（wav→flac）时长度会变，读回来对不上就整份作废。
+     */
+    static String encodeRuns(TreeMap<Long, Long> runs, long contentLength) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(RUNS_HEADER_PREFIX).append(contentLength).append('\n');
+        for (Map.Entry<Long, Long> e : runs.entrySet()) {
+            sb.append(e.getKey().longValue()).append('-').append(e.getValue().longValue())
+                    .append('\n');
+        }
+        return sb.toString();
+    }
+
+    /**
+     * sidecar 文本 → 区间表；只要有任何一处对不上就返回 {@code null} 表示"整份作废"。
+     *
+     * <p>这里不存在"尽力而为地恢复一部分"：区间表是"哪些字节真的能当音频读"的唯一依据，
+     * 猜错一次的代价是杂音，而丢缓存的代价只是一次重连。所以解析失败、区间越界、区间重叠、
+     * 顺序乱了，全都按作废处理（纯函数，单测覆盖）。
+     */
+    static TreeMap<Long, Long> decodeRuns(String text, long contentLength) {
+        if (text == null || contentLength <= 0L) {
+            return null;
+        }
+        TreeMap<Long, Long> parsed = new TreeMap<Long, Long>();
+        long previousEnd = -1L;
+        boolean headerRead = false;
+        try {
+            String[] lines = text.split("\n");
+            for (int i = 0; i < lines.length; i++) {
+                String line = lines[i];
+                if (line.length() == 0) {
+                    continue;
+                }
+                if (!headerRead) {
+                    if (!line.startsWith(RUNS_HEADER_PREFIX)) {
+                        return null;
+                    }
+                    long declared = Long.parseLong(
+                            line.substring(RUNS_HEADER_PREFIX.length()).trim());
+                    if (declared != contentLength) {
+                        return null;
+                    }
+                    headerRead = true;
+                    continue;
+                }
+                int dash = line.indexOf('-');
+                if (dash <= 0) {
+                    return null;
+                }
+                long start = Long.parseLong(line.substring(0, dash).trim());
+                long end = Long.parseLong(line.substring(dash + 1).trim());
+                if (start < 0L || end <= start || end > contentLength) {
+                    return null;
+                }
+                if (start < previousEnd) {
+                    return null; // 正常写出的表必然升序且互不重叠
+                }
+                parsed.put(Long.valueOf(start), Long.valueOf(end));
+                previousEnd = end;
+            }
+        } catch (Exception e) {
+            return null;
+        }
+        return headerRead ? parsed : null;
+    }
+
+    /** 读 sidecar；文件缺失/读失败都归一成 {@code null}（= 没有可信账本）。 */
+    private static String readSidecar(File runsFile) {
+        if (runsFile == null || !runsFile.isFile()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        try {
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(new FileInputStream(runsFile), "UTF-8"));
+            try {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    sb.append(line).append('\n');
+                }
+            } finally {
+                reader.close();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "runs sidecar unreadable: " + e);
+            return null;
+        }
+        return sb.toString();
+    }
+
+    /** 把当前区间表写回 sidecar（覆盖写；空表就删掉，不留垃圾）。 */
+    private static void writeSidecar(File runsFile, TreeMap<Long, Long> runs, long contentLength) {
+        if (runsFile == null) {
+            return;
+        }
+        if (runs == null || runs.isEmpty()) {
+            if (runsFile.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                runsFile.delete();
+            }
+            return;
+        }
+        String text = encodeRuns(runs, contentLength);
+        try {
+            java.io.OutputStream out = new FileOutputStream(runsFile, false);
+            try {
+                out.write(text.getBytes("UTF-8"));
+                out.flush();
+                if (out instanceof java.io.FileOutputStream) {
+                    ((java.io.FileOutputStream) out).getFD().sync();
+                }
+            } finally {
+                out.close();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "runs sidecar write failed, cache will be rebuilt next time: " + e);
+            // 账本写不出去，旧账本配新 .dat 就是"猜连续性"，必须一起抹掉
+            if (runsFile.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                runsFile.delete();
+            }
+        }
+    }
+
+    /**
+     * 账本自洽性校验：区间必须都落在实际文件长度内。
+     *
+     * <p> {@code .dat} 比账本最长还长是允许的（跳写后的尾部填充，读不到）；反过来账本声称有、
+     * 盘上却没有，就是文件被截断过——整份作废。
+     */
+    private static boolean runsFitOnDisk(TreeMap<Long, Long> runs, long fileLength) {
+        for (Map.Entry<Long, Long> e : runs.entrySet()) {
+            if (e.getValue().longValue() > fileLength) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * 给目录腾出 {@code needBytes}：按最后修改时间从旧开始删，删到装得下为止。
      *
      * <p>只删自己前缀的文件，绝不碰目录里别的东西（同一 cacheDir 下还有 EQ 预设下载等）。
-     * 返回删掉的字节数。最旧的一定先死，因为重播的是"最近听过的那几首"。
+     * 一条条目 = {@code .dat + .runs}，<b>成对删除</b>：只删数据留下账本的话，下次打开会因为
+     * "账本找不到对应的盘"而白白重建。返回删掉的字节数（含 sidecar）。
+     * 最旧的一定先死，因为重播的是"最近听过的那几首"。
      */
     static long evictForSpace(File dir, long needBytes, long capBytes) {
         if (dir == null || !dir.isDirectory()) {
             return 0L;
         }
-        File[] kids = dir.listFiles();
-        if (kids == null) {
-            return 0L;
-        }
-        List<File> caches = new ArrayList<File>();
+        List<Entry> entries = scanEntries(dir);
         long total = 0L;
-        for (int i = 0; i < kids.length; i++) {
-            File f = kids[i];
-            if (f.isFile() && f.getName().startsWith(FILE_PREFIX)
-                    && f.getName().endsWith(FILE_SUFFIX)) {
-                caches.add(f);
-                total += f.length();
-            }
+        for (int i = 0; i < entries.size(); i++) {
+            total += entries.get(i).bytes;
         }
         if (total + needBytes <= capBytes) {
             // 现有总量<b>加上要新放的那个文件</b>仍在上限内，才什么都不动。
             // 只看 total<=cap 是错的：200/250 看着有余量，再来 100 就装不下了（2026-10-08 单测抓到）
             return 0L;
         }
-        Collections.sort(caches, new Comparator<File>() {
+        Collections.sort(entries, new Comparator<Entry>() {
             @Override
-            public int compare(File a, File b) {
-                return Long.valueOf(a.lastModified()).compareTo(Long.valueOf(b.lastModified()));
+            public int compare(Entry a, Entry b) {
+                return Long.valueOf(a.lastModified).compareTo(Long.valueOf(b.lastModified));
             }
         });
         long freed = 0L;
         long want = total - capBytes + needBytes;
-        for (int i = 0; i < caches.size() && freed < want; i++) {
-            File victim = caches.get(i);
-            long size = victim.length();
-            if (victim.delete()) {
-                freed += size;
+        for (int i = 0; i < entries.size() && freed < want; i++) {
+            freed += entries.get(i).delete();
+        }
+        return freed;
+    }
+
+    /** 目录里属于本模块的条目（{@code .dat} 与它的 sidecar 归成一条；孤立的 sidecar 也算一条）。 */
+    private static final class Entry {
+        private final String key;
+        private File dat;
+        private File runs;
+        private long bytes;
+        private long lastModified;
+
+        Entry(String key) {
+            this.key = key;
+        }
+
+        long delete() {
+            long freed = 0L;
+            if (dat != null && dat.isFile()) {
+                freed += dat.length();
+                if (!dat.delete()) {
+                    freed -= dat.length();
+                }
             }
+            if (runs != null && runs.isFile()) {
+                freed += runs.length();
+                if (!runs.delete()) {
+                    freed -= runs.length();
+                }
+            }
+            return freed;
+        }
+    }
+
+    private static List<Entry> scanEntries(File dir) {
+        Map<String, Entry> byKey = new HashMap<String, Entry>();
+        File[] kids = dir.listFiles();
+        if (kids == null) {
+            return new ArrayList<Entry>();
+        }
+        for (int i = 0; i < kids.length; i++) {
+            File f = kids[i];
+            if (!f.isFile()) {
+                continue;
+            }
+            String name = f.getName();
+            boolean isDat = name.endsWith(FILE_SUFFIX);
+            boolean isRuns = !isDat && name.endsWith(RUNS_SUFFIX);
+            if (!name.startsWith(FILE_PREFIX) || !(isDat || isRuns)) {
+                continue;
+            }
+            String suffix = isDat ? FILE_SUFFIX : RUNS_SUFFIX;
+            String key = name.substring(FILE_PREFIX.length(), name.length() - suffix.length());
+            if (key.length() == 0) {
+                continue;
+            }
+            Entry entry = byKey.get(key);
+            if (entry == null) {
+                entry = new Entry(key);
+                byKey.put(key, entry);
+            }
+            if (isDat) {
+                entry.dat = f;
+            } else {
+                entry.runs = f;
+            }
+            entry.bytes += f.length();
+            long modified = f.lastModified();
+            if (modified > entry.lastModified) {
+                entry.lastModified = modified;
+            }
+        }
+        return new ArrayList<Entry>(byKey.values());
+    }
+
+    /** 缓存目录当前占用（字节）。与 {@link #evictForSpace} 同口径：{@code .dat} 与 sidecar 都算。 */
+    public static long dirBytes(File dir) {
+        if (dir == null || !dir.isDirectory()) {
+            return 0L;
+        }
+        List<Entry> entries = scanEntries(dir);
+        long total = 0L;
+        for (int i = 0; i < entries.size(); i++) {
+            total += entries.get(i).bytes;
+        }
+        return total;
+    }
+
+    /**
+     * 清空缓存目录，返回删掉的字节数。设置页「清空缓存」用——车主有权知道自己设备里
+     * 存了什么、并一键抹掉，这条不是可选功能。
+     */
+    public static long clearDir(File dir) {
+        if (dir == null || !dir.isDirectory()) {
+            return 0L;
+        }
+        List<Entry> entries = scanEntries(dir);
+        long freed = 0L;
+        for (int i = 0; i < entries.size(); i++) {
+            freed += entries.get(i).delete();
         }
         return freed;
     }
 
     /**
      * 打开（或接着用）一条流的缓存文件。任何失败都只意味着"这次没缓存"，不影响播放。
+     *
+     * <p>重开时<b>区间表只从 sidecar 恢复</b>：账本缺失、解析不了、或跟 {@code .dat} 的实际长度／
+     * 资源总长对不上，就把这对文件删掉重来。绝不用 {@code raf.length()} 反推"前面都是连续数据"
+     * ——跳写之后文件长度只代表"最后写到哪儿"，中间是零填充的洞（2026-10-08 自查抓到的缺陷）。
      *
      * @param dir 缓存目录（{@code getCacheDir()/stream-cache}）
      * @param maxFileBytes 单个文件上限，超过就不缓存
@@ -204,22 +467,22 @@ public final class StreamDiskCache {
             return null;
         }
         File f = new File(dir, FILE_PREFIX + key + FILE_SUFFIX);
+        File runsFile = new File(dir, FILE_PREFIX + key + RUNS_SUFFIX);
+
+        TreeMap<Long, Long> restored = restoreOrDiscard(f, runsFile, contentLength);
         if (!f.exists()) {
             evictForSpace(dir, contentLength, capBytes);
         }
-        StreamDiskCache cache = new StreamDiskCache(f, contentLength);
+        StreamDiskCache cache = new StreamDiskCache(f, runsFile, contentLength);
         try {
             cache.raf = new RandomAccessFile(f, "rw");
-            long existing = cache.raf.length();
-            if (existing > contentLength) {
-                // 同名但比资源长：键撞了或者服务端内容变过，作废重建，绝不拿旧字节当数
+            if (restored != null) {
+                cache.runs.putAll(restored);
+            }
+            if (cache.raf.length() > contentLength) {
+                // 兜底：走到这里 restored 必然为 null（校验里就拦下了），文件只是刚被创建失败残留
                 cache.raf.setLength(0L);
-            } else {
-                // 已有部分是可信的：整段都当作连续区间（写入本来就是顺序的），
-                // 重播同一首时这段直接免网络
-                if (existing > 0L) {
-                    addRun(cache.runs, 0L, existing);
-                }
+                cache.runs.clear();
             }
         } catch (Exception e) {
             cache.closeQuietly();
@@ -227,6 +490,43 @@ public final class StreamDiskCache {
             return null;
         }
         return cache;
+    }
+
+    /**
+     * 把盘上那份缓存核对成可信的区间表，不可信就当场作废（删掉成对文件）并返回 {@code null}。
+     */
+    private static TreeMap<Long, Long> restoreOrDiscard(File dat, File runsFile,
+                                                        long contentLength) {
+        boolean hasDat = dat.isFile();
+        boolean hasRuns = runsFile.isFile();
+        if (!hasDat && !hasRuns) {
+            return null; // 全新条目
+        }
+        if (!hasRuns || !hasDat) {
+            // 只有半边：数据没账本不可信，账本没数据是垃圾，都清掉重开
+            Log.i(TAG, "cache pair incomplete, rebuilding: dat=" + hasDat + " runs=" + hasRuns);
+            if (hasDat) {
+                //noinspection ResultOfMethodCallIgnored
+                dat.delete();
+            }
+            if (hasRuns) {
+                //noinspection ResultOfMethodCallIgnored
+                runsFile.delete();
+            }
+            return null;
+        }
+        TreeMap<Long, Long> parsed = decodeRuns(readSidecar(runsFile), contentLength);
+        if (parsed == null || !runsFitOnDisk(parsed, dat.length())) {
+            Log.i(TAG, "cache ledger inconsistent with data, rebuilding: " + dat.getName()
+                    + " datLen=" + dat.length() + " runs=" + (parsed == null ? "unparsable"
+                    : parsed.size()));
+            //noinspection ResultOfMethodCallIgnored
+            dat.delete();
+            //noinspection ResultOfMethodCallIgnored
+            runsFile.delete();
+            return null;
+        }
+        return parsed;
     }
 
     /** 盘上有 {@code [position, position+want)} 这段连续数据吗。 */
@@ -296,11 +596,27 @@ public final class StreamDiskCache {
                 raf.seek(position);
                 raf.write(src, offset, length);
                 addRun(runs, position, position + length);
+                maybeFlushLedger();
             } catch (Exception e) {
                 broken = true;
                 Log.w(TAG, "disk write failed, cache disabled for this stream: " + e);
             }
         }
+    }
+
+    /** 段数变了（说明出现了新的不连续段）或连续段推进够多，就提前把账本落盘。 */
+    private void maybeFlushLedger() {
+        if (broken) {
+            return;
+        }
+        long maxEnd = runs.isEmpty() ? 0L : runs.lastEntry().getValue().longValue();
+        if (runs.size() == ledgerFlushedRunCount && maxEnd - ledgerFlushedEnd
+                < LEDGER_FLUSH_STRIDE_BYTES) {
+            return;
+        }
+        writeSidecar(runsFile, runs, contentLength);
+        ledgerFlushedEnd = maxEnd;
+        ledgerFlushedRunCount = runs.size();
     }
 
     /** 已从盘上喂出去的字节数（上报里 {@code disk=} 用它判命中率）。 */
@@ -333,13 +649,27 @@ public final class StreamDiskCache {
                 } catch (Exception ignored) {
                     // 同步失败只是"下次重播可能少一段"，不影响正确性
                 }
+                if (broken) {
+                    // 这一轮碰上过 IO 错误：盘上状态没人能保证，只删账本让下次整份重建
+                    runs.clear();
+                }
+                try {
+                    writeSidecar(runsFile, runs, contentLength);
+                } catch (Exception e) {
+                    Log.w(TAG, "close-time ledger write failed: " + e);
+                }
                 closeQuietly();
             }
         }
         // 命中过就把 mtime 顶到最新：LRU 淘汰才不会把常听的歌先删掉
         if (servedBytes > 0L && file.exists()) {
+            long now = System.currentTimeMillis();
             //noinspection ResultOfMethodCallIgnored
-            file.setLastModified(System.currentTimeMillis());
+            file.setLastModified(now);
+            if (runsFile.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                runsFile.setLastModified(now);
+            }
         }
     }
 
@@ -351,49 +681,6 @@ public final class StreamDiskCache {
             }
             raf = null;
         }
-    }
-
-    /** 缓存目录当前占用（字节）。只统计自己前缀的文件，与 {@link #evictForSpace} 同口径。 */
-    public static long dirBytes(File dir) {
-        if (dir == null || !dir.isDirectory()) {
-            return 0L;
-        }
-        File[] kids = dir.listFiles();
-        if (kids == null) {
-            return 0L;
-        }
-        long total = 0L;
-        for (int i = 0; i < kids.length; i++) {
-            File f = kids[i];
-            if (f.isFile() && f.getName().startsWith(FILE_PREFIX)
-                    && f.getName().endsWith(FILE_SUFFIX)) {
-                total += f.length();
-            }
-        }
-        return total;
-    }
-
-    /**
-     * 清空缓存目录，返回删掉的字节数。设置页「清空缓存」用——车主有权知道自己设备里
-     * 存了什么、并一键抹掉，这条不是可选功能。
-     */
-    public static long clearDir(File dir) {
-        if (dir == null || !dir.isDirectory()) {
-            return 0L;
-        }
-        File[] kids = dir.listFiles();
-        if (kids == null) {
-            return 0L;
-        }
-        long freed = 0L;
-        for (int i = 0; i < kids.length; i++) {
-            File f = kids[i];
-            if (f.isFile() && f.getName().startsWith(FILE_PREFIX)
-                    && f.getName().endsWith(FILE_SUFFIX) && f.delete()) {
-                freed += f.length();
-            }
-        }
-        return freed;
     }
 
     private static String sha1Hex(String s) {

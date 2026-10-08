@@ -138,7 +138,7 @@ Android Auto/AAOS 对媒体应用的硬性要求是 `MediaSession` + `MediaBrows
 | `prefill` 768KB 与 `lead=-1` | 论证后有意不改（`changelogs/3.2.4.md:10-14`） | 决定 |
 | MediaSession / 标准车机接入 | Android 4.3 无该 API，**客观不可能项**，仅错误文案可改 | 限制 |
 | A1 取流回单连接 | **已做**（commit `05e54ec` + `17d6f32` + `5fd815d`），四把回退闸在 `StreamTuning` | 效果待真车 `upstream conns`/`ttfbMax` 复测 |
-| A2 磁盘缓存 | **已做** `StreamDiskCache`（单文件 100MB / 目录 1GB 两个口径，占用与清空已进设置页） | 命中率待真车 `disk=` 复测 |
+| A2 磁盘缓存 | **已做** `StreamDiskCache`（单文件 100MB / 目录 1GB 两个口径，占用与清空已进设置页）；区间表已改为**必须持久化的 sidecar 账本**——首版用文件大小反推连续性会把跳写留下的零填充洞当音频读，2026-10-08 自查抓到并修（changelog 3.2.10 第四批 14/15） | 命中率待真车 `disk=` 复测 |
 | A3 档位体系 | **已做** `StreamTier` + 设置页「音质」两档手选 | 服务端固定 256kbps，更多档位需先改 Jellyfin 转码配置 |
 | L4 功能差距 | **逐项判定见 §4**：本次补 5 项（历史栈/睡眠定时/拔耳机/回退闸/缓存管理），其余判为不适用、缺依据或需你定交互 | 见 §4 各行归属 |
 | FLAC 二分 B/C（vendored/合成表） | 未做，**故意**：无 C++ 自动化覆盖且退化风险更高 | 需真车数据后由车主拍板 |

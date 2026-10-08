@@ -382,19 +382,30 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 
 ## vc21 = 3.2.10 出包记录（2026-10-08，**未发布**）
 
-包：**`ZSpaceCarPlayer-3.2.10-code21-debug.apk`**，3,145,991 B，
-`sha256=21d7e3d5e537076981edcd1c323ff629ac482b8212f02fe5287a5dec386e09b8`，
-`aapt2 dump badging` → `versionCode='21' versionName='3.2.10'`，minSdk 18，zip 填充 78,626（正常形状）。
-`clean :app:testDebugUnitTest :app:assembleDebug` → **431 条 host 单测 0 失败**。
+包：**`ZSpaceCarPlayer-3.2.10-code21-debug.apk`**，3,148,346 B，
+`sha256=aed17dd9aef4ccdf128d2f7e21344ef582b6f1fce1bbcaea6e64ee8ae222a859`，
+`aapt2 dump badging` → `versionCode='21' versionName='3.2.10'`，`aapt dump badging` →
+`sdkVersion:'18'`，`zipalign -c -v 4` → `Verification successful`。
+`clean :app:testDebugUnitTest :app:assembleDebug` → **438 条 host 单测 0 失败**。
+（本版本内共四批改动，包是第四批后的最终态；旧值 3,145,991 / `21d7e3d5…` / 431 条是第三批
+收口时的读数，被第四批的磁盘缓存账本修复替换。）
+**sha 只对上面这只文件有效**：zip 里带构建时间戳，同一份源码重跑构建字节数会差几十字节
+（本轮实测 3,145,991 → 3,148,516 → 3,148,346 三次读数），发布前若重出包必须重算并同步清单。
 
-**状态：包与清单草稿（`latest-3.2.10-code21.json`，`notes` 依铁律留空）都已入仓，
-但线上 `latest.json` 与发布目录里的包体一个字节都没动 —— 车主指令是「全部都做完才 commit」，
-发版要另外点头。** 内容见 `changelogs/3.2.10.md` 与 `docs/audit_t1_baseline_20261008.md`。
-同版本内还有第二批 commit `17d6f32`（`StreamTuning` 四把回退闸、设置页三行新 UI、曲库滤掉
-236 条带视频流的文件、随机模式"上一首"历史栈、睡眠定时、拔耳机暂停），最终包即上面这只。
-逐项"已做/不适用/缺依据/需车主决策"判定见 `docs/audit_t1_baseline_20261008.md` §4。
+**状态：清单草稿 `latest-3.2.10-code21.json`（`notes` 依铁律留空）已入仓；包体在
+`apks/release/` 下但**不进 git**（`.gitignore` 有 `*.apk`，历史各版包同样只存本地/发布目录）。
+线上 `latest.json` 与发布目录里的包体一个字节都没动 —— 发版要车主另外点头。**
+内容见 `changelogs/3.2.10.md`（四批）与 `docs/audit_t1_baseline_20261008.md`。
+同版本内第二批（`StreamTuning` 四把回退闸、设置页三行新 UI、曲库滤掉 236 条带视频流的文件、
+随机模式"上一首"历史栈、睡眠定时、拔耳机暂停）、第三批（预取代价进仪表、错误文案）、
+第四批（磁盘缓存区间表持久化 + 提前落账，修掉"按文件大小反推连续性会把零填充洞当音频"）
+都已进这只包。逐项"已做/不适用/缺依据/需车主决策"判定见
+`docs/audit_t1_baseline_20261008.md` §4。
 
-出包过程中第三次踩到同一个坑：不带 `clean` 的增量构建产出 5,172,820 B（填充 2,116,886）的胖包，
-`clean` 后回到 3.14MB。规则照旧：**发版必须 `clean` + `assembleDebug`（release 无 signingConfig）**，
+出包过程中第三次踩到同一个坑：不带 `clean` 的增量构建产出 5,172,820 B 的胖包，
+`clean` 后回到 3.15MB。胖包判据就用**总字节数**（历史包一直在 3.12~3.15MB 区间，5.1MB 一眼可辨）；
+早先记录里的"zip 填充 78,6xx B"这一口径我在本机 `zipalign 36.0.0` 上复现不出来（它只报
+`Verification successful` 不报总填充），此后不再引用，免得留一个没人能复核的数。规则照旧：
+**发版必须 `clean` + `assembleDebug`（release 无 signingConfig）**，
 且系统默认 java 已是 JDK 25，必须显式 `JAVA_HOME=…/openjdk@21/…`，否则 gradle 报
 `Unsupported class file major version 69`。
