@@ -427,7 +427,7 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 且系统默认 java 已是 JDK 25，必须显式 `JAVA_HOME=…/openjdk@21/…`，否则 gradle 报
 `Unsupported class file major version 69`。
 
-## vc22 = 3.2.11 出包记录（2026-10-08，**未发布**）
+## vc22 = 3.2.11 已发布（2026-10-08 21:08 前后，OTA 清单已切）
 
 包：**`ZSpaceCarPlayer-3.2.11-code22-debug.apk`**，3,149,267 B，
 `sha256=e5e09b1d53400d6bd89731de70795eef7f7cd4bfe00922d6124ec4187465384e`，
@@ -454,6 +454,16 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 （我在源码里差点用了 API 19 的 `Objects.equals`，被仓里那条旧注释拦住，改成手写比较并在 dex 里复核）。
 版本串 `3.2.11` 命中 2 处、旧 `3.2.9` 归零。
 
-**状态：清单草稿 `latest-3.2.11-code22.json` 已按线上形状备齐十个键（顺序逐键一致、`notes` 留空），
-包体在 `apks/release/`，NAS 发布目录与线上 `latest.json` 一个字节都没动 —— 发不发等你点头。**
-线上此刻仍是 vc21 / 3.2.10（`94662545…`）。
+**发布与验收（车主指令「先发了」）**
+
+- 备份 `latest.json.bak-20261008-vc21` → 包体 cp 进发布目录 → 清单 `tmp` + `os.replace` 原子替换；
+  替换前逐键比过形状（十个键顺序一致）、`sizeBytes/sha256` 与真实文件重算一致、`notes` 长度 0、
+  键名 `mandatory`。代码已推 `main`（`ff33cee`）。
+- 公网：清单轮询**第 1 轮**即 `versionCode=22`；按 `apkUrl` 实下载 `http=200 bytes=3149267`；
+  **仓内 / 发布目录 / 公网下载 / 清单声明 四方 sha256 一致**。
+- 包内核验：`writeIntoRingLocked`/`pendingDiskBytes`/`copyOf`+`Ljava/util/Arrays;` 命中；
+  minSdk 18 三项红线（`Ljava/util/Objects;`、`java.time`、`Ljava/util/function/`）全 0。
+- cron `a32ef4a3` 换成 **vc22 八条判据**并 `enable` 回读（`enabled=true / pauseReason=null`）：
+  主判据是"窗满却停顿"这一对是否消失，并新增 `srcs=`（陈旧 fork 抢带宽）与起播耗时两列。
+- 设备侧生效不需要连 adb：清单是开关，下次上电自动检查→下载双校验→系统安装界面确认。
+  **听感与设置页显示仍是肉眼项，cron 判不了。**
