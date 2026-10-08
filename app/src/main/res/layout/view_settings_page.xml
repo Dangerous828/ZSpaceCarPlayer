@@ -272,6 +272,68 @@
                     android:textSize="@dimen/mini_text" />
             </LinearLayout>
 
+            <!-- 音质档位: 车主手选, 循环两档 (无损 / 流畅)。2026-10-08 T1 重审 L2 的结论是
+                 "把选择权交回人"——自动降档已被否决, 所以这里没有第三条"自动"路径,
+                 副标题里的码率数字必须是服务端实测值(256kbps), 不许写请求参数上的 128。 -->
+            <LinearLayout
+                android:id="@+id/btnSettingTierToggle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_card_grid"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="16dp"
+                android:paddingTop="14dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="14dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="质"
+                    android:textSize="@dimen/dialog_title" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="14dp"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="音质"
+                        android:textColor="@color/ink"
+                        android:textSize="@dimen/card_title_size"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvSettingTierDesc"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="原始文件直传，本库实测需 100~151KB/s"
+                        android:textColor="@color/ink_dim"
+                        android:textSize="@dimen/card_sub_size" />
+                </LinearLayout>
+
+                <Button
+                    android:id="@+id/btnSettingTierValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="@dimen/mini_h"
+                    android:background="@drawable/bg_soft_pill"
+                    android:minWidth="@dimen/font_w"
+                    android:singleLine="true"
+                    android:text="无损"
+                    android:textAllCaps="false"
+                    android:textColor="@color/ink_dim"
+                    android:textSize="@dimen/mini_text" />
+            </LinearLayout>
+
             <!-- 夜间模式: 三档循环 (自动 / 白天 / 夜间)。API 18 车机字体缺日月图形字符,
                  图标位用汉字, 不用 emoji。 -->
             <LinearLayout

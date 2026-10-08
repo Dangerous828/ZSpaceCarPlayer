@@ -142,12 +142,21 @@ public final class PlaybackStateMachine {
      * 就 COMPLETED, 只可能是断点落在贴尾, 应当从头重播本曲, 而不是当成播完跳下一首。
      * playedMs 只累计真正出声的 tick, 暂停时长不算, 因此长暂停后恢复不会被误判。
      * alreadyReplayedOnce 保证一次性, 不会与重播形成死循环。
+     *
+     * <p><b>heardAudioProgress 是必要前提 (2026-10-08 实车)</b>：这个判定的原意是「断点贴在真实
+     * 曲尾，于是播出几秒尾音就 COMPLETED」。但 vc19 那晚 出山 的现场是带断点起播后<b>一个字节
+     * 都没出声</b>就 EOS（chunked 流畅档的连接在下载侧被自己重连打断），位置从头到尾是 0，
+     * 根本不是"落在曲尾"。被判成坏断点后走 {@code replay-from-start}，除了把续播点清零还顺手
+     * 重播一遍，而下一轮同样立刻 EOS —— 现场日志就是这个环跑了两圈后进程没了。
+     * 没出过声就交给兜底之三按 I/O 错误处理（带断点重试一次、不清续播点、再失败就报出来）。
      */
     public static boolean shouldReplayInsteadOfAdvance(boolean startedFromResumePoint,
                                                        long playedMs,
-                                                       boolean alreadyReplayedOnce) {
+                                                       boolean alreadyReplayedOnce,
+                                                       boolean heardAudioProgress) {
         return startedFromResumePoint
                 && !alreadyReplayedOnce
+                && heardAudioProgress
                 && playedMs >= 0
                 && playedMs < COMPLETION_TOO_FAST_MS;
     }
@@ -487,15 +496,28 @@ public final class PlaybackStateMachine {
      *
      * @param consecutiveGiveUps 本轮连续放弃了第几首（从 1 起）
      */
+    /**
+     * 放弃当前曲时给车主看的那句话。
+     *
+     * @param losslessTier 当前是<b>无损</b>档时才附带一句"可切流畅档"。这是我们唯一允许的降级
+     *                     引导：<b>提示而不动作</b>——换不换由人在设置页点，自动降档已被车主否决
+     *                     （2026-10-08 T1 重审 L2）。服务端已无此曲的那种失败不配这句，
+     *                     换了码率也照样没有那首歌。
+     */
     public static String describeGiveUp(int consecutiveGiveUps, String songName,
-                                        boolean missingResource) {
-        String one = missingResource
-                ? "曲目已不在服务器, 已跳过: " + songName
-                : "多次重试仍无法播放，已跳过: " + songName;
-        if (consecutiveGiveUps < 2) {
-            return one;
+                                        boolean missingResource, boolean losslessTier) {
+        String hint = losslessTier ? "，可在设置把音质切成「流畅」" : "";
+        if (missingResource) {
+            String one = "曲目已不在服务器, 已跳过: " + songName;
+            return consecutiveGiveUps < 2 ? one
+                    : "已连续 " + consecutiveGiveUps + " 首无法播放(最近: " + songName
+                            + "), 请检查网络或刷新曲库";
         }
-        return "已连续 " + consecutiveGiveUps + " 首无法播放(最近: " + songName + "), 请检查网络或刷新曲库";
+        if (consecutiveGiveUps < 2) {
+            return "多次重试仍无法播放，已跳过: " + songName + hint;
+        }
+        return "已连续 " + consecutiveGiveUps + " 首无法播放(最近: " + songName
+                + "), 请检查网络或刷新曲库" + hint;
     }
 
     /** 「离曲尾还差这么多就认为根本没播完」的余量 (2026-10-07)。 */

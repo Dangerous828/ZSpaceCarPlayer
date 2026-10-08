@@ -269,4 +269,30 @@ public class LosslessBridgeTest {
         assertEquals(-1, NativeLosslessDecoder.bridgeRead(local, 0, new byte[8], 0, 8));
         assertEquals(1, reads[0]);
     }
+
+    /**
+     * seek 越界必须返回 false (2026-10-08，A1 第一刀)。
+     *
+     * <p>理由不是防御，而是<b>把 dr_flac 自己的判据还给它</b>：{@code drflac__seek_to_byte}
+     * 失败在 dr_flac 里就是"已越过流尾、该收紧折半上界"的唯一信号（{@code dr_flac.h:5888}
+     * 原注释）。我们旧实现只校验 {@code <0} 与 {@code MAX_LIMIT}，越界一律 true，于是它的
+     * 无 seektable 二分只能靠"整帧解码失败"驱动，迭代到约 9 次；而<b>每次跳读落在窗外就是一条
+     * 新上游连接 + 0.8~1.4 秒首字节</b>（对照实测：分段 133KB/s vs 长连接 797KB/s）。
+     */
+    @Test
+    public void seekBeyondKnownLengthIsUnreachable() {
+        long len = 18_900_000L; // Booty Music 原件实测规模：103784B/s × 181.8s
+        assertTrue(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(0L, len));
+        assertTrue("最后一个可读字节仍可达",
+                NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(len - 1L, len));
+        assertFalse("落在 EOF 上不可读，就该报不可达",
+                NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(len, len));
+        assertFalse(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(len + 1L, len));
+        assertFalse("负位永远不可达",
+                NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(-1L, len));
+        // 总长未知（chunked 转码流不给 Content-Length）时保持旧行为：不得凭空判不可达，
+        // 否则流畅档会整首起不了播
+        assertTrue(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(999_999_999L, -1L));
+        assertTrue(NativeLosslessDecoder.HttpSourceReader.seekTargetReachable(999_999_999L, 0L));
+    }
 }

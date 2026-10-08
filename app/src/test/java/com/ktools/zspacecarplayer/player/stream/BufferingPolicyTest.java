@@ -92,53 +92,79 @@ public class BufferingPolicyTest {
 
     // ---------------- 下一首预取判定 ----------------
 
-    /** 当前曲健康（百分比达标）才预取 */
+    /**
+     * chunked 流播放器时长报 0，剩余秒数就只能拿入库元数据兜底——否则「接近结尾」这道门永远
+     * 打不开，<b>降档之后每一首都再也无法预取</b> (2026-10-08)。兜底只许用于推导，不许接到
+     * seek 上（vc19 就是把兜底时长接进起播路径，对不可续传流下发 seek，当晚以进程消失收场）。
+     */
     @Test
-    public void prefetchWhenCurrentHealthyByPercent() {
-        assertTrue(BufferingPolicy.shouldPrefetchNext(
-                BufferingPolicy.PREFETCH_HEALTHY_PERCENT, 0, 120, false, false, false));
-        assertFalse(BufferingPolicy.shouldPrefetchNext(
-                BufferingPolicy.PREFETCH_HEALTHY_PERCENT - 1, 0, 120, false, false, false));
+    public void metaDurationBackstopsDerivationOnly() {
+        assertEquals("播放器时长可用时以它为准（转码产物可能比元数据短）",
+                180000L, BufferingPolicy.durationForDerivation(180000L, 200000L));
+        assertEquals("播放器报 0 才用元数据",
+                200000L, BufferingPolicy.durationForDerivation(0L, 200000L));
+        assertEquals("两个都不可用就是不可用，不许凭空造出时长",
+                0L, BufferingPolicy.durationForDerivation(0L, 0L));
+        assertEquals("元数据缺失时不得回负数", 0L,
+                BufferingPolicy.durationForDerivation(0L, -1L));
     }
 
-    /** 百分比未知但领先秒数达标：同样视为健康 */
+    /**
+     * 「健康」只认领先秒数。旧的 percent>=40 那一支已删 (2026-10-08 真车)：percent 是"文件下了
+     * 多少"而不是"还能播几秒"，链路有缺口时下载头紧贴播放头（当天 lead 全程 0s、percent 涨到
+     * 57），那一支会在这种状态下放行 2MB 预取，从当前曲嘴里抢带宽。
+     */
+    @Test
+    public void prefetchNeverFiresWithoutLeadSeconds() {
+        assertFalse("文件已下 90% 但只剩 0s 缓冲 = 正在抽干，不许预取抢带宽",
+                BufferingPolicy.shouldPrefetchNext(0L, 120, false, false, false));
+        assertFalse(BufferingPolicy.shouldPrefetchNext(14L, 120, false, false, false));
+        assertTrue("真有 15s 领先才允许",
+                BufferingPolicy.shouldPrefetchNext(BufferingPolicy.PREFETCH_LEAD_SECONDS, 120,
+                        false, false, false));
+    }
+
+    /** 百分比未知（chunked 流）但领先秒数达标：同样视为健康 */
     @Test
     public void prefetchWhenHealthyByLeadSeconds() {
         assertTrue(BufferingPolicy.shouldPrefetchNext(
-                -1, BufferingPolicy.PREFETCH_LEAD_SECONDS, 120, false, false, false));
+                BufferingPolicy.PREFETCH_LEAD_SECONDS, 120, false, false, false));
         assertFalse(BufferingPolicy.shouldPrefetchNext(
-                -1, BufferingPolicy.PREFETCH_LEAD_SECONDS - 1, 120, false, false, false));
+                BufferingPolicy.PREFETCH_LEAD_SECONDS - 1, 120, false, false, false));
     }
 
-    /** 接近结尾（剩余 <= 15s）无条件预取，即便当前百分比不高 */
+    /** 接近结尾（剩余 <= 15s）无条件预取，哪怕当前没有领先秒数 */
     @Test
     public void prefetchWhenNearEnd() {
         assertTrue(BufferingPolicy.shouldPrefetchNext(
-                5, 1, BufferingPolicy.PREFETCH_REMAINING_SECONDS, false, false, false));
+                1, BufferingPolicy.PREFETCH_REMAINING_SECONDS, false, false, false));
         assertFalse(BufferingPolicy.shouldPrefetchNext(
-                5, 1, BufferingPolicy.PREFETCH_REMAINING_SECONDS + 1, false, false, false));
+                1, BufferingPolicy.PREFETCH_REMAINING_SECONDS + 1, false, false, false));
     }
 
     /** 让位当前曲：饥饿 / 正在 prefill 时绝不预取（当前曲永远优先） */
     @Test
     public void prefetchYieldsToCurrentSong() {
         assertFalse("饥饿时不预取", BufferingPolicy.shouldPrefetchNext(
-                90, 60, 120, true, false, false));
+                60, 120, true, false, false));
         assertFalse("prefill 门槛期间不预取", BufferingPolicy.shouldPrefetchNext(
-                90, 60, 120, false, true, false));
+                60, 120, false, true, false));
     }
 
     /** 去重：同一首只预取一次 */
     @Test
     public void prefetchDedupesSameSong() {
-        assertFalse(BufferingPolicy.shouldPrefetchNext(
-                90, 60, 120, false, false, true));
+        assertFalse(BufferingPolicy.shouldPrefetchNext(60, 120, false, false, true));
     }
 
-    /** 剩余时长未知（-1）且百分比未知：不满足任何触发条件，不预取 */
+    /**
+     * 剩余时长未知（-1）且不满足健康门 ⇒ 不预取。这正是流畅档的真实形态：chunked 流没有
+     * Content-Length，播放器时长报 0，调用方必须先用入库元数据兜底算出剩余秒数，否则
+     * **降档之后每一首都再也预取不了** (2026-10-08)。
+     */
     @Test
     public void prefetchNotTriggeredWhenEverythingUnknown() {
-        assertFalse(BufferingPolicy.shouldPrefetchNext(-1, -1, -1, false, false, false));
+        assertFalse(BufferingPolicy.shouldPrefetchNext(-1, -1, false, false, false));
     }
 
     // ---------------- 容量 / 上限 / 稳定判定 ----------------
@@ -220,6 +246,23 @@ public class BufferingPolicyTest {
                 BufferingPolicy.audioAdvancedRecently(100_000L, 100_000L - fresh - 1L));
     }
 
+    /**
+     * 流畅档（chunked、无总长）上还得能测链路，否则<b>降得上去、回不来</b>。
+     * 2026-10-08 复盘：vc16 那晚"之后 4 首全部在流畅档被腰斩"，除了误判进去，还有
+     * {@code bandwidthSampleIsMeasurable} 在 chunked 流上恒为 false，让回升判定一次样本都采不到，
+     * 档位被永久钉死——回家连 WiFi 也还是流畅档。
+     */
+    @Test
+    public void smoothTierStillMeasuresTheLink() {
+        assertTrue("有降档前的所需速率 + 窗口有余位 = 可采",
+                BufferingPolicy.smoothTierSampleIsMeasurable(132_000L, true));
+        assertFalse("没测出过所需速率就没有分母，不许凭空判富余",
+                BufferingPolicy.smoothTierSampleIsMeasurable(-1L, true));
+        assertFalse("窗口饱和时 bufEnd 只跟着读者走，采了就是假数字",
+                BufferingPolicy.smoothTierSampleIsMeasurable(132_000L, false));
+        assertFalse(BufferingPolicy.smoothTierSampleIsMeasurable(0L, true));
+    }
+
     @Test
     public void openWatchdogKillsOnlyStalledOpens() {
         long stall = BufferingPolicy.OPEN_STALL_MS;
@@ -270,8 +313,8 @@ public class BufferingPolicyTest {
                 BufferingPolicy.isBufferingStable(-1, -1, 300, false));
         assertTrue("三个数全不可判而声音在推进时按稳定处理（见 bufferingStableHidesIndicator 的复盘）",
                 BufferingPolicy.isBufferingStable(-1, -1, -1, true));
-        assertTrue(BufferingPolicy.shouldPrefetchNext(-1, -1, 10, false, false, false));
-        assertFalse(BufferingPolicy.shouldPrefetchNext(-1, -1, -1, false, false, false));
+        assertTrue(BufferingPolicy.shouldPrefetchNext(-1, 10, false, false, false));
+        assertFalse(BufferingPolicy.shouldPrefetchNext(-1, -1, false, false, false));
     }
 
     /**

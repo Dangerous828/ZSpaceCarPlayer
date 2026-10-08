@@ -701,7 +701,14 @@ public class JellyfinApiClient {
      * 追不上无损码率时才用。DSP 不受影响——降级后走系统 MediaCodec 分支，而
      * {@code DspAudioTrackPlayer} 在该分支里同样调 {@code NativeDsp.processBytes}，EQ/Bass/声场/混响保留。
      */
-    /** 流畅档目标码率（bps）：约 16 KB/s。刻意低于实测最差链路一个数量级。 */
+    /**
+     * 流畅档请求的目标码率（bps）。<b>这台服务端并不执行它</b>——2026-10-08 拿同一首歌
+     * （181.812s）实测：128000 / 320000 / {@code audioBitRate} / 大写 {@code MaxStreamingBitrate}
+     * / 加 {@code enableTranscoding=true} / 加 audioCodec+audioBitRate+audioSampleRate，
+     * 七种请求返回字节数完全相同 = <b>256.1kbps（31.3KB/s）</b>，即 Jellyfin 的 mp3 转码固定
+     * 256k、忽略这些参数。保留参数只有两个理由：① 万一服务端配置改了会自动生效；② 它是这条
+     * URL 的稳定标识。<b>任何用户可见文案都必须写实测的 256kbps，不许写 128。</b>
+     */
     public static final long DEGRADED_TARGET_BITRATE = 128_000L;
 
     public String getDegradedStreamUrl(String itemId) {
@@ -709,6 +716,23 @@ public class JellyfinApiClient {
         if (accessToken == null || accessToken.isEmpty()) return "";
         return serverUrl + "/Audio/" + itemId + "/stream.mp3?api_key=" + accessToken
                 + "&static=false&maxStreamingBitrate=" + DEGRADED_TARGET_BITRATE;
+    }
+
+    /**
+     * 按<b>车主手选的档位</b>取出播 URL (2026-10-08 T1 重审 L2)。
+     *
+     * <p>无损档一律沿用该曲入库时定下的那条（原件直传或服务端 FLAC），流畅档才换成转码 URL；
+     * 取不到时退回无损，绝不因为档位拼装失败而播不出声。预取与起播都走这里，两者必须同一条
+     * URL——否则预取命中不了，白下一次（见 {@code AudioPlayerService#resolvePlayUrl}）。
+     */
+    public String getStreamUrlForTier(String itemId, String cachedStreamUrl, int tier) {
+        if (tier == com.ktools.zspacecarplayer.player.stream.StreamTier.SMOOTH) {
+            String degraded = getDegradedStreamUrl(itemId);
+            if (degraded != null && degraded.length() > 0) {
+                return degraded;
+            }
+        }
+        return getStreamUrlForSong(itemId, cachedStreamUrl);
     }
 
     /**

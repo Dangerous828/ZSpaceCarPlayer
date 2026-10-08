@@ -90,21 +90,39 @@ public class StreamRateGovernorTest {
     }
 
     /**
-     * 自动换档关着的理由**只剩一个，而且很硬**：测速口径还不可信。
-     *
-     * <p>10-07 关它是怕流畅档腰斩（那两条 vc17 已经修了）；10-08 我据此打开，当天就被车主一个
-     * 数字推翻——同一条链路 10 秒下完 3.1MB 的包（>300KB/s），而我"测"出来 107KB/s，因为样本
-     * 取自 {@code bufEnd}：窗口饱和时它等于播放消耗速率，于是健康链路也必然满足
-     * {@code est < 所需×1.15}。所以关着是"不许用坏数字接管档位"，等 socket 口径的
-     * {@code bitrate deficit} 在真车上重新出现并可信，再谈打开。
+     * 自动换档必须关着——2026-10-08 车主明确否决。理由不是舍不得音质，而是<b>"链路不够"这个前提
+     * 从没被证明过</b>：同一台 Mac、同一条热点、同一份文件，一条长连接取 5MB 是 246KB/s，拆成
+     * 20 条独立请求只剩 74KB/s，而我在车上"测"到的恰好是 60~94KB/s 这个带。在那个数字被证明
+     * 是链路而不是我自己的取流形状之前，缺口只累计成证据，不许接管档位。
      */
     @Test
-    public void autoDegradeStaysOffWhileTheSampleIsUntrustworthy() {
-        Assert.assertFalse(StreamRateGovernor.AUTO_DEGRADE_ENABLED);
+    public void sustainedDeficitCollectsEvidenceButNeverSwitchesTier() {
+        Assert.assertFalse("车主否决了自动降档，本值不得被翻回 true",
+                StreamRateGovernor.AUTO_DEGRADE_ENABLED);
         StreamRateGovernor g = governed();
-        feed.windows(g, StreamRateGovernor.DEGRADE_CONFIRMATIONS * 4, 20_000L, LOSSLESS_REQUIRED);
-        Assert.assertTrue("缺口照样要累计成证据", g.getDeficitConfirmations() >= 3);
-        Assert.assertFalse("但不许据此换档", g.isDegraded());
+        feed.windows(g, StreamRateGovernor.DEGRADE_CONFIRMATIONS - 1, 20_000L, LOSSLESS_REQUIRED);
+        Assert.assertFalse(g.isDegraded());
+        feed.windows(g, 1, 20_000L, LOSSLESS_REQUIRED);
+        Assert.assertEquals("连续 3 个慢窗口要留下证据", 1, g.getDeficitConfirmations());
+        Assert.assertFalse("但只留证据，不换档", g.isDegraded());
+    }
+
+    /**
+     * 止损阀：手动档下连一首都没救回来就退回无损。10-07 那晚没有这条，档位一翻就连着
+     * 4 首全部腰斩（车主观感"从 16 版本开始一首歌都挺不完整"）。
+     */
+    @Test
+    public void giveUpOnSmoothTierFallsBackToLossless() {
+        StreamRateGovernor g = governed();
+        g.forceDegraded();
+        Assert.assertTrue(g.isDegraded());
+        Assert.assertTrue("放弃流畅档要报告状态真的变了", g.abortDegrade());
+        Assert.assertFalse(g.isDegraded());
+        Assert.assertFalse("已经是无损时再放弃不该改动状态，也不得谎报", g.abortDegrade());
+        // 止损之后缺口继续累计成证据，但自动档关着，不会再自己翻上去
+        feed.windows(g, StreamRateGovernor.DEGRADE_CONFIRMATIONS, 20_000L, LOSSLESS_REQUIRED);
+        Assert.assertTrue(g.getDeficitConfirmations() >= 1);
+        Assert.assertFalse("自动换档关着：不得自己翻回流畅档", g.isDegraded());
     }
 
     @Test
@@ -217,8 +235,13 @@ public class StreamRateGovernorTest {
         Assert.assertTrue(StreamRateGovernor.DEFICIT_MARGIN_PERCENT > 0);
         Assert.assertTrue("滞回带：回升阈值必须高于认定缺口的阈值",
                 StreamRateGovernor.SURPLUS_MARGIN_PERCENT > StreamRateGovernor.DEFICIT_MARGIN_PERCENT);
-        // 流畅档要远低于实测最差链路（67 KB/s），否则换了也没用
-        Assert.assertTrue(com.ktools.zspacecarplayer.net.JellyfinApiClient.DEGRADED_TARGET_BITRATE / 8L
-                < 60_000L);
+        // 流畅档必须明显比无损省：但**按服务端实测的数**算，不按请求参数算。
+        // 2026-10-08 同一首歌实测：maxStreamingBitrate/audioBitRate 七种写法都返回同样的
+        // 5,819,950B = 256.1kbps = 31.3KB/s（服务端固定 256k，忽略参数），
+        // 而本库无损原件实测需 100~151KB/s——省约 3 倍，这才是不许写"128k"进文案的原因。
+        Assert.assertTrue("流畅档实测所需必须低于无损需求的一半，否则换了等于没换",
+                StreamTier.SMOOTH_MEASURED_BYTES_PER_SEC < LOSSLESS_REQUIRED / 2);
+        Assert.assertEquals("档位标签不许谎报码率",
+                "服务端转码 256kbps，约需 32KB/s", StreamTier.describe(StreamTier.SMOOTH));
     }
 }

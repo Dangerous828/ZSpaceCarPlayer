@@ -432,19 +432,33 @@ public class PlaybackStateMachineTest {
     @Test
     public void completionRightAfterResumeReplaysInsteadOfAdvancing() {
         // 断点起播后几乎立刻 COMPLETED: 断点贴在曲尾, 不能当成播完跳下一首
-        Assert.assertTrue(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 0L, false));
-        Assert.assertTrue(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 5500L, false));
+        Assert.assertTrue(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 0L, false, true));
+        Assert.assertTrue(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 5500L, false, true));
         // 出声已超过兜底窗口 ⇒ 视为真播完, 正常自动下一首
         Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(
-                true, PlaybackStateMachine.COMPLETION_TOO_FAST_MS, false));
-        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 60000L, false));
+                true, PlaybackStateMachine.COMPLETION_TOO_FAST_MS, false, true));
+        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 60000L, false, true));
         // 不是断点起播 (用户点歌/自动切歌) ⇒ 不干预
-        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(false, 0L, false));
+        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(false, 0L, false, true));
         // 一次性
-        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 0L, true));
+        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 0L, true, true));
         // 兜底窗口必须窄于曲尾 guard, 否则刚过 guard 的合法断点会被误判成坏断点
         Assert.assertTrue(PlaybackStateMachine.COMPLETION_TOO_FAST_MS
                 < PlaybackStateMachine.endOfTrackGuardMs());
+    }
+
+    /**
+     * 断路器（2026-10-08 08:51 真车崩溃现场）。出山 带断点 34728ms 起播，chunked 流畅档的下载
+     * 被自己的重试打断 → 一个字节都没出声就 EOS。旧判据只看 tick 数，把这种"流死了"当成
+     * "断点贴在曲尾"：清掉续播点 + 从零重播，而下一轮同样立刻 EOS —— 日志里这个环跑了两圈
+     * 之后进程就没了。没出过声就不许走坏断点纠偏，交给「假播完」那道按 I/O 错误处理。
+     */
+    @Test
+    public void neverHeardAudioIsNotABadResumePoint() {
+        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 0L, false, false));
+        Assert.assertFalse(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 1000L, false, false));
+        // 只有真的出过声，上面那条"贴尾"判定才成立
+        Assert.assertTrue(PlaybackStateMachine.shouldReplayInsteadOfAdvance(true, 1000L, false, true));
     }
 
     /**
@@ -486,14 +500,36 @@ public class PlaybackStateMachineTest {
     /** 连着跳歌时那行字必须把"是链路在扩大"说出来，而不是每首各报一遍互不相干的话 */
     @Test
     public void giveUpMessageScalesWithTheStreak() {
+        // losslessTier=false：只看原文案，不受新提示干扰
         Assert.assertEquals("多次重试仍无法播放，已跳过: A",
-                PlaybackStateMachine.describeGiveUp(1, "A", false));
+                PlaybackStateMachine.describeGiveUp(1, "A", false, false));
         Assert.assertEquals("曲目已不在服务器, 已跳过: A",
-                PlaybackStateMachine.describeGiveUp(1, "A", true));
+                PlaybackStateMachine.describeGiveUp(1, "A", true, false));
         Assert.assertEquals("已连续 2 首无法播放(最近: B), 请检查网络或刷新曲库",
-                PlaybackStateMachine.describeGiveUp(2, "B", false));
+                PlaybackStateMachine.describeGiveUp(2, "B", false, false));
         Assert.assertEquals("已连续 7 首无法播放(最近: G), 请检查网络或刷新曲库",
-                PlaybackStateMachine.describeGiveUp(7, "G", true));
+                PlaybackStateMachine.describeGiveUp(7, "G", true, false));
+    }
+
+    /**
+     * 无损档放弃时那一句"可切流畅"只是<b>提示</b>，不是动作 (2026-10-08 T1 重审 L2)：
+     * 自动降档已被车主否决，所以这里给出口、由人去设置页点。服务端根本没这首歌时
+     * 不许提这句——换了码率也照样没有那首歌。
+     */
+    @Test
+    public void losslessGiveUpSuggestsSmoothTierButOnlyForPlaybackFailures() {
+        Assert.assertTrue("无损档播不动 → 给出路",
+                PlaybackStateMachine.describeGiveUp(1, "A", false, true)
+                        .contains("可在设置把音质切成「流畅」"));
+        Assert.assertTrue("连着几首也一样只给一句",
+                PlaybackStateMachine.describeGiveUp(3, "C", false, true)
+                        .contains("可在设置把音质切成「流畅」"));
+        Assert.assertFalse("曲目已不在服务器：切档无用，不许误导",
+                PlaybackStateMachine.describeGiveUp(1, "A", true, true)
+                        .contains("流畅"));
+        Assert.assertFalse("流畅档自己不提切流畅",
+                PlaybackStateMachine.describeGiveUp(1, "A", false, false)
+                        .contains("流畅"));
     }
 
     private PlaybackStateMachine readyToPlayWithFocus(PlaybackStateMachine.FocusState focus) {

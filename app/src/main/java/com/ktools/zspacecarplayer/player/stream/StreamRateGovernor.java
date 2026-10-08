@@ -15,11 +15,14 @@ package com.ktools.zspacecarplayer.player.stream;
  * （lead 稳在 65s，链路毫无问题）→ 9 秒后 {@code bitrate tier -> smooth(128k) est=-1KB/s}
  * （那个 -1 就是实测 0）→ 之后 4 首全部在流畅档被腰斩。
  *
- * <p><b>自动换档默认关闭</b>：流畅档走 {@code stream.mp3?...static=false&maxStreamingBitrate=}，
- * 2026-10-07 拿设备自己的 key 打服务端实测它是 <b>chunked、无 Content-Length、
- * Accept-Ranges: none、Range 请求被忽略</b>。后果连着三条：{@code dur=0ms} 让进度条与剩余时长
- * 全瞎、seek 失效（续播点丢）、以及任何一次 starve 重连都退化成「服务端从 0 重转 + 客户端丢弃
- * 已下字节」。也就是说这一档目前比「能出声但一直在抽干」更差，所以这里只累计证据、不动作。
+ * <p><b>流畅档的固有代价（2026-10-07 拿设备自己的 key 打服务端实测）</b>：它走
+ * {@code stream.mp3?...static=false&maxStreamingBitrate=}，是 <b>chunked、无 Content-Length、
+ * Accept-Ranges: none、Range 请求被忽略</b>的。后果连着三条：{@code dur=0ms} 让进度条与剩余时长
+ * 全瞎、seek 失效（续播点丢）、以及任何一次按字节重连都退化成「服务端从 0 重转 + 客户端丢弃
+ * 已下字节」。第三条已在 {@link BufferedHttpSource#midFlightRetryUseful} 处直接禁止；前两条
+ * 是这一档的固有属性。<b>自动换档已被车主否决 (2026-10-08)，见 {@link #AUTO_DEGRADE_ENABLED}</b>，
+ * 这里只留证据与手动入口 {@link #forceDegraded()}，以及万一有人手动用了这一档时的
+ * 止损阀 {@link #abortDegrade()}。
  *
  * <p>换档（若启用）只作用于<b>下一首</b>：中途改 URL 一定会断音，所以这里只出结论，
  * 切换由服务层在起播边界执行。
@@ -37,17 +40,26 @@ public final class StreamRateGovernor {
     /** 认定富余的上浮：实测 &gt; 所需 ×(1+45%) 才算链路真的恢复了。 */
     public static final int SURPLUS_MARGIN_PERCENT = 45;
     /**
-     * 是否允许按判定结果自动换到流畅档。<b>目前必须为 false，因为测速口径还不可信</b>。
+     * 是否允许按判定结果自动换到流畅档。
      *
-     * <p>10-07 关掉的理由是"流畅档自己会腰斩"；10-08 我一度以为那个理由消失了（③④已修）就把它
-     * 打开，结果当天就被车主的一个数字推翻：车机 10 秒下完 3.1MB 的 OTA 包（>300KB/s），
-     * 而我"测"出来的是 107KB/s。原因是样本取自 {@code bufEnd}——8MB 环形窗饱和时它只跟着
-     * 读者走，于是 `est` 恒等于播放消耗速率，健康链路也必然满足 `est < 所需×1.15`。
-     * 现在改成了"只认 socket 真收字节 + 窗口饱和时不采"，但在真车上重测出可信的
-     * {@code bitrate deficit} 之前，不再让坏数字接管档位。
+     * <p>这条开关历史上被推翻了两次，每次都因为"少了一环证据"，所以把判据写全：
+     * ① 10-07 关：流畅档当时会腰斩，因为它 chunked、无总长、Range 被忽略；
+     * ② 10-08 开：我以为 ③④ 已修就打开了它，当天被车主的一个数字推翻——车机 10 秒下完 3.1MB
+     *    的 OTA 包（&gt;300KB/s），而我"测"出来的是 107KB/s。原因是样本取自 {@code bufEnd}：
+     *    8MB 窗饱和时它只跟着读者走，于是 {@code est} 恒等于播放消耗速率，健康链路也必然满足
+     *    {@code est < 所需×1.15}，也就是说这个坏口径会<b>凭空造出缺口</b>；
+     * ③ 10-08 再关（vc20）：换成"只认 socket 真收字节 + 窗口饱和时不采"，但在真车上拿到可信
+     *    数字前不让它接管档位。
      *
-     * <p>另注：10-06 那次《Dream It Possible》的缺口（需 110KB/s、23MB 文件在 2%→14% 区间
-     * 只到 67KB/s）<b>不在</b>这个错误范围内——那时窗口远没饱和，样本是真的。
+     * <p><b>④ 10-08 车主明确否决自动降档，本值必须为 false</b>：判定结果只累计成
+     * {@code bitrate deficit #N} 证据，换档只保留手动入口（{@link #forceDegraded()}）。
+     * 否决的理由不是舍不得音质，而是<b>"链路不够"这个前提从来没被证明过</b>。同一台 Mac、
+     * 同一条手机热点、上报里那首歌的同一份文件做对照：一条长连接取 5MB = <b>246KB/s</b>，
+     * 同样 5MB 拆成 20 条独立请求（单条首字节握手就要 1.15s）= <b>74KB/s</b>；
+     * 而我在车上"测"出来的恰好就是 60~94KB/s 这个带。也就是说我拿来论证"必须降档"的那个数字，
+     * 量的很可能是<b>我自己的取流形状</b>——下载线程一没有读者挂窗就退出、每次重定位都清窗重连，
+     * 正是那 20 条请求的形状。在这两笔账（{@code upstream conns=} / {@code discarded=}）
+     * 于真车上判掉之前，不许拿"链路不够"去换音质。
      */
     public static final boolean AUTO_DEGRADE_ENABLED = false;
 
@@ -146,6 +158,26 @@ public final class StreamRateGovernor {
         degraded = true;
         belowStreak = 0;
         aboveStreak = 0;
+    }
+
+    /**
+     * 放弃流畅档，退回无损 (2026-10-08)。
+     *
+     * <p>这是自动降档的止损阀：档位是靠"链路追不上无损"推出来的，但如果连降档后的歌都救不回来
+     * （服务层已经带断点重试过一次仍截断），继续留着这一档只会把后面每一首一起拖下去——10-07
+     * 那晚就是档位翻转后连着 4 首全部腰斩。宁可退回"能出声但会抽干"，也不要"整批都放不完"。
+     * 之后若链路确实变差，判定窗口会再把档位推上去，代价只是一首歌。
+     *
+     * @return 本次调用是否真的改变过档位
+     */
+    public boolean abortDegrade() {
+        if (!degraded) {
+            return false;
+        }
+        degraded = false;
+        belowStreak = 0;
+        aboveStreak = 0;
+        return true;
     }
 
     /** 起播/拖动进度条后调用：累计口径被重连或 seek 打断，窗口基准作废重建，但**不推翻已有结论**

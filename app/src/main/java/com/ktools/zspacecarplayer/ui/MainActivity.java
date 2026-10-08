@@ -33,6 +33,7 @@ import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
+import com.ktools.zspacecarplayer.player.stream.StreamTier;
 import android.widget.Toast;
 import android.util.Log;
 
@@ -972,6 +973,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         }
 
         setupEngineToggle();
+        setupTierToggle();
         // 远程升级 (2026-09-12): 「关于与升级」分块 (检查更新 + 启动时自动检查开关)
         setupUpdateSection();
         // 诊断日志手动上报 (2026-09-16): 设置页「立即上报诊断日志」
@@ -1103,6 +1105,58 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         // 而它恰恰是显示「系统 (崩溃保护)」的那个最显眼的可点目标。
         row.setOnClickListener(toggleListener);
         valueBtn.setOnClickListener(toggleListener);
+    }
+
+    /**
+     * 音质档位行 (2026-10-08 T1 基准重审 L2)。三条硬约束：
+     * ① <b>只有手选</b>，两档循环（无损 → 流畅），没有"自动"这一档——自动降档已被车主否决；
+     * ② 只影响<b>下一首</b>，正在播的不动（中途换 URL 必断音）；
+     * ③ 副标题与 Toast 里的码率必须是<b>服务端实测值</b>（256kbps/约 32KB/s），
+     *    不许写请求参数上的 128——那台 Jellyfin 忽略码率参数，写 128 就是假广告。
+     */
+    private void setupTierToggle() {
+        if (layoutSettingsPage == null) return;
+        final View row = layoutSettingsPage.findViewById(R.id.btnSettingTierToggle);
+        final Button valueBtn = layoutSettingsPage.findViewById(R.id.btnSettingTierValue);
+        final TextView descView = layoutSettingsPage.findViewById(R.id.tvSettingTierDesc);
+        if (row == null || valueBtn == null) return;
+        updateTierLabel(valueBtn, descView);
+        final View.OnClickListener cycle = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                int next = StreamTier.next(currentStreamTier());
+                if (playerService != null) {
+                    playerService.setStreamTier(next);
+                } else {
+                    // 服务还没绑上（冷启动就进设置页）：直接写偏好，起播时同样读得到
+                    getSharedPreferences(AudioPlayerService.PREF_NAME, MODE_PRIVATE).edit()
+                            .putInt(AudioPlayerService.PREF_KEY_STREAM_TIER, next).apply();
+                }
+                updateTierLabel(valueBtn, descView);
+                Toast.makeText(MainActivity.this, "音质已切成「" + StreamTier.label(next)
+                        + "」，下一首歌起生效\n" + StreamTier.describe(next),
+                        Toast.LENGTH_LONG).show();
+            }
+        };
+        row.setOnClickListener(cycle);
+        valueBtn.setOnClickListener(cycle);
+    }
+
+    /** 读当前档位：服务在就用服务的口径，服务不在就读同一份 SharedPreferences。 */
+    private int currentStreamTier() {
+        if (playerService != null) {
+            return playerService.getStreamTier();
+        }
+        return StreamTier.clamp(getSharedPreferences(AudioPlayerService.PREF_NAME, MODE_PRIVATE)
+                .getInt(AudioPlayerService.PREF_KEY_STREAM_TIER, StreamTier.DEFAULT));
+    }
+
+    private void updateTierLabel(Button valueBtn, TextView descView) {
+        int tier = currentStreamTier();
+        valueBtn.setText(StreamTier.label(tier));
+        if (descView != null) {
+            descView.setText(StreamTier.describe(tier));
+        }
     }
 
     /** 引擎标签: 被崩溃熔断强制回退时明确标出, 否则用户会以为偏好没生效 */

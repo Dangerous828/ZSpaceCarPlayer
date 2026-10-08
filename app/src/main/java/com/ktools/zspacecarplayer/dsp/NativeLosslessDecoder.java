@@ -311,10 +311,38 @@ public final class NativeLosslessDecoder {
             return failed.get();
         }
 
+        /**
+         * 目标位置可达吗 (2026-10-08，A1 第一刀)。
+         *
+         * <p>总长已知时，越过文件末尾的 seek <b>必须</b>返回 false。这不是防御性检查，而是把
+         * dr_flac 自己的判据还给它：`drflac__seek_to_byte` 失败在 dr_flac 里就是"已越过流尾，
+         * 该把折半上界收紧"的唯一信号（`dr_flac.h:5888` 原注释）。此前这里只校验
+         * {@code <0} 与 {@code MAX_LIMIT}，越界一律返回 true，于是它的无 seektable 二分只能靠
+         * "整帧解码失败"来驱动，迭代次数偏高（实车 9 次）；而<b>每一次跳读落在窗外就是一条新
+         * 上游连接 + 约 1 秒首字节</b>（2026-10-08 对照实测：分段请求 133KB/s vs 长连接 797KB/s，
+         * 差的就是这个）。
+         *
+         * <p>总长未知（chunked 转码流不给 Content-Length）时保持放行，行为与今天完全一致。
+         */
+        static boolean seekTargetReachable(long absolutePos, long contentLength) {
+            if (absolutePos < 0) {
+                return false;
+            }
+            if (contentLength <= 0L) {
+                return true;
+            }
+            return absolutePos < contentLength;
+        }
+
         @Override
         public boolean seek(long absolutePos) {
             if (closed || cancelled.get()) return false;
             if (absolutePos < 0 || absolutePos > MAX_LIMIT) return false;
+            if (!seekTargetReachable(absolutePos, source.getContentLength())) {
+                // 越界的 seek 交给 dr_flac 当"到流尾了"的信号，让它自己收紧折半上界，
+                // 而不是我们替它去清窗、断连、重下一条永远取不到字节的连接
+                return false;
+            }
             if (absolutePos == cursor) return true;
             cursor = absolutePos;
             // 强制同步读者登记位（updateReadPos 只进不退，回溯 seek 必须能落回小位）

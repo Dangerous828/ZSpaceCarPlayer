@@ -115,4 +115,81 @@ public class StreamStarvationTest {
                 BufferedHttpSource.starvationReconnectUseful(false, -1L));
         assertFalse(BufferedHttpSource.starvationReconnectUseful(false, 0L));
     }
+
+    /**
+     * 下载线程<b>因异常</b>重连时的同一把账，2026-10-08 08:51 真车现场版：
+     * {@code download retry 1/5 from 1178858: SocketTimeoutException} →
+     * {@code remote ignored Range, skipping 1178858 bytes}。chunked 流不认 Range，所以
+     * "从 bufEnd 续传"实际是从 0 重下再丢掉 1.18MB；按当晚链路约 70KB/s，一次重连白烧 17 秒，
+     * 五条退避跑完约 85 秒死寂。这期间播放器位置恒为 0，最后被"坏断点"兜底判成贴尾 →
+     * 清零续播点 → 从零重播 → 再走同一条路，日志里这个环跑了两圈后进程就没了。
+     */
+    @Test
+    public void midFlightRetryOnlyWhenReconnectIsCheapOrPossible() {
+        // 可续传（回过 206 / 总长已知）：按字节续传有意义，照旧重试
+        assertTrue(BufferedHttpSource.midFlightRetryUseful(true, true, -1L, 8_000_000L));
+        assertTrue(BufferedHttpSource.midFlightRetryUseful(true, false, 38_934_625L, 8_000_000L));
+        // 连响应头都没有（纯建连失败）：与可续传无关，必须重试
+        assertTrue(BufferedHttpSource.midFlightRetryUseful(false, false, -1L, 4_000_000L));
+        // chunked 且已经下了一窗：重下再丢弃 = 自伤，直接判死交给上层
+        assertFalse(BufferedHttpSource.midFlightRetryUseful(true, false, -1L,
+                BufferedHttpSource.NON_RESUMABLE_RETRY_MAX_BYTES));
+        assertFalse(BufferedHttpSource.midFlightRetryUseful(true, false, -1L, 1_178_858L));
+        // 起播初期从头重连代价可接受，仍按旧行为重试（别把一次抖动升级成整首失败）
+        assertTrue(BufferedHttpSource.midFlightRetryUseful(true, false, -1L,
+                BufferedHttpSource.NON_RESUMABLE_RETRY_MAX_BYTES - 1));
+        assertTrue(BufferedHttpSource.midFlightRetryUseful(true, false, -1L, 0L));
+    }
+
+    /**
+     * 读请求落点判定 (2026-10-08 A1)。旧判定把"只差一点的前向位置"和"真跳走了"混在一起，
+     * 一律清窗重连——而清窗要重新付 0.8~1.4 秒首字节，还顺手作废已下载的尾部。
+     */
+    @Test
+    public void smallForwardGapIsWaitedNotReconnected() {
+        // 窗 [1,000,000 - 2,000,000)
+        assertEquals(BufferedHttpSource.PLACE_IN_WINDOW,
+                BufferedHttpSource.readPlacementAction(1_500_000L, 1_000_000L, 2_000_000L, false));
+        assertEquals("窗尾正好是 bufEnd：等", BufferedHttpSource.PLACE_WAIT,
+                BufferedHttpSource.readPlacementAction(2_000_000L, 1_000_000L, 2_000_000L, false));
+        assertTrue("缺口在阈值内必须判成等待",
+                BufferedHttpSource.FORWARD_GAP_WAIT_MAX_BYTES > 0);
+        assertEquals(BufferedHttpSource.PLACE_WAIT, BufferedHttpSource.readPlacementAction(
+                2_000_000L + BufferedHttpSource.FORWARD_GAP_WAIT_MAX_BYTES,
+                1_000_000L, 2_000_000L, false));
+        assertEquals("缺口过大才是真重定位", BufferedHttpSource.PLACE_RESET, BufferedHttpSource.readPlacementAction(
+                2_000_001L + BufferedHttpSource.FORWARD_GAP_WAIT_MAX_BYTES,
+                1_000_000L, 2_000_000L, false));
+        assertEquals("回读到已回收区：只能重连", BufferedHttpSource.PLACE_RESET,
+                BufferedHttpSource.readPlacementAction(999_999L, 1_000_000L, 2_000_000L, false));
+        assertEquals("EOF 之后一律是 EOF，不再等一个永远不会来的字节", BufferedHttpSource.PLACE_EOF,
+                BufferedHttpSource.readPlacementAction(2_000_000L, 1_000_000L, 2_000_000L, true));
+        assertEquals(BufferedHttpSource.PLACE_EOF,
+                BufferedHttpSource.readPlacementAction(9_000_000L, 1_000_000L, 2_000_000L, true));
+    }
+
+    /**
+     * 摘窗宽限期 (2026-10-08 A1)：读者短暂离开（解码器跳读、代理换连接）时继续在同一条上游
+     * 连接上收字节，别把 797KB/s 的长连接切成 133KB/s 的短连接。同时必须防住"切走的旧歌在后台
+     * 继续吃新歌带宽"——release 之后立刻收手。
+     */
+    @Test
+    public void idleFillKeepsConnectionButNeverOutlivesTheHolder() {
+        long now = 100_000L;
+        long grace = BufferedHttpSource.IDLE_FILL_GRACE_MS;
+        assertTrue("宽限内、窗还有余量、仍被持有 = 继续填",
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, true, true));
+        assertTrue("宽限边界内一毫秒都不算超",
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - grace + 1L, true, true));
+        assertFalse("超宽限就收手，让出带宽与唯一的解码线程",
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - grace, true, true));
+        assertFalse("窗满了继续读只会背压阻塞，收手等读者回来再拉起",
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, false, true));
+        assertFalse("已 release（切歌/销毁）：旧源绝不允许在后台吃新歌的带宽",
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now - 1_000L, true, false));
+        assertFalse("从未摘窗（还有读者）不该走这条判定",
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, -1L, true, true));
+        assertFalse("时钟回拨不认",
+                BufferedHttpSource.shouldKeepFillingWhileIdle(now, now + 1_000L, true, true));
+    }
 }

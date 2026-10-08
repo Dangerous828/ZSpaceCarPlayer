@@ -379,3 +379,19 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
   包内核验：`duration unknown in MediaCodec stream` 计数 **0**（确认撤回），`getSocketBytes`/`socketBytes` 各 1。
 - 两次发布清单 `notes` 长度都是 0（新铁律生效）。备份链：`latest.json.bak-20261008-vc18`、`latest.json.bak-20261008-vc19`。
 - 公网复核：清单轮询第 1 轮即命中；按 `apkUrl` 实下载 200、字节数一致、**三方 sha256 一致**。
+
+## vc21 = 3.2.10 出包记录（2026-10-08，**未发布**）
+
+包：**`ZSpaceCarPlayer-3.2.10-code21-debug.apk`**，3,139,066 B，
+`sha256=41283a20540234a1fdb304c31ff0d5b382becc261d5d76457941f2a1563ee169`，
+`aapt2 dump badging` → `versionCode='21' versionName='3.2.10'`，minSdk 18，zip 填充 78,626（正常形状）。
+`clean :app:testDebugUnitTest :app:assembleDebug` → **420 条 host 单测 0 失败**。
+
+**状态：包与清单草稿（`latest-3.2.10-code21.json`，`notes` 依铁律留空）都已入仓，
+但线上 `latest.json` 与发布目录里的包体一个字节都没动 —— 车主指令是「全部都做完才 commit」，
+发版要另外点头。** 内容见 `changelogs/3.2.10.md` 与 `docs/audit_t1_baseline_20261008.md`。
+
+出包过程中第三次踩到同一个坑：不带 `clean` 的增量构建产出 5,172,820 B（填充 2,116,886）的胖包，
+`clean` 后回到 3.14MB。规则照旧：**发版必须 `clean` + `assembleDebug`（release 无 signingConfig）**，
+且系统默认 java 已是 JDK 25，必须显式 `JAVA_HOME=…/openjdk@21/…`，否则 gradle 报
+`Unsupported class file major version 69`。

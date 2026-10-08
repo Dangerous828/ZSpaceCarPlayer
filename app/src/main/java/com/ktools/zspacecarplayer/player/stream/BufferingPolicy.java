@@ -138,12 +138,18 @@ public final class BufferingPolicy {
      * 若当前曲自身 fork 出两个源占满表，预取会被跳过——这是尽力而为的优化，跳过不是回归。
      */
     public static final int MAX_SOURCES = 2;
-    /** 触发预取的当前曲健康阈值：已下载百分比 ≥ 该值即视为健康。 */
-    public static final int PREFETCH_HEALTHY_PERCENT = 40;
-    /** 触发预取的当前曲健康阈值：领先秒数 ≥ 该值即视为健康（百分比未知时的替代判据）。 */
+    /** 触发预取的健康阈值：领先秒数 ≥ 该值才允许抢带宽（见 {@link #shouldPrefetchNext}）。 */
     public static final long PREFETCH_LEAD_SECONDS = 15L;
     /** 当前曲接近结尾阈值：剩余 ≤ 该秒数时无条件预取（马上要切歌）。 */
     public static final long PREFETCH_REMAINING_SECONDS = 15L;
+
+    /**
+     * 磁盘缓存上限 (2026-10-08 T1 重审 A2)：既是<b>单文件</b>上限（超过就不缓存，比如曲库里
+     * 混进来的那些 4K mp4），也是整个缓存目录的 LRU 上限。1GB 的取舍：本库无损单曲实测
+     * 20~44MB，够存二十几首常听的；再大就侵占车机存储，而 {@code CacheSizeManager} 的
+     * 全局裁剪是 10GB/8GB，不能跟它抢口径。
+     */
+    public static final long DISK_CACHE_LIMIT_BYTES = 1024L * 1024L * 1024L;
 
     /** 预取源的小窗口容量（字节）。 */
     public static int prefetchCapacityBytes() {
@@ -159,16 +165,15 @@ public final class BufferingPolicy {
      * 是否应触发下一首预取（带宽防御式）。
      *
      * 让位规则优先：当前曲饥饿 / 断流，或正处于起播 prefill 门槛期间，一律不预取
-     * （当前曲永远优先）；同一首只预取一次。仅在「当前曲缓冲健康」或「接近结尾」时触发。
+     * （当前曲永远优先）；同一首只预取一次。仅在「当前曲还有领先秒数」或「接近结尾」时触发。
      *
-     * @param currentPercent      当前曲已下载百分比；&lt;0 表示总长未知
-     * @param currentLeadSeconds  当前曲领先秒数；&lt;0 表示无法估算
+     * @param currentLeadSeconds  当前曲领先秒数；&lt;0 表示无法估算（chunked 流就是这种）
      * @param remainingSeconds    当前曲剩余秒数；&lt;0 表示未知
      * @param currentStarving     当前曲是否正饥饿 / 断流
      * @param currentPrefilling   当前曲是否正处于 prefill 门槛等待期间
      * @param alreadyPrefetched   这首下一曲是否已预取过（去重）
      */
-    public static boolean shouldPrefetchNext(int currentPercent, long currentLeadSeconds,
+    public static boolean shouldPrefetchNext(long currentLeadSeconds,
                                              long remainingSeconds, boolean currentStarving,
                                              boolean currentPrefilling, boolean alreadyPrefetched) {
         if (alreadyPrefetched) {
@@ -177,10 +182,28 @@ public final class BufferingPolicy {
         if (currentStarving || currentPrefilling) {
             return false; // 让位当前曲：饥饿 / 断流 / 正在起播门槛，绝不抢带宽
         }
-        boolean healthy = (currentPercent >= 0 && currentPercent >= PREFETCH_HEALTHY_PERCENT)
-                || (currentLeadSeconds >= 0 && currentLeadSeconds >= PREFETCH_LEAD_SECONDS);
+        // 「健康」只认**领先秒数**，不认「已下载百分比」(2026-10-08 真车复盘)。
+        // percent 说的是"这首歌的文件下了多少"，不是"还能播几秒"：链路有缺口时下载头会紧贴
+        // 播放头（当天现场 lead 全程 0s，而 percent 一路涨到 57），旧的 percent>=40 那一支
+        // 正是在这种状态下把 2MB 预取窗口放出去，从当前曲嘴里抢带宽——预取越勤快，当前曲
+        // 越早抽干。反过来在健康链路上，缓冲领先本来就会让 leadSeconds 达标，不需要 percent 分支。
+        boolean healthy = currentLeadSeconds >= 0 && currentLeadSeconds >= PREFETCH_LEAD_SECONDS;
+        // 「接近结尾」这道门依赖剩余秒数：播放器在 chunked 流上报 0 时长（无 Content-Length），
+        // 调用方须先用入库元数据兜底，见 {@link #durationForDerivation}。
         boolean nearEnd = remainingSeconds >= 0 && remainingSeconds <= PREFETCH_REMAINING_SECONDS;
         return healthy || nearEnd;
+    }
+
+    /**
+     * 播放器时长不可用时（chunked 流没有 Content-Length，{@code getDuration()==0}）用入库元数据
+     * 兜底，让「剩多少秒」这条门重新算得出来 (2026-10-08)。
+     *
+     * <p><b>只用于预取与显示这类"算个大概也不致命"的推导</b>。不许拿它去放行 seek：元数据说
+     * 这首歌 200 秒，不代表这条 chunked 流能定位到 200 秒里的任意字节——vc19 就是因为把兜底时长
+     * 接到了起播路径上，对不可续传流下发了 seek，当晚现场以进程消失收场（已整体撤回）。
+     */
+    public static long durationForDerivation(long playerDurationMs, long metaDurationMs) {
+        return playerDurationMs > 0L ? playerDurationMs : Math.max(0L, metaDurationMs);
     }
 
     // ------------------------------------------------------------------ //
@@ -226,6 +249,26 @@ public final class BufferingPolicy {
     public static boolean bandwidthSampleIsMeasurable(int percent, long contentLength,
                                                       long durationMs, boolean ringRoom) {
         return percent >= 0 && percent < 100 && contentLength > 0L && durationMs > 0L && ringRoom;
+    }
+
+    /**
+     * 已经在流畅档上时，这个样本能不能用来判「链路是否已经好到可以回无损」(2026-10-08)。
+     *
+     * <p>流畅档是 chunked：没有 Content-Length，所以 {@link #bandwidthSampleIsMeasurable} 恒为
+     * false，{@code requiredBytesPerSec} 也恒为 -1。若沿用那道门，降档之后就<b>再也采不到任何
+     * 样本</b>，回升判定永远不会发生，档位被永久钉在 128k——回家连 WiFi 也还是流畅档。vc16 那晚
+     * 「之后 4 首全部在流畅档被腰斩」除了误判进去，还有这一条让它出不来。
+     *
+     * <p>但链路本身照样量得出：socket 真收字节与总长无关。缺的只是"本曲所需速率"这个分母，
+     * 于是用<b>降档前那一次实测到的所需速率</b>当基准（{@code rememberedRequiredBytesPerSec}）。
+     * 播放时长在这里允许是 0（chunked 流 {@code dur=0ms} 是常态），因为分母已经不由它决定了。
+     *
+     * <p>所需速率本逐首不同，拿上一首的数是近似；但回升要求 {@code 所需×1.45} 的富余，近似只会
+     * 偏保守（更难回升），不会把不够的链路放回无损。
+     */
+    public static boolean smoothTierSampleIsMeasurable(long rememberedRequiredBytesPerSec,
+                                                       boolean ringRoom) {
+        return rememberedRequiredBytesPerSec > 0L && ringRoom;
     }
 
     /** 本曲「不抽干」所需速率 = 资源总长 / 时长；不可测时返回 -1（治理器据此不动任何结论）。 */

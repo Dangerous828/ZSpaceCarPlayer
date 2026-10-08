@@ -67,6 +67,9 @@ public final class HttpProxyServer {
     private final LinkedHashMap<String, BufferedHttpSource> sources =
             new LinkedHashMap<String, BufferedHttpSource>();
     private int forkSeq = 0;
+    /** 磁盘缓存目录与单文件/目录上限；由服务启动时注入，null 就是完全不碰盘。 */
+    private java.io.File diskCacheDir;
+    private long diskCacheLimitBytes;
 
     private HttpProxyServer() {
     }
@@ -108,6 +111,19 @@ public final class HttpProxyServer {
      * 为原生软解等需要直接读取 BufferedHttpSource 的组件获取数据源实例并增加引用计数。
      * 调用方在使用完毕后必须显式调用 source.release()。
      */
+    /**
+     * 打开磁盘缓存 (2026-10-08 T1 重审 A2)。由 {@code AudioPlayerService} 在起服务时调一次；
+     * 之后新建的每条流都会挂上它。传 null 即整体关闭这条路径。
+     */
+    public void configureDiskCache(java.io.File dir, long limitBytes) {
+        synchronized (sourceLock) {
+            this.diskCacheDir = dir;
+            this.diskCacheLimitBytes = limitBytes;
+        }
+        android.util.Log.i(TAG, "disk cache " + (dir == null ? "disabled"
+                : "enabled at " + dir.getAbsolutePath() + " cap=" + limitBytes));
+    }
+
     public BufferedHttpSource acquireSource(String remoteUrl, long requestStart) {
         ensureStarted();
         BufferedHttpSource source = obtainSource(remoteUrl, requestStart);
@@ -192,6 +208,54 @@ public final class HttpProxyServer {
                 }
             }
             return -1L;
+        }
+    }
+
+    /**
+     * 这首歌总共建过多少次上游连接、因此作废过多少字节、以及最慢的一次首字节 (2026-10-08)。
+     *
+     * <p>同一 URL 的 fork 源（key 形如 {@code url#f1}）全部计入，因为"这首歌重连了几次"问的
+     * 就是总账。返回 {@code long[]{connections, discardedBytes, ttfbMaxMs, diskServedBytes}}；无源时返回
+     * {@code null}。三个数一起看才有意义：连接数是代价的个数，TTFB 是每个的单价，作废字节
+     * 是白烧的流量。
+     */
+    private void attachDiskCache(BufferedHttpSource created) {
+        java.io.File dir;
+        long cap;
+        synchronized (sourceLock) {
+            dir = diskCacheDir;
+            cap = diskCacheLimitBytes;
+        }
+        if (dir != null && cap > 0L) {
+            created.enableDiskCache(dir, cap);
+        }
+    }
+
+    public long[] getUpstreamCost(String remoteUrl) {
+        if (remoteUrl == null) {
+            return null;
+        }
+        synchronized (sourceLock) {
+            long conns = 0L;
+            long discarded = 0L;
+            long ttfbMax = 0L;
+            long diskServed = 0L;
+            boolean any = false;
+            for (java.util.Map.Entry<String, BufferedHttpSource> e : sources.entrySet()) {
+                BufferedHttpSource source = e.getValue();
+                if (source.isClosed() || !e.getKey().startsWith(remoteUrl)) {
+                    continue;
+                }
+                conns += source.getUpstreamConnections();
+                discarded += source.getDiscardedBytes();
+                diskServed += source.getDiskServedBytes();
+                long[] ttfb = source.getTtfbStats();
+                if (ttfb[1] > ttfbMax) {
+                    ttfbMax = ttfb[1];
+                }
+                any = true;
+            }
+            return any ? new long[]{conns, discarded, ttfbMax, diskServed} : null;
         }
     }
 
@@ -296,6 +360,7 @@ public final class HttpProxyServer {
             BufferedHttpSource created = new BufferedHttpSource(
                     remoteUrl, BufferedHttpSource.DEFAULT_CAPACITY_BYTES, 0L, true,
                     BufferingPolicy.prefetchCapacityBytes());
+            attachDiskCache(created);
             sources.put(remoteUrl + "#pf" + (forkSeq++), created);
             Log.i(TAG, "prefetch source created (full 8MB ring, eager target "
                     + (BufferingPolicy.prefetchCapacityBytes() / 1024) + "KB): " + remoteUrl);
@@ -556,6 +621,7 @@ public final class HttpProxyServer {
                 }
             }
             BufferedHttpSource created = new BufferedHttpSource(remoteUrl, requestStart < 0 ? 0 : requestStart);
+            attachDiskCache(created);
             boolean isFork = false;
             for (BufferedHttpSource s : sources.values()) {
                 if (!s.isClosed() && s.getUrl().equals(remoteUrl)) {

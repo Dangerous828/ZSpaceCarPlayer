@@ -5,6 +5,7 @@ import android.util.Log;
 
 import com.ktools.zspacecarplayer.crash.CrashMonitor;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
@@ -100,6 +101,28 @@ public class BufferedHttpSource {
      * 链路 10 秒内下完 3.1MB 的 OTA 包（>300KB/s），而我这边"测"出来的是 107KB/s——就是这个假口径。
      */
     private long socketBytes = 0L;
+    /**
+     * 本流<b>建立过多少次上游连接</b>与因此丢掉过多少字节 (2026-10-08)。
+     *
+     * <p>来头：同一首歌、同一时刻、同一条热点上做过对照——一条长连接取 5MB 是 246KB/s，
+     * 同样 5MB 拆成 20 条独立请求只剩 <b>74KB/s</b>（单条首字节握手就要 1.15s，Jellyfin 每次
+     * 还要重新定位文件）。也就是说"链路只有 60~90KB/s"这个说法很可能是我自己的取流形状造出来的，
+     * 不是链路的事实。这两个计数器就是用来在车上把它判掉的：上报里 {@code conns} 一高，
+     * 病因在连接复用；{@code conns} 一直是 1~2 而速率仍低，才轮到怀疑链路。
+     */
+    private long upstreamConnections = 0L;
+    /** 因重定位/Range 被忽略而丢掉或白重下的字节数。 */
+    private long discardedBytes = 0L;
+    /** 最近一次上游请求的首字节耗时 (ms)；-1 = 还没有完成过请求。见 {@link #getTtfbStats()}。 */
+    private long lastTtfbMs = -1L;
+    private long ttfbMaxMs = 0L;
+    private long ttfbSumMs = 0L;
+    // ---- 磁盘缓存 (2026-10-08 T1 重审 A2) ----
+    /** 由 {@link HttpProxyServer#configureDiskCache} 注入；为 null 就是完全不碰盘。 */
+    private File diskCacheDir;
+    private long diskCacheLimitBytes;
+    private StreamDiskCache disk;
+
     /** ≥0 表示本轮被服务端判为"资源已不存在"，读侧要抛可识别的类型而不是普通 IO 异常。 */
     private volatile int goneHttpStatus = -1;
 
@@ -134,6 +157,8 @@ public class BufferedHttpSource {
     private long lastUsedAtMs = 0L;
     /** 是否曾有读者登记过：区分「从未被读（需预取元数据）」和「读者已全部离开（应休眠）」 */
     private boolean everHadReader = false;
+    /** 读者全部摘窗的时刻 (elapsedRealtime)；-1 = 还有读者挂着。见 {@link #IDLE_FILL_GRACE_MS}。 */
+    private long idleSinceMs = -1L;
 
     // ---- 预取模式（2026-09-12 缓冲/预取，lock 保护）----
     /**
@@ -148,6 +173,41 @@ public class BufferedHttpSource {
     /** 无读者休眠判定：曾有过读者且现在全部离开。构建初期的元数据预取不受此门控。 */
     private boolean idleNoReaders() {
         return everHadReader && readPosMap.isEmpty();
+    }
+
+    /**
+     * 读者全部摘窗之后，下载线程还允许继续填多久才收手 (2026-10-08，A1)。
+     *
+     * <p>8 秒的来头：一次上游请求的首字节实测 0.8~1.4 秒，而解码器在跳读/换连接时离开窗口的
+     * 时长就是这个量级；给它一个宽限期，等于用"继续在同一条连接上收字节"换掉"再建一条连接再等
+     * 一秒"。再长就是真的没人要这些数据了（切歌/放弃），该让出带宽和唯一的解码线程。
+     */
+    static final long IDLE_FILL_GRACE_MS = 8_000L;
+
+    /**
+     * 纯判定：没有读者挂窗时，下载线程该继续把环形窗填着，还是收手让出连接。
+     *
+     * <p>旧行为是"读者一摘窗就 {@code return}"，下载线程随即退出并把上游连接
+     * {@code disconnect()} 掉；读者一回来就要重连 + 重付首字节。实车的无 seektable FLAC 断点
+     * 恢复会跳读约 9 次（{@code docs/v3_dev_plan_20260907.md:249}：9 次 {@code reset download}
+     * 挤在约 9 秒内、位置只在 270KB 范围内来回），每一次都踩这条——把一条本来能跑到
+     * 797KB/s 的长连接切成 9 条 133KB/s 的短连接。
+     *
+     * <p>三个必须同时成立的条件，缺一条就收手：
+     * ① {@code held}——还有人持有这条流（{@code refCount>0}）。这是防滑坡的关键：切歌时
+     *    {@code HttpSourceReader.close()} 会 release，旧源因此立刻停，不会在后台继续吃
+     *    新歌的带宽；
+     * ② {@code ringHasRoom}——窗没满。满了再读只会让 {@code writeToRing} 背压阻塞，
+     *    既不省时间也没地方放，读者回来时由 {@code addReadPos} 重新拉起即可；
+     * ③ 摘窗时长还在宽限内。
+     */
+    static boolean shouldKeepFillingWhileIdle(long nowMs, long idleSinceMs, boolean ringHasRoom,
+                                              boolean held) {
+        if (!held || idleSinceMs < 0L || !ringHasRoom) {
+            return false;
+        }
+        long idleMs = nowMs - idleSinceMs;
+        return idleMs >= 0L && idleMs < IDLE_FILL_GRACE_MS;
     }
 
     /** 预取已达标：预取模式、尚无读者接管、窗口已填到目标。此时下载线程应休眠让出带宽。 */
@@ -254,7 +314,8 @@ public class BufferedHttpSource {
                 if (closed) {
                     throw new IOException("buffered source closed");
                 }
-                if (position >= bufStart && position < bufEnd) {
+                int placement = readPlacementAction(position, bufStart, bufEnd, eof);
+                if (placement == PLACE_IN_WINDOW) {
                     int off = (int) (position % capacity);
                     int avail = (int) (bufEnd - position);
                     int n = Math.min(length, Math.min(avail, capacity - off));
@@ -262,15 +323,25 @@ public class BufferedHttpSource {
                     noteReaderFedLocked(SystemClock.elapsedRealtime());
                     return n;
                 }
-                if (eof && position >= bufEnd) {
+                if (placement == PLACE_EOF) {
                     return -1;
                 }
-                if (position < bufStart || position > bufEnd) {
-                    // 落在窗口之外（新 seek / 回读越过已回收区）：重定位下载
+                if (placement == PLACE_RESET) {
+                    // 窗外优先查盘 (A2)：回拖、重播同一首、以及 FLAC 跳读回落到的老位置，
+                    // 只要在盘上就地给出去，一条上游连接都不建——省掉的正是那 0.8~1.4 秒。
+                    // 只服务"区间表确认连续"的范围，跨洞一律不读。
+                    if (disk != null && disk.has(position, length)) {
+                        int fromDisk = disk.readInto(position, dest, destOffset, length);
+                        if (fromDisk > 0) {
+                            return fromDisk;
+                        }
+                    }
+                    // 落在窗口之外（真重定位 / 回读越过已回收区 / 前向缺口过大）：重定位下载
                     requestResetLocked(position);
                     continue;
                 }
-                // position == bufEnd 且未 EOF：等待下载推进；做卡死检测
+                // PLACE_WAIT：position == bufEnd，或前向只差一点——顺序下载马上就会送到，
+                // 为它清窗重连等于白付一次首字节（0.8~1.4s）还作废已下尾部
                 long now = SystemClock.elapsedRealtime();
                 if (lastProgressAtMs >= 0 && now - lastProgressAtMs > STALL_TIMEOUT_MS) {
                     if (downloaderThread == null || !downloaderThread.isAlive()) {
@@ -296,6 +367,40 @@ public class BufferedHttpSource {
                 }
             }
         }
+    }
+
+    /**
+     * 读请求落点判定 (2026-10-08，A1)。
+     *
+     * <p>旧判定只有三档：窗内就地读、{@code ==bufEnd} 等下载、其余（含<b>只差一点的
+     * 前向位置</b>）一律清窗重连。差一点的那种情况，顺序下载本来下一秒就会把字节送到，
+     * 清窗重连却要重新付一次首字节（实测 0.8~1.4 秒）并把已下载的尾部作废。
+     * 现在把"前向缺口 <= {@link #FORWARD_GAP_WAIT_MAX_BYTES}"单独判成等待。
+     *
+     * <p>纯函数：JVM 单测里 {@code SystemClock} 恒为 0，位置判定不依赖时钟，正好可测。
+     */
+    static final int PLACE_IN_WINDOW = 0;
+    static final int PLACE_WAIT = 1;
+    static final int PLACE_RESET = 2;
+    static final int PLACE_EOF = 3;
+    /** 前向缺口在这么多个字节内时等下载追上，而不是重连（约 1 秒可补上）。 */
+    static final long FORWARD_GAP_WAIT_MAX_BYTES = 256L * 1024L;
+
+    static int readPlacementAction(long position, long bufStart, long bufEnd, boolean eof) {
+        if (position >= bufStart && position < bufEnd) {
+            return PLACE_IN_WINDOW;
+        }
+        if (eof && position >= bufEnd) {
+            return PLACE_EOF;
+        }
+        if (position == bufEnd) {
+            return PLACE_WAIT;
+        }
+        if (position > bufEnd
+                && position - bufEnd <= FORWARD_GAP_WAIT_MAX_BYTES) {
+            return PLACE_WAIT;
+        }
+        return PLACE_RESET;
     }
 
     /** 读者拿到了数据：结算这段挨饿时长，并在窗口未武装时武装它 */
@@ -419,6 +524,34 @@ public class BufferedHttpSource {
     }
 
     /**
+     * 下载线程<b>因异常</b>而按字节偏移重连时，这次重连值不值 (2026-10-08)。
+     *
+     * <p>真车当晚的形态：{@code download retry 1/5 from 1178858: SocketTimeoutException} →
+     * {@code remote ignored Range, skipping 1178858 bytes}。转码流是 chunked 且不认 Range，
+     * 所以"从 bufEnd 续传"实际是<b>从 0 重下再丢掉 1.18MB</b>；按当晚 70KB/s 的链路，一次重连
+     * 白烧 17 秒，五条退避全跑完约 85 秒死寂，然后才轮到上层的 starve 判死。播放侧这期间
+     * 一直在抽干，位置恒为 0 —— 最后被判成"坏断点"从零重播，重播又走同一条路。
+     *
+     * <p>所以这条路上"重试"越守规矩越糟。可续传（回过 206 或总长已知）时照旧重试；只有
+     * 确认过响应头、既不接受 Range 又报不出总长时，重下的代价才需要被计量：窗口里还没
+     * 几个字节时（起播初期）从 0 重连代价可接受，仍按旧行为重试；已经下了 {@link
+     * #NON_RESUMABLE_RETRY_MAX_BYTES} 以上就直接判死，把决定权交回上层（那里只重试一次，
+     * 且不清续播点）。
+     */
+    static final int NON_RESUMABLE_RETRY_MAX_BYTES = 512 * 1024;
+
+    static boolean midFlightRetryUseful(boolean metaReady, boolean remoteAcceptsRanges,
+                                        long contentLength, long bufEnd) {
+        if (remoteAcceptsRanges || contentLength > 0L) {
+            return true;
+        }
+        if (!metaReady) {
+            return true; // 连响应头都没拿到，可能是纯建连失败，与可续传无关
+        }
+        return bufEnd < NON_RESUMABLE_RETRY_MAX_BYTES;
+    }
+
+    /**
      * 纯判定：本窗口是否已滚动，以及滚动后读者挨饿到什么程度该做什么。
      *
      * 抽成静态纯函数是因为 JVM 单测里 {@code SystemClock.elapsedRealtime()} 恒为 0，
@@ -447,6 +580,7 @@ public class BufferedHttpSource {
         synchronized (lock) {
             readPosMap.put(token, pos);
             everHadReader = true;
+            idleSinceMs = -1L;
             // 预取源被真读者接管（这首真的要播了）：解除预取限制，升级为普通整窗源，
             // 下载线程恢复「随读者推进持续填充」，不再受小目标封顶（2026-09-12 缓冲/预取）
             if (prefetchMode) {
@@ -485,6 +619,7 @@ public class BufferedHttpSource {
         synchronized (lock) {
             readPosMap.remove(token);
             if (readPosMap.isEmpty()) {
+                idleSinceMs = SystemClock.elapsedRealtime();
                 disarmStarveLocked();
             }
             lock.notifyAll();
@@ -578,6 +713,56 @@ public class BufferedHttpSource {
     public long getSocketBytes() {
         synchronized (lock) {
             return socketBytes;
+        }
+    }
+
+    /** 本流建过多少次上游连接 (2026-10-08，用来判"链路慢"还是"我自己反复重连")。 */
+    public long getUpstreamConnections() {
+        synchronized (lock) {
+            return upstreamConnections;
+        }
+    }
+
+    /** 因重定位或 Range 被忽略而作废/白重下的字节数。 */
+    /** 挂上磁盘缓存（可选）。必须在开始下载之前调用。 */
+    void enableDiskCache(File dir, long limitBytes) {
+        synchronized (lock) {
+            this.diskCacheDir = dir;
+            this.diskCacheLimitBytes = limitBytes;
+        }
+    }
+
+    /** 本条流已从盘上喂出去多少字节（=0 就说明缓存一次没命中，这是判命中率唯一的入口）。 */
+    public long getDiskServedBytes() {
+        synchronized (lock) {
+            return disk == null ? 0L : disk.getServedBytes();
+        }
+    }
+
+    /** 本条流已落盘多少字节。 */
+    public long getDiskStoredBytes() {
+        synchronized (lock) {
+            return disk == null ? 0L : disk.getStoredBytes();
+        }
+    }
+
+    public long getDiscardedBytes() {
+        synchronized (lock) {
+            return discardedBytes;
+        }
+    }
+
+    /**
+     * 上游请求的首字节耗时统计：{@code long[]{最近, 最大, 平均}}；没完成过请求时全为 -1/0。
+     * 连接数之所以要配着它一起看，是因为 2026-10-08 的对照实测表明<b>每条请求都要付 0.8~1.4s
+     * 的固定开销</b>（与 keep-alive 无关），"这首歌建了几次连接"因此直接等于"白等了几秒"。
+     */
+    public long[] getTtfbStats() {
+        synchronized (lock) {
+            if (upstreamConnections <= 0L) {
+                return new long[]{-1L, 0L, 0L};
+            }
+            return new long[]{lastTtfbMs, ttfbMaxMs, ttfbSumMs / upstreamConnections};
         }
     }
 
@@ -696,6 +881,14 @@ public class BufferedHttpSource {
         if (t != null) {
             t.interrupt();
         }
+        StreamDiskCache cacheToClose;
+        synchronized (lock) {
+            cacheToClose = disk;
+            disk = null;
+        }
+        if (cacheToClose != null) {
+            cacheToClose.close(); // 同步落盘 + 命中过就把 mtime 顶新（LRU 才不会先删常听的歌）
+        }
         Log.i(TAG, "closed: " + url);
     }
 
@@ -751,6 +944,12 @@ public class BufferedHttpSource {
      * 同时清除 fatal 错误实现自愈（上层看门狗重连即可恢复播放）。
      */
     private void requestResetLocked(long position) {
+        // 重定位会把整个窗口清掉重下：新位置之后已经下好的字节因此作废。这个代价必须被记下来
+        // ——2026-10-08 对照实测：一条长连接取 5MB 是 246KB/s，拆成 20 条只剩 74KB/s，
+        // 所以"链路慢"很可能就是这类重连+重下的叠乘，而不是蜂窝不给量。
+        if (bufEnd > position) {
+            discardedBytes += bufEnd - position;
+        }
         downloadEpoch++;
         downloadAbort = true;
         abortActiveConnectionLocked();
@@ -823,6 +1022,16 @@ public class BufferedHttpSource {
                         lock.notifyAll();
                         return;
                     }
+                    if (!midFlightRetryUseful(metaReady, remoteAcceptsRanges, contentLength, bufEnd)) {
+                        // chunked 不认 Range：按字节重连=从 0 重下再丢弃，代价已经落在 bufEnd 上
+                        fatalError = "download failed on non-resumable stream at " + bufEnd
+                                + "B (reconnect would re-fetch and discard it): " + e;
+                        Log.e(TAG, "fatal: " + fatalError + " url=" + url);
+                        CrashMonitor.breadcrumb("stream", "non-resumable abort pos=" + bufEnd
+                                + " retry=" + retry + " err=" + e);
+                        lock.notifyAll();
+                        return;
+                    }
                     Log.w(TAG, "download retry " + retry + "/" + MAX_RETRY + " from " + bufEnd + ": " + e);
                 }
                 sleepInterruptible(retry * RETRY_BASE_MS);
@@ -835,7 +1044,11 @@ public class BufferedHttpSource {
         long start;
         synchronized (lock) {
             start = bufEnd;
+            // 每次<b>尝试</b>都计一次：旧口径是在 getInputStream() 之后才 +1，失败的与被打断的
+            // 重连一律不计，于是"这首歌到底建了几条连接"恰好漏掉了最该看见的那部分 (2026-10-08)
+            upstreamConnections++;
         }
+        long attemptAtMs = SystemClock.elapsedRealtime();
         HttpURLConnection conn = null;
         InputStream in = null;
         try {
@@ -850,6 +1063,16 @@ public class BufferedHttpSource {
                 c.setRequestProperty("Range", "bytes=" + start + "-");
             }
             int code = c.getResponseCode();
+            // 首字节耗时：这是"一条连接值不值"的那笔固定开销。2026-10-08 对照实测每条上游
+            // 请求要 0.8~1.4s（与是否复用 keep-alive 无关），所以连接数本身就是吞吐上限
+            long ttfbMs = SystemClock.elapsedRealtime() - attemptAtMs;
+            synchronized (lock) {
+                lastTtfbMs = ttfbMs;
+                ttfbSumMs += ttfbMs;
+                if (ttfbMs > ttfbMaxMs) {
+                    ttfbMaxMs = ttfbMs;
+                }
+            }
             if (code < 200 || code >= 300) {
                 // 404/410 的含义是"这个 Id 指向的资源已经没了"，重试同一个 Id 永远同样的结果，
                 // 单独抛类型让重试环直接终态，而不是按网络抖动退避五轮。
@@ -879,10 +1102,21 @@ public class BufferedHttpSource {
                 metaReady = true;
                 lock.notifyAll();
             }
+            if (disk == null && diskCacheDir != null && StreamDiskCache.shouldCache(
+                    contentLength, diskCacheLimitBytes)) {
+                // 只有总长已知才缓存：chunked 转码流长度进不了键、洞也判不出来
+                disk = StreamDiskCache.open(diskCacheDir, url, contentLength, diskCacheLimitBytes);
+                if (disk != null) {
+                    Log.i(TAG, "disk cache attached: " + contentLength + "B " + url);
+                }
+            }
             in = c.getInputStream();
             if (wantRange && !partial) {
                 // 远端不支持 Range：只能全量拉取并跳过前 start 字节（Jellyfin 支持 Range，正常走不到）
                 Log.w(TAG, "remote ignored Range, skipping " + start + " bytes");
+                synchronized (lock) {
+                    discardedBytes += start;
+                }
                 skipFully(in, start);
             }
             conn = c;
@@ -922,8 +1156,15 @@ public class BufferedHttpSource {
                 if (downloadAbort || epoch != downloadEpoch) {
                     return;
                 }
-                if (idleNoReaders()) {
-                    return; // 无读者：暂停下载，避免分家后的源在后台空耗带宽
+                if (idleNoReaders()
+                        && !shouldKeepFillingWhileIdle(SystemClock.elapsedRealtime(),
+                                idleSinceMs, (bufEnd - bufStart) < capacity - (capacity / 10),
+                                refCount > 0)) {
+                    // 读者摘窗且过了宽限（或窗已满）：收手，避免分家后的源在后台空耗带宽。
+                    // 宽限之内**继续在同一条连接上收字节填窗**——旧行为是一摘窗就退出并断连，
+                    // 解码器跳读回来就得重连再付约 1 秒首字节，实车那 9 次跳读就是这么变成
+                    // 9 条短连接的（见 IDLE_FILL_GRACE_MS）
+                    return;
                 }
                 if (prefetchSatisfiedLocked()) {
                     // 预取小窗已填达标：停止拉流，绝不 free-slide 把整首下完去和当前曲抢带宽
@@ -985,8 +1226,12 @@ public class BufferedHttpSource {
                 if (closed || downloadAbort || epoch != downloadEpoch) {
                     return -1;
                 }
-                if (idleNoReaders()) {
-                    return -1; // 读者全部离开：放弃本次写入，线程随 downloadLoop 休眠
+                if (idleNoReaders() && !shouldKeepFillingWhileIdle(
+                        SystemClock.elapsedRealtime(), idleSinceMs, true, refCount > 0)) {
+                    // 读者全部离开且宽限已过：放弃本次写入，线程随 downloadLoop 休眠。
+                    // 必须和 pumpIntoRing 用<b>同一条判定</b>——否则那边刚放行继续填窗，
+                    // 这里立刻把写入判死，摘窗宽限就成了空话 (2026-10-08 A1)
+                    return -1;
                 }
                 long free = capacity - (bufEnd - bufStart);
                 if (free >= n) {
@@ -1019,6 +1264,7 @@ public class BufferedHttpSource {
                     return -1;
                 }
             }
+            long wroteAt = bufEnd;
             int off = (int) (bufEnd % capacity);
             int first = Math.min(n, capacity - off);
             System.arraycopy(chunk, 0, ring, off, first);
@@ -1027,6 +1273,12 @@ public class BufferedHttpSource {
             }
             bufEnd += n;
             lock.notifyAll();
+            if (disk != null) {
+                // 边播边存 (A2)。位置取写入前的 bufEnd——这是这段字节在资源里的绝对起点，
+                // 与环形窗怎么绕回无关。锁内落盘是为了和窗口推进保持同一份顺序；
+                // 单次最多 64KB，闪存的毫秒级写入换一个"不会读脏数据"的保证，值。
+                disk.record(wroteAt, chunk, 0, n);
+            }
             return n;
         }
     }
