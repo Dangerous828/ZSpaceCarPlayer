@@ -118,17 +118,25 @@ public class BufferingPolicyTest {
     }
 
     @Test
-    public void adaptiveBufferTargetSecondsScalesOnWeakNetwork() {
+    public void adaptiveBufferTargetSecondsClampedByWindowCapacity() {
         long requiredRate = 132_000L;
+        long window8MB = 8 * 1024 * 1024L; // ~63.5s 容量
         // 正常网速 (200KB/s > 132KB/s) -> 20s
         assertEquals(BufferingPolicy.BUFFER_TARGET_NORMAL_SECONDS,
-                BufferingPolicy.adaptiveBufferTargetSeconds(200_000L, requiredRate), 0.001f);
-        // 弱网 (100KB/s < 132KB/s) -> 45s (抬高蓄水池，对齐 QQ 音乐)
-        assertEquals(BufferingPolicy.BUFFER_TARGET_SLOW_NETWORK_SECONDS,
-                BufferingPolicy.adaptiveBufferTargetSeconds(100_000L, requiredRate), 0.001f);
-        // 速率未知 -> 常态 20s
+                BufferingPolicy.adaptiveBufferTargetSeconds(200_000L, requiredRate, window8MB), 0.001f);
+        // 弱网 (100KB/s < 132KB/s)，8MB 窗口容量充裕 (~63.5s > 45s) -> 夹紧至上限 45s
+        assertEquals(BufferingPolicy.BUFFER_TARGET_SLOW_NETWORK_CAP_SECONDS,
+                BufferingPolicy.adaptiveBufferTargetSeconds(100_000L, requiredRate, window8MB), 0.001f);
+        // 高码率大无损 (如 400KB/s FLAC)，8MB 窗口只能装 20.97s，绝不虚报 45s
+        long highRate = 400_000L;
+        float physicalMax = (float) window8MB / highRate; // 20.97152s
+        assertEquals(physicalMax,
+                BufferingPolicy.adaptiveBufferTargetSeconds(100_000L, highRate, window8MB), 0.001f);
+        // 速率或容量无效 -> 回退常态
         assertEquals(BufferingPolicy.BUFFER_TARGET_NORMAL_SECONDS,
-                BufferingPolicy.adaptiveBufferTargetSeconds(0L, requiredRate), 0.001f);
+                BufferingPolicy.adaptiveBufferTargetSeconds(0L, requiredRate, window8MB), 0.001f);
+        assertEquals(BufferingPolicy.BUFFER_TARGET_NORMAL_SECONDS,
+                BufferingPolicy.adaptiveBufferTargetSeconds(100_000L, 0L, window8MB), 0.001f);
     }
 
     // ---------------- 下一首预取判定 ----------------

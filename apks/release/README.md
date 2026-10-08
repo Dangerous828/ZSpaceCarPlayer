@@ -467,3 +467,22 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
   主判据是"窗满却停顿"这一对是否消失，并新增 `srcs=`（陈旧 fork 抢带宽）与起播耗时两列。
 - 设备侧生效不需要连 adb：清单是开关，下次上电自动检查→下载双校验→系统安装界面确认。
   **听感与设置页显示仍是肉眼项，cron 判不了。**
+
+## vc23 = 3.2.12 — 待发版审核（已出包并就绪发版物料，等待确认切清单）
+
+包：**`ZSpaceCarPlayer-3.2.12-code23-debug.apk`**，3,149,955 B，
+`sha256=122b45f15610bad7d55509e6884765e47fab2055bba2bc4783d0111234bd6744`，
+`aapt2` → `versionCode='23' versionName='3.2.12'`，`aapt` → `sdkVersion:'18' targetSdkVersion:'28'`，
+`zipalign -c -v 4` → `Verification succesful`；
+`clean :app:testDebugUnitTest :app:assembleDebug` → **444 条 host 单测 0 失败**。
+
+内容：
+1. **R3 纯时长起播门槛（消除 13s 静音）**：积攒 1.2 秒音频时长（`LEAD_TARGET_START_SECONDS = 1.2f`）即放行起播，68KB/s 弱网实测起播等待由 14.8s 降至约 3.8s；`DspAudioTrackPlayer` 接入 `BufferingPolicy.shouldFastStart(...)`，单测钉住。
+2. **R6 自适应缓冲目标时长**：`adaptiveBufferTargetSeconds` 按 8MB 环形窗口物理容量严密夹紧 `min(target, capacity / requiredRate)`，弱网下仅提高蓄水期望，**绝不作为阻塞播放的门槛**（避免永久等待）。
+3. **发版合规与配套**：同步 `JellyfinApiClient.CLIENT_VERSION = "3.2.12"`；撰写 `changelogs/3.2.12.md`；生成发布清单草稿 `apks/release/latest-3.2.12-code23.json`；更新评估文档客观表述并标明 V3 目标未实施状态。
+
+包内核验（dex UTF-8 字节）：
+- `fastStart=` / `shouldFastStart` 命中；
+- `Version="3.2.12"` 命中 1 处，旧版本串完全归零；
+- **minSdk 18 红线**：`Ljava/util/Objects;`、`java.time`、`Ljava/util/function/` 均为 0。
+

@@ -25,12 +25,10 @@ public final class BufferingPolicy {
     public static final int PREFILL_TARGET_SECONDS = 5;
     /**
      * R3 纯时长起播目标秒数 (2026-10-08 对齐 Media3 / QQ 音乐 / 喜马拉雅)：
-     * 1.2 秒音频时长即可起播，不再等待 5 秒或 1.0MB，从 13s 静音降至约 1s。
+     * 1.2 秒音频时长即可起播，不再等待 5 秒或 1.0MB。
+     * 实测效果取决于所需速率与链路：如 68KB/s 弱网下 1.2s 音频约 3.8s 积攒完毕，较原 14.8s 大幅缩短。
      */
     public static final float LEAD_TARGET_START_SECONDS = 1.2f;
-    /** 弱网自适应缓冲目标时长：常态 20s，检测到供给不足时抬高至 45s (R6 对齐 QQ 音乐) */
-    public static final float BUFFER_TARGET_NORMAL_SECONDS = 20.0f;
-    public static final float BUFFER_TARGET_SLOW_NETWORK_SECONDS = 45.0f;
 
     /**
      * R3 统一 lead-秒纯函数判据：当前可供播放的时长（秒）。
@@ -49,17 +47,39 @@ public final class BufferingPolicy {
     }
 
     /**
-     * R6 弱网自适应目标时长纯函数：由实测拉流速率与所需速率决定缓冲目标。
+     * 常态目标缓冲时长（秒）：对齐常规音频播放器缓冲水位。
+     */
+    public static final float BUFFER_TARGET_NORMAL_SECONDS = 20.0f;
+    /**
+     * 弱网期望提升的蓄水秒数（上限），受环形窗口物理容量 min 夹紧。
+     */
+    public static final float BUFFER_TARGET_SLOW_NETWORK_CAP_SECONDS = 45.0f;
+
+    /**
+     * R6 自适应缓冲目标时长纯函数（受环形窗口容量与所需速率硬物理约束夹紧）：
+     * 仅作为缓冲蓄水目标/UI提示建议，绝不作为起播/恢复播放的阻断门槛（避免把卡一下做成永久等待）。
+     *
+     * 物理约束：环形窗口容量 windowCapacityBytes（例如 8MB），能容纳的最大秒数 = windowCapacityBytes / requiredBytesPerSec。
+     * 当供给不足 (linkRate < requiredRate) 时，在不超过物理窗口容量的前提下提高蓄水期望；
+     * 当供给充裕 (linkRate >= requiredRate * 1.15f) 时，维持常态 20s 即可。
      *
      * @param linkRateBytesPerSec 实测网络拉流速率 (B/s)
      * @param requiredBytesPerSec 播放所需速率 (B/s)
-     * @return 建议的缓冲目标秒数（弱网时抬高目标，不动音质）
+     * @param windowCapacityBytes 当前环形缓冲窗口字节容量
+     * @return 建议的缓冲目标秒数
      */
-    public static float adaptiveBufferTargetSeconds(long linkRateBytesPerSec, long requiredBytesPerSec) {
-        if (linkRateBytesPerSec > 0L && requiredBytesPerSec > 0L && linkRateBytesPerSec < requiredBytesPerSec) {
-            return BUFFER_TARGET_SLOW_NETWORK_SECONDS;
+    public static float adaptiveBufferTargetSeconds(long linkRateBytesPerSec, long requiredBytesPerSec, long windowCapacityBytes) {
+        if (requiredBytesPerSec <= 0L || windowCapacityBytes <= 0L) {
+            return BUFFER_TARGET_NORMAL_SECONDS;
         }
-        return BUFFER_TARGET_NORMAL_SECONDS;
+        float physicalMaxSeconds = (float) windowCapacityBytes / (float) requiredBytesPerSec;
+        float baseTarget = BUFFER_TARGET_NORMAL_SECONDS;
+
+        // 当网络拉流速率显著低于所需速率且拉流有效时，尝试提高蓄水期望（最多至 45s），但不能超过物理窗口所能容纳的上限
+        if (linkRateBytesPerSec > 0L && linkRateBytesPerSec < requiredBytesPerSec) {
+            baseTarget = Math.min(BUFFER_TARGET_SLOW_NETWORK_CAP_SECONDS, physicalMaxSeconds);
+        }
+        return Math.max(1.0f, Math.min(baseTarget, physicalMaxSeconds));
     }
 
     /** 门槛最大等待：弱网下即使没到门槛也起播，绝不永久卡住（超时仍会留日志）。 */
