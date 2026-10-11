@@ -491,3 +491,39 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 - 公网：清单轮询确认 `versionCode=23`；按 `apkUrl` 实下载 `3149955 B`；四方 SHA-256 完全一致。
 - 关键观察项：真车起播是否打出 `fastStart=`、UI 缓冲闪烁频率以及 `lead >= 15s` 预取触发情况。
 
+
+## vc25 = 3.2.14 — 已发布（2026-10-11 23:5x，OTA 清单已切）
+
+包：**`ZSpaceCarPlayer-3.2.14-code25-debug.apk`**，3,150,353 B，
+`sha256=24ac1bf88215c96cb4a4ee3c36182e143044006df59c772ecb20cd686ceac817`，
+`aapt2` → `versionCode='25' versionName='3.2.14'`，`aapt` → `sdkVersion:'18' targetSdkVersion:'28'`，
+`zipalign -c -v 4` → `Verification succesful`；
+`clean :app:testDebugUnitTest :app:assembleDebug` → **459 条 host 单测 0 失败**。
+
+内容（相对 vc24 的净代码差异，全部在 `PlaybackStateMachine` / `AudioPlayerService`）：
+1. **断点补位期不再被零位移看门狗误判成断流**：无 seektable 的 FLAC 转码流回断点时 dr_flac 从头
+   解码丢弃字节补位，期间位置合法读到 0；旧预算 20 tick(10s) < 实测补位 25–32s，必然在补位做完前
+   掐掉本轮 ⇒ 续播点冲成 0、整曲重播。新增 `isResumeCatchupPending` 识别该窄窗，预算按
+   `stallTicksLimit(true)` 放宽至 45s，常规 10s 档原样保留；真断流仍由下载层 `STARVE_*` 报 `-10002`。
+2. **断流重启的续播点不降级**：`stallRecoveryPositionMs` 取「本轮断点 / 观测位置」更靠前者，
+   `recoverStalledStream` 与 `handlePlayerError` 两条恢复链统一口径；落点进曲尾保护带则回 0。
+
+包内核验（dex UTF-8 字节）：
+- `Version="3.2.14"` 命中 1 处，旧串 `3.2.13` / `3.2.12` 归零；
+- **minSdk 18 红线**：`Ljava/util/Objects;`、`Ljava/util/function/` 为 0。
+  `Ljava/time/Duration;` 命中 1 处 —— 与 vc23/vc24 在产包计数**完全相同**，系依赖库既有字符串、
+  非本次引入（核验口径是"与上一版一致"，不是绝对零，绝对零会误伤）。
+
+触发现场：2026-10-11 16:20 上报 `1a12a0cbb9c-326f`（vc24）——《光年之外》26,853ms 断点重试后
+12 秒 `stall recover pos=0ms`，整曲重播两遍。新增 `ResumeCatchupStallTest` 含一条**现场回放**用例。
+
+**发布与验收**
+- 备份 `latest.json.bak-20261011-vc24` → 包体入发布目录 → 清单 `cp -a` + `mv` 原子替换。
+- 公网轮 1 即命中 `versionCode=25`；按 `apkUrl` 实下载 3,150,353 B（与 `sizeBytes` 一致）；
+  **四方 SHA-256 完全一致**（下载件 / 本地归档 / NAS 静态根 / 清单记载）。
+- 关键观察项：真车断流恢复是否出现 `stall recover pos=… resume=…`（resume 应等于断点而非 0）、
+  补位期是否不再触发整曲重播；曲库已全量 FLAC 化，刷新后下一首应走 `static=true` 直传。
+
+⚠️ 本次提交同时补入了 **vc24 已发布但从未入库**的源码（`build.gradle` 版本推进、
+`BufferedHttpSource` Keep-Alive/Accept-Encoding、`changelogs/3.2.13.md`、
+`latest-3.2.13-code24.json`）——git 此前停在 vc23，线上已跑 vc24，属于发布流程漏了 commit。
