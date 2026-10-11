@@ -598,10 +598,17 @@ public class AudioPlayerService extends Service {
                     }
 
                     // 卡死检测: 进度零位移累计 10 秒 (公网断流时 NuPlayer 保持 playing
-                    // 状态但无数据, AudioFlinger standby 无声), 从断点重启当前曲目
+                    // 状态但无数据, AudioFlinger standby 无声), 从断点重启当前曲目。
+                    // 例外 (2026-10-11 真车定位): 带断点起播后位置恒 0 那段是 dr_flac 在
+                    // <b>从头解码丢弃字节补位</b>，不是声音冻住 —— 10 秒预算会在这件事做完之前
+                    // 把它掐掉，续播点当场冲成 0，观感即"整首歌又从头放了一遍"。
+                    // 补位期按 stallTicksLimit(true) 放宽；真断流另有下载层挨饿判定报 -10002。
                     if (currentMs == lastTickPositionMs && totalMs > 0 && currentMs < totalMs) {
                         stallTicks++;
-                        if (stallTicks >= 20 && !stallRecovering) {
+                        boolean catchup = PlaybackStateMachine.isResumeCatchupPending(
+                                startedWithResumeMs, resumeHeardAudio, currentMs);
+                        if (stallTicks >= PlaybackStateMachine.stallTicksLimit(catchup)
+                                && !stallRecovering) {
                             recoverStalledStream(currentMs, playbackState.getGenerationId());
                         }
                     } else {
@@ -1635,11 +1642,17 @@ public class AudioPlayerService extends Service {
         if (song == null) return;
         stallRecovering = true;
         stallTicks = 0;
+        // 续播点不得因为"补位期间位置读到 0"而降级到 0 (2026-10-11 真车: 光年之外
+        // 26,853ms 断点被这条链路冲成 0，整曲重播两遍)
+        final int recoverMs = PlaybackStateMachine.stallRecoveryPositionMs(
+                startedWithResumeMs, posMs, song.getDurationMs());
         lastTickTrackId = song.getId();
-        lastTickPositionMs = Math.max(posMs, 0);
-        pendingSeekMs = posMs;
-        Log.w(TAG, "Stream stalled at " + posMs + "ms, rebuilding connection for " + song.getName());
-        CrashMonitor.breadcrumb("buffer", "stall recover pos=" + posMs + "ms song=" + song.getName());
+        lastTickPositionMs = Math.max(recoverMs, 0);
+        pendingSeekMs = recoverMs;
+        Log.w(TAG, "Stream stalled at " + posMs + "ms, rebuilding connection for " + song.getName()
+                + " resume=" + recoverMs + "ms");
+        CrashMonitor.breadcrumb("buffer", "stall recover pos=" + posMs + "ms resume=" + recoverMs
+                + "ms song=" + song.getName());
         if (stateChangeListener != null) {
             stateChangeListener.onError("网络波动, 正在恢复播放 " + song.getName());
         }
@@ -2524,6 +2537,10 @@ public class AudioPlayerService extends Service {
                 if (resumeMs <= 0) {
                     try { resumeMs = player.getCurrentPosition(); } catch (Exception ignored) { resumeMs = 0; }
                 }
+                // 补位期间 (2026-10-11 真车): 播放器位置还读到 0，直接拿它重启就等于把本轮断点
+                // 销毁。与 stall recover 同一口径，取「断点/观测」里更靠前的那个。
+                resumeMs = PlaybackStateMachine.stallRecoveryPositionMs(
+                        startedWithResumeMs, resumeMs, failedSong.getDurationMs());
                 final int finalResumeMs = Math.max(resumeMs, 0);
                 pendingSeekMs = -1;
                 if (action == PlaybackStateMachine.StreamRetryAction.PLAIN_RETRY) {

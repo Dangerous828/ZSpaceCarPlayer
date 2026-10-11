@@ -128,6 +128,62 @@ public final class PlaybackStateMachine {
     }
 
     /**
+     * 零位移看门狗的常规预算 (tick 数)。500ms/tick ⇒ 10 秒。
+     * 20 是 vc23 的既有行为，抽成常量只为让补位档在它旁边可比。
+     */
+    static final int STALL_TICKS_LIMIT = 20;
+
+    /**
+     * 断点补位期的零位移预算 (tick 数) ⇒ 45 秒。
+     *
+     * <p>为什么常规 10 秒不够：无 seektable 的 FLAC 转码流要回到断点，dr_flac 只能<b>从头解码
+     * 并丢弃字节</b>补位（2026-10-11 真车上报里 {@code discarded=2,851,884B} 就是 26.8s 断点
+     * 那一笔）。按该档实测 88–112KB/s，2.85MB 要 25–32 秒 —— 补位期间
+     * {@code getCurrentPosition()} 合法地停在 0，10 秒的预算必然在它跑完之前把这一轮掐掉，
+     * 于是「回到上次位置」变成「整曲从头重播」。
+     *
+     * <p>45 秒取实测最慢情形 (32s) 上浮一档，又刻意不超过 60 秒：补位期长到这份上，
+     * 该由下载层的挨饿判定 ({@code STARVE_*} → -10002) 报真断流，而不是让看门狗继续等。
+     */
+    static final int RESUME_CATCHUP_STALL_TICKS = 90;
+
+    /**
+     * 断点补位识别 (2026-10-11 真车定位)：本轮带断点起播、到此刻<b>从未出过声</b>、
+     * 且位置还没爬到断点 ⇒ 正在补位，零位移不是「声音冻住」。
+     *
+     * <p>三个条件缺一不可：出过声就意味着已经接上播放，位置不动是真冻住；位置到/越过断点
+     * 同样意味着补位完成；而 {@code resumeMs <= 0}（从头点播、自动下一首）根本不存在补位，
+     * 必须原样保留 10 秒预算，别把这条保护扩散成「看门狗永不生效」。
+     */
+    public static boolean isResumeCatchupPending(int resumeMs, boolean heardAudioAdvanced,
+                                                 int positionMs) {
+        return resumeMs > 0 && !heardAudioAdvanced && positionMs < resumeMs;
+    }
+
+    /** 零位移看门狗的 tick 预算：常规 10 秒，断点补位期放宽到补位上限。 */
+    public static int stallTicksLimit(boolean resumeCatchupPending) {
+        return resumeCatchupPending ? RESUME_CATCHUP_STALL_TICKS : STALL_TICKS_LIMIT;
+    }
+
+    /**
+     * 断流重启时该回到的位置 (2026-10-11 真车定位)。
+     *
+     * <p>取「观测位置」与「本轮断点」里更靠前的那个：补位期间读到的是 0，若直接拿它当续播点，
+     * 看门狗每一次出手都在销毁它想救的那个位置（现场即《光年之外》26,853ms 被冲成 0，
+     * 整曲重播两遍）。补位真的完成过、位置爬到了断点之后，观测位置才是可信的那个。
+     *
+     * <p>落点贴进 {@link #END_OF_TRACK_GUARD_MS} 以内一律回 0：那等于已经到曲尾，
+     * 拿它续播会几秒后假 COMPLETED 乱跳下一首。
+     */
+    public static int stallRecoveryPositionMs(int resumeMs, int observedPositionMs,
+                                              long trackDurationMs) {
+        int candidate = Math.max(resumeMs, Math.max(observedPositionMs, 0));
+        if (candidate <= 0) return 0;
+        if (isEffectivelyAtEnd(trackDurationMs, candidate)) return 0;
+        return candidate;
+    }
+
+    /**
      * 带断点起播后, 出声不足该时长就 COMPLETED ⇒ 断点其实贴在真实曲尾。
      * 必须小于 {@link #END_OF_TRACK_GUARD_MS}, 否则合法断点 (刚过 guard 边界) 会被误判。
      */
