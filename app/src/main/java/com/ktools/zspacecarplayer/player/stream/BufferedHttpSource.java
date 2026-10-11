@@ -1076,6 +1076,8 @@ public class BufferedHttpSource {
             c.setInstanceFollowRedirects(true);
             c.setRequestProperty("Accept", "*/*");
             c.setRequestProperty("User-Agent", "ZSpaceCarPlayer/3.0 buffered-source");
+            c.setRequestProperty("Connection", "Keep-Alive");
+            c.setRequestProperty("Accept-Encoding", "identity");
             boolean wantRange = start > 0;
             if (wantRange) {
                 c.setRequestProperty("Range", "bytes=" + start + "-");
@@ -1129,7 +1131,7 @@ public class BufferedHttpSource {
                     Log.i(TAG, "disk cache attached: " + contentLength + "B " + url);
                 }
             }
-            in = c.getInputStream();
+            in = new java.io.BufferedInputStream(c.getInputStream(), 256 * 1024);
             if (wantRange && !partial) {
                 // 远端不支持 Range：只能全量拉取并跳过前 start 字节（Jellyfin 支持 Range，正常走不到）
                 Log.w(TAG, "remote ignored Range, skipping " + start + " bytes");
