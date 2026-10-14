@@ -996,16 +996,16 @@ public class AudioPlayerService extends Service {
     public void applyStreamTuningFromPrefs() {
         android.content.SharedPreferences sp =
                 getSharedPreferences(PREF_NAME, MODE_PRIVATE);
-        // 版本升级自愈 (2026-10-14): 若车机此前误关了播放缓存，升级新版本时强制恢复开启一次，
-        // 确保全量 FLAC 原件直传能享受 1GB 本地磁盘缓存与 0 网络重播抗抖。
-        int lastHealed = sp.getInt("last_healed_disk_cache_vc", 0);
-        if (com.ktools.zspacecarplayer.BuildConfig.VERSION_CODE > lastHealed) {
-            sp.edit().putBoolean(PREF_KEY_DISK_CACHE, true)
-                    .putInt("last_healed_disk_cache_vc", com.ktools.zspacecarplayer.BuildConfig.VERSION_CODE)
+        // vc26 把缓存强制打开了。车主实测关掉才顺：下载线程每 64KB 同步写闪存，
+        // 会把播放拖住。这里只在第一次启动本版时关一次，之后尊重设置页的开关。
+        int cacheDefaultApplied = sp.getInt("disk_cache_default_applied_vc", 0);
+        if (cacheDefaultApplied < 27) {
+            sp.edit().putBoolean(PREF_KEY_DISK_CACHE, false)
+                    .putInt("disk_cache_default_applied_vc", 27)
                     .apply();
         }
         boolean tuning = sp.getBoolean(PREF_KEY_STREAM_TUNING, true);
-        boolean disk = sp.getBoolean(PREF_KEY_DISK_CACHE, true);
+        boolean disk = sp.getBoolean(PREF_KEY_DISK_CACHE, false);
         com.ktools.zspacecarplayer.player.stream.StreamTuning.configure(
                 tuning ? com.ktools.zspacecarplayer.player.stream.StreamTuning
                         .DEFAULT_IDLE_FILL_GRACE_MS : 0L,
@@ -1026,7 +1026,7 @@ public class AudioPlayerService extends Service {
     /** 磁盘缓存当前状态（设置页显示用）。 */
     public boolean isDiskCacheEnabled() {
         return getSharedPreferences(PREF_NAME, MODE_PRIVATE)
-                .getBoolean(PREF_KEY_DISK_CACHE, true);
+                .getBoolean(PREF_KEY_DISK_CACHE, false);
     }
 
     /** 设置页切换回退闸：立刻生效（下一首起），并落到偏好。 */

@@ -39,13 +39,12 @@ public class BufferedHttpSource {
     private static final String TAG = "BufferedHttpSource";
 
     /**
-     * 默认窗口容量：8MB ≈ 1.5Mbps 下约 42s、320kbps 下约 200s 的抗抖动余量。
-     * 2026-09-08 实车反馈「网络正常仍 2s 抖一下」——若供给端（Jellyfin/公网链路）
-     * 存在应用层发送节奏顿挫, 2MB 窗口余量太薄会被打穿; 8MB 把分钟级顿挫也平滑掉。
-     * 车机 RSS 实测 60~63MB, 多 6MB 数组在预算内（2026-09-03 从 8MB 缩到 2MB 是
-     * 为了堆红线, 现实测堆余量充足, 恢复设计值）。
+     * 默认窗口容量：16MB。无损原件约 150KB/s，8MB 只能垫约 50 秒，窗一满
+     * 下载就必须停（日志里的 hasRoom=false）。16MB 把这段垫到约 100 秒。
+     * 这不是系统 TCP 窗口，是应用自己的环形缓冲。车机已开 largeHeap，
+     * 2026-09 实测 RSS 60~63MB，再加 8MB 在预算内。预取不用这个容量。
      */
-    public static final int DEFAULT_CAPACITY_BYTES = 8 * 1024 * 1024;
+    public static final int DEFAULT_CAPACITY_BYTES = 16 * 1024 * 1024;
     /** 单次网络读块大小 */
     private static final int CHUNK_SIZE = 64 * 1024;
     /** 连续网络失败的最大重试次数（指数退避） */

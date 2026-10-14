@@ -372,7 +372,7 @@ public final class HttpProxyServer {
      * 预取「下一首」：为 remoteUrl 建一个预取源并预热下载线程，eager 下载到
      * {@link BufferingPolicy#prefetchCapacityBytes()}（约 2MB）即休眠，绝不 free-slide 抢当前曲带宽。
      *
-     * 关键一：**环形数组按整窗 {@link BufferedHttpSource#DEFAULT_CAPACITY_BYTES}（8MB）分配**，
+     * 关键一：**环形数组按整窗 {@link BufferedHttpSource#DEFAULT_CAPACITY_BYTES}（16MB）分配**，
      * 只把 <b>eager 下载目标</b>压到 2MB（见 BufferedHttpSource 5 参构造的解耦说明）。因为容量是
      * final，若这里按 2MB 建环，将来这首晋升为当前曲就只能在 2MB 窗上滚动——重蹈「2MB 被打穿」的
      * 卡顿。整窗分配 + 小 eager 目标 = 预取期省带宽、接管后仍有完整 8MB 抗抖余量。

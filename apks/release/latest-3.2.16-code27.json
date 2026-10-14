@@ -1,0 +1,12 @@
+{
+  "versionCode": 27,
+  "versionName": "3.2.16",
+  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.2.16-code27-debug.apk",
+  "fileName": "ZSpaceCarPlayer-3.2.16-code27-debug.apk",
+  "sizeBytes": 3150864,
+  "sha256": "9b1c2810faa8001362fc07392423d1bddddbf3608d7c8c9423616e9d58628b6f",
+  "notes": "关闭播放缓存，播放缓冲窗口改为 16MB",
+  "minVersionCode": 1,
+  "mandatory": false,
+  "publishedAt": "2026-10-14"
+}
