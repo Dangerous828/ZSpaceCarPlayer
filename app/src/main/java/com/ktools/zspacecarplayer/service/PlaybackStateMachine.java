@@ -395,6 +395,25 @@ public final class PlaybackStateMachine {
         return currentGain > 0.0f && isPotentiallyAudibleState(state);
     }
 
+    /**
+     * 焦点丢失时是否应彻底放弃 AudioFocus 并停止底层播放器 (2026-10-14 车机反馈)。
+     *
+     * 永久失去焦点 (如切到车机蓝牙音乐/收音机/其他音源):
+     * 必须彻底放弃 AudioFocus 并停止底层 AudioTrack / HAL 输出，
+     * 否则吉利 8600 NeuSoft HAL 认为媒体通道依然被占用，会阻断 BTAUDIO 路由接入，
+     * 甚至引发底层功放保护闭锁 (card1 tef6638 closed)，导致离开 App 后整车包括蓝牙都无声。
+     * 短暂失去焦点 (如导航播报、电话) 则保持焦点持有以便稍后恢复。
+     *
+     * @param focusChange AudioManager.AUDIOFOCUS_* 常量 (-1 为 AUDIOFOCUS_LOSS)
+     */
+    public static boolean shouldAbandonAudioFocusOnLoss(int focusChange) {
+        return focusChange == -1; // AudioManager.AUDIOFOCUS_LOSS
+    }
+
+    public static boolean shouldStopPlayerOnFocusLoss(int focusChange) {
+        return focusChange == -1; // AudioManager.AUDIOFOCUS_LOSS
+    }
+
     public static boolean shouldRestoreGainOnFocusGain(DesiredPlayback desired,
                                                         EngineState state,
                                                         boolean engineActuallyPlaying) {

@@ -222,7 +222,7 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
     /**
      * 探测数据源头部：如果是 FLAC / WAV，直接走 C++ 原生无损软解。
      */
-    private boolean tryPrepareNativeLossless() {
+    private boolean tryPrepareNativeLossless() throws IOException {
         Log.i(TAG, "tryPrepareNativeLossless: available=" + NativeLosslessDecoder.isAvailable()
                 + " path=" + dataSourcePath);
         if (!NativeLosslessDecoder.isAvailable()) {
@@ -376,14 +376,10 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
             return true;
 
         } catch (Throwable t) {
-            Log.w(TAG, "tryPrepareNativeLossless exception, fallback to MediaCodec", t);
-            // 捕获的是 Throwable：UnsatisfiedLinkError 之类的 so 加载失败也走这里，
-            // 静默回退后现场就没了，必须留痕
             if (t instanceof BufferedHttpSource.ResourceGoneException) {
                 resourceGone = true;
                 goneHttpStatus = ((BufferedHttpSource.ResourceGoneException) t).httpCode;
             }
-            CrashMonitor.breadcrumb("v3", "native prepare threw, fallback: " + t);
             if (streamReader != null) {
                 try { streamReader.close(); } catch (Throwable ignored) {}
             }
@@ -392,6 +388,17 @@ public class DspAudioTrackPlayer implements IAudioPlayer {
                 nativeDecoder = null;
             }
             isNativeMode = false;
+            // 网络 I/O 异常（如首字节超时取消 readAt cancelled 或连接断开）：
+            // 绝不能回退到 MediaCodec (2026-10-14 真车现场复盘)！
+            // 吉利 8600 车机缺 FLAC 硬件解码，掉回 MediaCodec 会引发 Failed to allocate component instance，
+            // 击溃系统 mediaserver 与 OMX 硬件分配器，导致整车音频与蓝牙传声全部死锁。
+            // 网络异常必须如实向上抛出，交由服务层网络重试链退避重连。
+            if (t instanceof IOException) {
+                CrashMonitor.breadcrumb("v3", "native prepare network error: " + t.getMessage());
+                throw (IOException) t;
+            }
+            Log.w(TAG, "tryPrepareNativeLossless exception, fallback to MediaCodec", t);
+            CrashMonitor.breadcrumb("v3", "native prepare threw, fallback: " + t);
             return false;
         } finally {
             if (openWatchdog != null) {

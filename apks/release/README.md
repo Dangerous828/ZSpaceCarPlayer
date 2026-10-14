@@ -527,3 +527,46 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 ⚠️ 本次提交同时补入了 **vc24 已发布但从未入库**的源码（`build.gradle` 版本推进、
 `BufferedHttpSource` Keep-Alive/Accept-Encoding、`changelogs/3.2.13.md`、
 `latest-3.2.13-code24.json`）——git 此前停在 vc23，线上已跑 vc24，属于发布流程漏了 commit。
+
+## vc26 = 3.2.15 — 已发布（2026-10-14 12:xx，OTA 清单已切）
+
+包：**`ZSpaceCarPlayer-3.2.15-code26-debug.apk`**，3,151,037 B，
+`sha256=28ade9c1af8573581862e18fde3679b05704202b8d28f8a52b1cfece75212232`，
+`aapt2` → `versionCode='26' versionName='3.2.15'`，`aapt` → `sdkVersion:'18' targetSdkVersion:'28'`，
+`zipalign -c -v 4` → `Verification succesful`；
+`clean :app:testDebugUnitTest :app:assembleDebug` → **460 条 host 单测 0 失败**。
+
+内容（三大专项缺陷治理）：
+1. **车机返回键层级导航修复**：修复在歌单详细列表页（`PAGE_SONGS`，`btnBackToPlaylist` 可见）按车机硬件
+   返回键被误判为双击退出、连按两次强杀进程的缺陷。返回键现在等价于点击"返回歌单"，回到"我的歌单"分类网格；
+   补充搜索栏展开时返回键优先收起搜索、大歌词页与设置页按返回键退回歌单网格。
+2. **离开应用/失焦时音频硬件通道安全释放**：解决"离开 App 后整车发不出声音、蓝牙传声都不行"的底层硬件锁死：
+   - `AUDIOFOCUS_LOSS` 永久失去焦点时（如切去车机蓝牙音乐/收音机/导航）立即调用 `audioManager.abandonAudioFocus`
+     交还系统焦点，并调用 `player.stop()` 停止底层 `AudioTrack` 硬件流，向 NeuSoft HAL（`audio.primary.C3ALFUS.so`）
+     让出声卡硬件通道，防止功放芯片 `tef6638` 闭锁静音。
+   - 规避 `Failed to allocate component instance` 崩溃：`tryPrepareNativeLossless` 遇到网络超时取消（`readAt cancelled`）
+     或断开时，直接向上抛出 `IOException` 走网络退避重试，**严禁错误地回退到系统 `prepareMediaCodec`**
+     （吉利 8600 缺 FLAC 硬件解码，强调 MediaCodec 会耗尽 OMX 组件实例并击溃 mediaserver）。
+3. **缓冲健康度与抗抖卡顿治理**：
+   - **预取死循环与抢带宽遏制**：在当前曲接近结尾（`remainingSeconds <= 15s`）时增加安全蓄水门槛
+     （`PREFETCH_MIN_LEAD_AT_NEAREND_SECONDS = 5s`），当前曲自身贫血濒临断流时严禁启动预取抢带宽；
+     预取因当前曲饥饿让位后施加 10 秒冷却期，根除短时间内反复尝试 4 次争抢带宽的乒乓卡死。
+   - **精确领先秒数**：`computeLeadSeconds` 接入环形缓冲真实持有的 `bufferedBytes` 与 `requiredBytesPerSec`，
+     彻底消除 8MB 满窗背压时因整型百分比相减产生的虚假 `lead=0s, buffering=true` 伪卡顿。
+   - **磁盘缓存升级自愈**：检测到升级到 vc26 时，自动将可能被误关的 `disk_cache_enabled` 恢复为开启状态，
+     确保 1GB 本地磁盘缓存与 FLAC 原件直传协同生效。
+
+包内核验（dex UTF-8 字节）：
+- `Version="3.2.15"` 命中 1 处，旧串全部归零；
+- **minSdk 18 红线**：`Ljava/util/Objects;`、`Ljava/util/function/` 为 0；
+  `Ljava/time/Duration;` 命中 1 处（与历史版本一致）。
+
+触发现场：2026-10-14 08:19 上报 `1a137c6dc19-712b`（vc25）——开机超时掉进 MediaCodec 引发
+`Failed to allocate component instance`，且当前曲末尾 15 秒内疯狂乒乓触发 4 次预取抢带宽。
+
+**发布与验收**
+- 备份 `latest.json.bak-20261014-vc25` → 包体入发布目录 → 清单 `cp -a` + `mv` 原子替换。
+- 公网轮 1 即命中 `versionCode=26`；按 `apkUrl` 实下载 3,151,037 B（与 `sizeBytes` 一致）；
+  **四方 SHA-256 完全一致**（下载件 / 本地归档 / NAS 静态根 / 清单记载）。
+- 关键观察项：歌单详细列表页按车机返回键是否顺畅回到歌单分类网格；切去车机自带蓝牙音乐是否能正常发声；
+  升级后磁盘缓存是否自动重新开启并生效（`stored > 0B`）。

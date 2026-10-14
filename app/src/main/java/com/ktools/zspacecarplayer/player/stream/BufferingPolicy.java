@@ -214,8 +214,16 @@ public final class BufferingPolicy {
     public static final int MAX_SOURCES = 2;
     /** 触发预取的健康阈值：领先秒数 ≥ 该值才允许抢带宽（见 {@link #shouldPrefetchNext}）。 */
     public static final long PREFETCH_LEAD_SECONDS = 15L;
-    /** 当前曲接近结尾阈值：剩余 ≤ 该秒数时无条件预取（马上要切歌）。 */
+    /** 当前曲接近结尾阈值：剩余 ≤ 该秒数时允许预取（马上要切歌）。 */
     public static final long PREFETCH_REMAINING_SECONDS = 15L;
+    /**
+     * 接近结尾时当前曲允许放行预取的最低安全缓冲量 (2026-10-14 真车复盘)。
+     * 现场：剩余 15s 但当前曲 lead 仅 2s 时强行预取，导致当前曲瞬间 starving，
+     * 预取被迫 abort 让位，500ms 后又因 remaining<=15s 再次发起，15 秒内疯狂乒乓 4 次，
+     * 把当前曲最后一段搅得粉碎。接近结尾放行预取的前提是：当前曲要么已覆盖到曲尾，
+     * 要么至少持有该安全储备秒数，绝不在命悬一线时抢带宽。
+     */
+    public static final long PREFETCH_MIN_LEAD_AT_NEAREND_SECONDS = 5L;
 
     /**
      * 磁盘缓存上限 (2026-10-08 T1 重审 A2)：既是<b>单文件</b>上限（超过就不缓存，比如曲库里
@@ -270,7 +278,12 @@ public final class BufferingPolicy {
         boolean healthy = currentLeadSeconds >= 0 && currentLeadSeconds >= PREFETCH_LEAD_SECONDS;
         // 「接近结尾」这道门依赖剩余秒数：播放器在 chunked 流上报 0 时长（无 Content-Length），
         // 调用方须先用入库元数据兜底，见 {@link #durationForDerivation}。
-        boolean nearEnd = remainingSeconds >= 0 && remainingSeconds <= PREFETCH_REMAINING_SECONDS;
+        // 但若当前曲自身严重贫血 (lead < 5s 且不足以撑到曲尾)，绝不放行预取抢带宽 (2026-10-14 真车实测)。
+        boolean nearEndSafe = currentLeadSeconds < 0L
+                || (remainingSeconds >= 0L && currentLeadSeconds >= remainingSeconds)
+                || currentLeadSeconds >= PREFETCH_MIN_LEAD_AT_NEAREND_SECONDS;
+        boolean nearEnd = (remainingSeconds >= 0 && remainingSeconds <= PREFETCH_REMAINING_SECONDS)
+                && nearEndSafe;
         return healthy || nearEnd;
     }
 

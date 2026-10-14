@@ -237,6 +237,8 @@ public class AudioPlayerService extends Service {
      * 拉了多少字节，"预取有没有跟当前曲抢带宽"这件事根本没有数据。
      */
     private volatile String prefetchedNextUrl = null;
+    /** 预取因当前曲饥饿而让位的上次时刻 (2026-10-14 避免弱网下反复乒乓打断当前曲) */
+    private volatile long lastPrefetchYieldAtMs = 0L;
 
     /**
      * 二分排查开关: false = 完全旁路本轮新增的全景/混响代码。
@@ -838,7 +840,8 @@ public class AudioPlayerService extends Service {
             // 档位只由车主手选（StreamTier），切换那一刻在设置页已留痕；这里不再有自动档状态可监视
         }
         long remainingSeconds = totalMs > 0 ? Math.max(0, (totalMs - currentMs) / 1000) : -1L;
-        long leadSeconds = computeLeadSeconds(percent, currentMs, totalMs);
+        long leadSeconds = computeLeadSeconds(percent, currentMs, totalMs,
+                proxy.getBufferedBytes(url), requiredBytesPerSec);
         // 稳定后仍持续上报 (2026-09-13 双进度条): UI 文字指示靠 visibility 幂等隐藏,
         // 不会反复闪烁; 而缓冲进度层需要每 tick 的 percent 跟随下载头持续推进,
         // 像「视频加载」一样长条推进。跟着 500ms tick 走, 频率依然不密。
@@ -871,14 +874,19 @@ public class AudioPlayerService extends Service {
     }
 
     /**
-     * 领先秒数 = (已下载百分比 - 已播百分比) × 总时长。用现成的 getBufferedPercent（整首已下载比例）
-     * 减去播放进度比例即得当前曲「领先播放头多少秒」，总长 / 百分比未知时返回 -1。
+     * 领先秒数：优先使用环形缓冲真实持有的有效字节数 / 所需字节率计算 (2026-10-14 精确化)。
+     * 避免因百分比整型相减的量化误差在 8MB 满窗背压时虚假算出 0s~1s 并触发伪卡顿提示。
+     * 若真实字节数或速率不可用，回退到高精度毫秒推算。
      */
-    private long computeLeadSeconds(int percent, int currentMs, int totalMs) {
+    private long computeLeadSeconds(int percent, int currentMs, int totalMs, long bufferedBytes, long requiredRate) {
+        if (bufferedBytes > 0L && requiredRate > 0L) {
+            return (long) BufferingPolicy.calculateLeadSeconds(bufferedBytes, 0L, requiredRate);
+        }
         if (percent < 0 || totalMs <= 0) return -1L;
-        int playedPct = (int) (currentMs * 100L / totalMs);
-        int leadPct = Math.max(0, percent - playedPct);
-        return (long) leadPct * (totalMs / 1000) / 100L;
+        long playedMs = Math.max(0, currentMs);
+        long downloadedMs = (long) percent * (long) totalMs / 100L;
+        long leadMs = Math.max(0L, downloadedMs - playedMs);
+        return leadMs / 1000L;
     }
 
     /**
@@ -903,13 +911,17 @@ public class AudioPlayerService extends Service {
         long durationBasisMs = BufferingPolicy.durationForDerivation(totalMs, current.getDurationMs());
         long remainingSeconds = durationBasisMs > 0
                 ? Math.max(0, (durationBasisMs - currentMs) / 1000) : -1L;
+        long bufferedBytes = (url != null && url.length() > 0) ? proxy.getBufferedBytes(url) : -1L;
+        long contentLength = (url != null && url.length() > 0) ? proxy.getContentLength(url) : -1L;
+        long requiredRate = BufferingPolicy.requiredBytesPerSec(contentLength, durationBasisMs);
         long leadSeconds = computeLeadSeconds(percent, currentMs, (int) Math.min(durationBasisMs,
-                Integer.MAX_VALUE));
+                Integer.MAX_VALUE), bufferedBytes, requiredRate);
 
         // 让位当前曲：饥饿 / 断流 / 正在 prefill 时，作废在跑的预取（恢复健康后可重试）
         if ((starving || prefillInProgress) && prefetchedNextSongId != null) {
             abortPrefetchById(prefetchedNextSongId);
             prefetchedNextUrl = null;
+            lastPrefetchYieldAtMs = SystemClock.elapsedRealtime();
             Log.w(TAG, "prefetch yielded to current song (starving=" + starving
                     + " prefill=" + prefillInProgress + ")");
             long[] pfCost = HttpProxyServer.getInstance().getUpstreamCost(prefetchedNextUrl);
@@ -918,6 +930,11 @@ public class AudioPlayerService extends Service {
                     + (pfCost == null ? "" : " pfConns=" + pfCost[0] + " pfSocket=" + pfCost[1]
                             + "B pfDisk=" + pfCost[3] + "B"));
             prefetchedNextSongId = null;
+            return;
+        }
+
+        // 避让冷却：刚因为当前曲饥饿让位过（10秒内），禁止立即死灰复燃，避免当前曲尾部频繁被抢带宽
+        if (SystemClock.elapsedRealtime() - lastPrefetchYieldAtMs < 10000L) {
             return;
         }
 
@@ -979,6 +996,14 @@ public class AudioPlayerService extends Service {
     public void applyStreamTuningFromPrefs() {
         android.content.SharedPreferences sp =
                 getSharedPreferences(PREF_NAME, MODE_PRIVATE);
+        // 版本升级自愈 (2026-10-14): 若车机此前误关了播放缓存，升级新版本时强制恢复开启一次，
+        // 确保全量 FLAC 原件直传能享受 1GB 本地磁盘缓存与 0 网络重播抗抖。
+        int lastHealed = sp.getInt("last_healed_disk_cache_vc", 0);
+        if (com.ktools.zspacecarplayer.BuildConfig.VERSION_CODE > lastHealed) {
+            sp.edit().putBoolean(PREF_KEY_DISK_CACHE, true)
+                    .putInt("last_healed_disk_cache_vc", com.ktools.zspacecarplayer.BuildConfig.VERSION_CODE)
+                    .apply();
+        }
         boolean tuning = sp.getBoolean(PREF_KEY_STREAM_TUNING, true);
         boolean disk = sp.getBoolean(PREF_KEY_DISK_CACHE, true);
         com.ktools.zspacecarplayer.player.stream.StreamTuning.configure(
@@ -2392,6 +2417,16 @@ public class AudioPlayerService extends Service {
                 case AudioManager.AUDIOFOCUS_LOSS:
                     playbackState.setFocusState(PlaybackStateMachine.FocusState.LOST_PERMANENT);
                     fadeOutAndPause(generation, true, PlaybackStateMachine.PauseReason.FOCUS_LOSS);
+                    if (PlaybackStateMachine.shouldAbandonAudioFocusOnLoss(focusChange) && audioManager != null) {
+                        try {
+                            audioManager.abandonAudioFocus(focusChangeListener);
+                        } catch (Exception ignored) {}
+                    }
+                    if (PlaybackStateMachine.shouldStopPlayerOnFocusLoss(focusChange) && player != null) {
+                        try {
+                            player.stop();
+                        } catch (Exception ignored) {}
+                    }
                     break;
                 case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
                     playbackState.setFocusState(PlaybackStateMachine.FocusState.LOST_TRANSIENT);

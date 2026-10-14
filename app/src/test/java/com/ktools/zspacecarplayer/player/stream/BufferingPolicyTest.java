@@ -182,13 +182,23 @@ public class BufferingPolicyTest {
                 BufferingPolicy.PREFETCH_LEAD_SECONDS - 1, 120, false, false, false));
     }
 
-    /** 接近结尾（剩余 <= 15s）无条件预取，哪怕当前没有领先秒数 */
+    /** 接近结尾（剩余 <= 15s）且持有最低安全储备（>=5s 或覆盖曲尾）时放行预取；严重贫血时不放行 (2026-10-14 真车实测) */
     @Test
     public void prefetchWhenNearEnd() {
+        // 持有 5s 最低安全储备：放行
         assertTrue(BufferingPolicy.shouldPrefetchNext(
-                1, BufferingPolicy.PREFETCH_REMAINING_SECONDS, false, false, false));
+                BufferingPolicy.PREFETCH_MIN_LEAD_AT_NEAREND_SECONDS,
+                BufferingPolicy.PREFETCH_REMAINING_SECONDS, false, false, false));
+        // 虽然只剩 4s 缓冲，但剩余总长只有 3s（已覆盖曲尾）：放行
+        assertTrue(BufferingPolicy.shouldPrefetchNext(
+                4, 3, false, false, false));
+        // 严重贫血（只剩 1s 缓冲却还有 15s 没播完）：绝不放行抢带宽
         assertFalse(BufferingPolicy.shouldPrefetchNext(
-                1, BufferingPolicy.PREFETCH_REMAINING_SECONDS + 1, false, false, false));
+                1, BufferingPolicy.PREFETCH_REMAINING_SECONDS, false, false, false));
+        // 超过 15s 且无充足领先：不放行
+        assertFalse(BufferingPolicy.shouldPrefetchNext(
+                BufferingPolicy.PREFETCH_MIN_LEAD_AT_NEAREND_SECONDS,
+                BufferingPolicy.PREFETCH_REMAINING_SECONDS + 1, false, false, false));
     }
 
     /** 让位当前曲：饥饿 / 正在 prefill 时绝不预取（当前曲永远优先） */

@@ -532,6 +532,21 @@ public class PlaybackStateMachineTest {
                         .contains("流畅"));
     }
 
+    @Test
+    public void permanentFocusLossAbandonsFocusAndStopsPlayer() {
+        // AudioManager.AUDIOFOCUS_LOSS = -1
+        Assert.assertTrue("永久失去焦点必须放弃焦点让位给蓝牙等外接音频",
+                PlaybackStateMachine.shouldAbandonAudioFocusOnLoss(-1));
+        Assert.assertTrue("永久失去焦点必须停止播放器释放底层声卡通道",
+                PlaybackStateMachine.shouldStopPlayerOnFocusLoss(-1));
+
+        // 瞬时失去焦点 (电话/导航播报 AUDIOFOCUS_LOSS_TRANSIENT = -2) 不得 abandon，保持句柄等待恢复
+        Assert.assertFalse(PlaybackStateMachine.shouldAbandonAudioFocusOnLoss(-2));
+        Assert.assertFalse(PlaybackStateMachine.shouldStopPlayerOnFocusLoss(-2));
+        // DUCK 失去焦点也不得 abandon
+        Assert.assertFalse(PlaybackStateMachine.shouldAbandonAudioFocusOnLoss(-3));
+    }
+
     private PlaybackStateMachine readyToPlayWithFocus(PlaybackStateMachine.FocusState focus) {
         PlaybackStateMachine machine = new PlaybackStateMachine();
         machine.setDesiredPlayback(PlaybackStateMachine.DesiredPlayback.PLAY);

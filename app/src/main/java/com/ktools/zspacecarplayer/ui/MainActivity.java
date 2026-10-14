@@ -2738,6 +2738,29 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
     @Override
     public void onBackPressed() {
+        // 1. 若搜索栏展开，优先收起搜索并清空输入
+        if (etSearch != null && etSearch.getVisibility() == View.VISIBLE) {
+            etSearch.setText("");
+            etSearch.setVisibility(View.GONE);
+            hideSoftKeyboard();
+            return;
+        }
+
+        // 2. 歌单内歌曲列表页 (PAGE_SONGS): 车机返回键必须回到歌单列表网格 (2026-10-14 车主反馈)
+        if (lastPage == PAGE_SONGS || (btnBackToPlaylist != null && btnBackToPlaylist.getVisibility() == View.VISIBLE)) {
+            hideSoftKeyboard();
+            showPlaylistGridView();
+            return;
+        }
+
+        // 3. 正在播放大歌词页或设置页: 返回键退回歌单网格
+        if (lastPage == PAGE_NOW_PLAYING || lastPage == PAGE_SETTINGS) {
+            hideSoftKeyboard();
+            showPlaylistGridView();
+            return;
+        }
+
+        // 4. 处于顶层页面 (全部歌曲 / 我的歌单网格) 时才触发双击退出机制
         long now = System.currentTimeMillis();
         if (now - lastBackPressTime < 2000) {
             exitPlayerCompletely();
