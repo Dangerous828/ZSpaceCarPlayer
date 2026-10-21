@@ -141,4 +141,40 @@ public class NativeEngineGuardTest {
         assertFalse(NativeEngineGuard.hasFatalSignalForPid(null, OUR_PID));
         assertFalse(NativeEngineGuard.hasFatalExceptionForPid(null, OUR_PID));
     }
+
+    /**
+     * 无崩溃证据的异常退出要能分成「断电」和「被杀」(2026-10-21)。
+     *
+     * 现场：92 条 abnormal_exit 全是 confidence=low、logcat 为空。其中一条
+     * deviceUptimeMs=49112 而上次会话活了 7,571,421ms——设备才开机 49 秒，
+     * 上次进程却跑了 2 小时，唯一解释是整车熄火断电。这类不该当故障统计。
+     */
+    @Test
+    public void abnormalExitSplitsPowerLossFromKill() {
+        // 设备开机 49s，而上次心跳记的是开机 7,500s：中间重启过 = 断电
+        assertEquals(NativeEngineGuard.REASON_POWER_LOSS,
+                NativeEngineGuard.classifyAbnormalExit(49_112L, 7_500_000L));
+        // 设备一直开着，心跳停在 7,500s：进程单独没了 = 被杀
+        assertEquals(NativeEngineGuard.REASON_KILLED,
+                NativeEngineGuard.classifyAbnormalExit(28_800_000L, 7_500_000L));
+        // 没有心跳：判定不了，绝不能瞎猜成断电
+        assertEquals(NativeEngineGuard.REASON_UNKNOWN,
+                NativeEngineGuard.classifyAbnormalExit(49_112L, -1L));
+        assertEquals(NativeEngineGuard.REASON_UNKNOWN,
+                NativeEngineGuard.classifyAbnormalExit(-1L, 7_500_000L));
+    }
+
+    /** 心跳字段解析必须落在字段边界上，否则 {@code upMs} 会错配到别的键。 */
+    @Test
+    public void heartbeatFieldParsingRespectsBoundaries() {
+        String hb = "wallMs=1792501001718|upMs=49112|pid=4842|engine=v3|ctx_songId=abc";
+        assertEquals(1792501001718L, CrashMonitor.parseHeartbeatField(hb, "wallMs"));
+        assertEquals(49112L, CrashMonitor.parseHeartbeatField(hb, "upMs"));
+        assertEquals(4842L, CrashMonitor.parseHeartbeatField(hb, "pid"));
+        // 不是字段边界的子串不能命中
+        assertEquals(-1L, CrashMonitor.parseHeartbeatField(hb, "Ms"));
+        assertEquals(-1L, CrashMonitor.parseHeartbeatField(hb, "songId"));
+        assertEquals(-1L, CrashMonitor.parseHeartbeatField("wallMs=1|bootUpMs=99", "upMs"));
+        assertEquals(-1L, CrashMonitor.parseHeartbeatField(null, "upMs"));
+    }
 }

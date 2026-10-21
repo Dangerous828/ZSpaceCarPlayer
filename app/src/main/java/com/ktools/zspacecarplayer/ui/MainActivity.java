@@ -2775,6 +2775,11 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
      *  车机场景「退出=停」: 与 Home 键后台听歌是两条路径, 互不影响。 */
     private void exitPlayerCompletely() {
         exitCompletely = true;
+        // 先标正常退出：这一步会清掉会话标记与心跳文件。不做的话 onDestroy 里那次
+        // killProcess 会被下次启动判成 abnormal_exit，与真正的崩溃混在一起 (2026-10-21)
+        try {
+            com.ktools.zspacecarplayer.crash.CrashMonitor.markCleanExit();
+        } catch (Throwable ignored) {}
         if (isBound && playerService != null) {
             try {
                 playerService.stopAndReleaseAllAudioResources();

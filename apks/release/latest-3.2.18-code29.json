@@ -1,0 +1,12 @@
+{
+  "versionCode": 29,
+  "versionName": "3.2.18",
+  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.2.18-code29-debug.apk",
+  "fileName": "ZSpaceCarPlayer-3.2.18-code29-debug.apk",
+  "sizeBytes": 3153201,
+  "sha256": "8dbfec1bf3b97a83d83afe1c10cc695d2bf8172cb2787b0a20bafd9f73f1ec13",
+  "notes": "异常退出带上诊断日志与会话心跳，区分整车断电与进程被杀",
+  "minVersionCode": 1,
+  "mandatory": false,
+  "publishedAt": "2026-10-21"
+}

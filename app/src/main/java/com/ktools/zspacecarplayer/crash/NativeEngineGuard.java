@@ -35,6 +35,38 @@ public final class NativeEngineGuard {
                 || CrashReport.KIND_JAVA_CRASH.equals(previousSessionKind);
     }
 
+    /** 整车断电/熄火：设备重启过，非故障。 */
+    public static final String REASON_POWER_LOSS = "power_loss";
+    /** 进程被系统回收或被强停：设备没重启，进程没了。 */
+    public static final String REASON_KILLED = "killed";
+    /** 心跳缺失，判定不了。 */
+    public static final String REASON_UNKNOWN = "unknown";
+
+    /**
+     * 判定这次「异常退出」到底属于哪种形态 (2026-10-21)。
+     *
+     * <p>92 条 {@code abnormal_exit} 全是 {@code confidence=low}、logcat 为空，
+     * 混着三种完全不同的原因，必须分开看：
+     * <ul>
+     *   <li><b>断电</b>：设备重启过（开机时长比上次心跳还短）。这不是故障，是车机熄火。</li>
+     *   <li><b>被系统杀</b>：设备一直开着，但进程没了——LMK 回收或被强停。</li>
+     *   <li><b>不明</b>：心跳缺失或对不上。</li>
+     * </ul>
+     *
+     * @param deviceUptimeMs 本次启动时设备已开机时长；&lt;0 表示读不到
+     * @param heartbeatUpMs  心跳里记录的设备开机时长；&lt;0 表示心跳缺失或无该字段
+     */
+    public static String classifyAbnormalExit(long deviceUptimeMs, long heartbeatUpMs) {
+        if (deviceUptimeMs < 0L || heartbeatUpMs < 0L) {
+            return REASON_UNKNOWN;
+        }
+        if (deviceUptimeMs < heartbeatUpMs) {
+            // 设备开机时长比上次心跳时刻还短：中间重启过，进程是被整车一起断掉的
+            return REASON_POWER_LOSS;
+        }
+        return REASON_KILLED;
+    }
+
     /**
      * 更新后的连续崩溃计数：归因本次退出则 +1，否则清零。
      *

@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.os.Build;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
@@ -181,6 +182,8 @@ public final class CrashMonitor {
             Log.w(TAG, "inspectPreviousSession failed", t);
         }
         writeSessionMarker();
+        // 心跳必须在 inspectPreviousSession 读过旧心跳之后再启动，否则会立刻覆盖掉它
+        startHeartbeat();
         try {
             // 落盘滚动诊断日志: logcat 与内存面包屑都会随车机重启丢失, 关键事件必须落盘
             DiagLog.init(appContext.getFilesDir());
@@ -327,10 +330,145 @@ public final class CrashMonitor {
     }
 
     /**
+     * 会话心跳文件。每 {@link #HEARTBEAT_INTERVAL_MS} 覆盖写一次当前状态。
+     *
+     * <p>存在理由（2026-10-21）：92 条 {@code abnormal_exit} 全是 {@code confidence=low}、
+     * logcat 为空——因为它们大多是<b>整车断电</b>，而不是崩溃，crash 缓冲区早被清了。
+     * 这种情况唯一还能留下的证据，就是断电前最后一次心跳：它说明死的那一刻在播什么、
+     * 缓冲还有多少、以及进程活了多久。有了它才能把「断电」「被系统杀」「真崩溃」分开。
+     */
+    private File heartbeatFile() {
+        return new File(appContext.getFilesDir(), HEARTBEAT_FILE);
+    }
+
+    private static final String HEARTBEAT_FILE = "crash_heartbeat";
+    /** 心跳间隔：车机内存紧张，太频繁会白白唤醒 CPU；60s 足够定位到「死前在干什么」。 */
+    private static final long HEARTBEAT_INTERVAL_MS = 60_000L;
+
+    /**
+     * 心跳跑在自己的 HandlerThread 上，不占主线程：写文件带 {@code sync()}，
+     * 落在主线程会直接变成 UI 卡顿——那正是本类要抓的问题，绝不能自己制造一个。
+     */
+    private Handler heartbeatHandler;
+
+    private final Runnable heartbeatTask = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                writeHeartbeat();
+            } catch (Throwable t) {
+                Log.w(TAG, "heartbeat write failed", t);
+            }
+            Handler h = heartbeatHandler;
+            if (h != null) {
+                h.removeCallbacks(this);
+                h.postDelayed(this, HEARTBEAT_INTERVAL_MS);
+            }
+        }
+    };
+
+    /** 启动心跳：立刻写一次（拿到会话起点），之后按间隔滚动覆盖。 */
+    private void startHeartbeat() {
+        try {
+            HandlerThread t = new HandlerThread("CrashHeartbeat");
+            t.setDaemon(true);
+            t.start();
+            heartbeatHandler = new Handler(t.getLooper());
+            heartbeatHandler.post(heartbeatTask);
+        } catch (Throwable t) {
+            Log.w(TAG, "heartbeat start failed", t);
+            heartbeatHandler = null;
+        }
+    }
+
+    private void stopHeartbeat() {
+        Handler h = heartbeatHandler;
+        heartbeatHandler = null;
+        if (h != null) {
+            h.removeCallbacks(heartbeatTask);
+            h.getLooper().quit();
+        }
+    }
+
+    /**
+     * 写一次心跳快照。内容包括进程存活时长、活跃引擎、当前曲目与播放进度、
+     * 以及调用方通过 {@link #putContext} 攒下的关键上下文（缓冲/流状态）。
+     *
+     * <p>用 {@code getFD().sync()} 强制落盘：断电场景下内核页缓存里的内容会一起丢，
+     * 不 sync 等于没写。
+     */
+    private void writeHeartbeat() {
+        StringBuilder sb = new StringBuilder(512);
+        sb.append("wallMs=").append(System.currentTimeMillis());
+        sb.append("|upMs=").append(android.os.SystemClock.elapsedRealtime());
+        sb.append("|pid=").append(android.os.Process.myPid());
+        sb.append("|engine=").append(engineField());
+        synchronized (sContext) {
+            for (Map.Entry<String, String> e : sContext.entrySet()) {
+                String k = e.getKey();
+                String v = e.getValue();
+                if (k == null || v == null) {
+                    continue;
+                }
+                sb.append('|').append(k).append('=').append(v);
+            }
+        }
+        FileOutputStream fos = null;
+        try {
+            fos = new FileOutputStream(heartbeatFile());
+            Writer w = new OutputStreamWriter(fos, "UTF-8");
+            w.write(sb.toString());
+            w.flush();
+            fos.getFD().sync();
+        } catch (Throwable t) {
+            Log.w(TAG, "write heartbeat failed", t);
+        } finally {
+            if (fos != null) {
+                try { fos.close(); } catch (Throwable ignored) {}
+            }
+        }
+    }
+
+    /** 读上次会话最后心跳（异常退出归因用）。无心跳文件返回 null。 */
+    private String readLastHeartbeat() {
+        return readTextFile(heartbeatFile(), 4096);
+    }
+
+    /** 正常收尾时清掉心跳，避免下次启动把「上上次」的陈旧心跳当成本次的现场。 */
+    private void deleteHeartbeat() {
+        File f = heartbeatFile();
+        if (f.exists() && !f.delete()) {
+            Log.w(TAG, "delete heartbeat failed");
+        }
+    }
+
+    /**
      * 上次进程没走正常路径（native 崩溃 / 被杀 / Java handler 自己失败）。
      * 靠 logcat 的 crash 缓冲区定性——该缓冲区跨进程重启保留，
      * "Fatal signal 11 (SIGSEGV)" 这类行就是 native 崩溃的铁证。
      */
+    /**
+     * 用户主动「完全退出」（双击返回→杀进程）时调用：清掉会话标记与心跳。
+     *
+     * <p>不调用的话，下次启动必然把这次退出判成 {@code abnormal_exit}——进程确实没走
+     * 正常结束路径（是 killProcess），但那是<b>用户要求的</b>，不是故障。2026-10-21
+     * 复盘 92 条 {@code abnormal_exit} 发现大量是这种「自己退出自己」，把真故障淹掉了。
+     */
+    public static void markCleanExit() {
+        CrashMonitor m = sInstance;
+        if (m == null) {
+            return;
+        }
+        try {
+            m.stopHeartbeat();
+            m.deleteHeartbeat();
+            m.deleteSessionMarker();
+            Log.i(TAG, "clean exit marked, session marker + heartbeat removed");
+        } catch (Throwable t) {
+            Log.w(TAG, "markCleanExit failed", t);
+        }
+    }
+
     private void inspectPreviousSession() {
         File marker = markerFile();
         if (!marker.exists()) {
@@ -387,6 +525,27 @@ public final class CrashMonitor {
         report.put("previousSessionMs", previousSessionMs);
         report.put("previousEngineV3", previousV3Active);
         report.put("evidenceConfidence", confidence);
+        // 落盘诊断日志：logcat 是空的（整车断电后 crash 缓冲区已清），而 DiagLog 跨重启保留，
+        // 是这类现场唯一能说明「死之前那几分钟在干什么」的证据 (2026-10-21)
+        String diag = DiagLog.content();
+        if (diag != null && diag.trim().length() > 0) {
+            report.put("diagLog", diag);
+        }
+        // 上次会话最后心跳：区分「整车断电」与「进程被系统杀掉」
+        String lastBeat = readLastHeartbeat();
+        if (lastBeat != null && lastBeat.trim().length() > 0) {
+            report.put("lastHeartbeat", lastBeat.trim());
+        }
+        // 无崩溃证据时，用心跳把「断电 / 被杀」分开——车机熄火不是故障，
+        // 把它当故障统计只会把真正的崩溃淹掉 (2026-10-21)
+        String exitReason = null;
+        if (CrashReport.KIND_ABNORMAL_EXIT.equals(kind)) {
+            long hbUpMs = parseHeartbeatField(lastBeat, "upMs");
+            exitReason = NativeEngineGuard.classifyAbnormalExit(
+                    SystemClock.elapsedRealtime(), hbUpMs);
+            report.put("exitReason", exitReason);
+            report.put("heartbeatUpMs", hbUpMs);
+        }
         report.setLogcat(logcat);
         // 只 dump 当前线程：这里抓不到上次的现场 (新进程的栈)，全线程遍历却要占住启动主线程
         report.setThreadDump(CrashReport.dumpCurrentThreadStack());
@@ -835,6 +994,37 @@ public final class CrashMonitor {
             return readBounded(in, maxBytes);
         } catch (Throwable t) {
             return null;
+        }
+    }
+
+    /**
+     * 从心跳文本里取一个字段值（格式 {@code a=1|b=2|c=3}）。
+     *
+     * @return 字段值；心跳为 null 或缺该字段时返回 -1（判定侧把 -1 当作"无从判断"）
+     */
+    static long parseHeartbeatField(String heartbeat, String key) {
+        if (heartbeat == null || key == null || key.length() == 0) {
+            return -1L;
+        }
+        String needle = key + "=";
+        int from = 0;
+        while (true) {
+            int at = heartbeat.indexOf(needle, from);
+            if (at < 0) {
+                return -1L;
+            }
+            // 必须落在字段边界（开头或 '|' 之后），否则 "upMs" 会错配到 "bootUpMs"
+            if (at == 0 || heartbeat.charAt(at - 1) == '|') {
+                int start = at + needle.length();
+                int end = heartbeat.indexOf('|', start);
+                String raw = (end < 0 ? heartbeat.substring(start) : heartbeat.substring(start, end)).trim();
+                try {
+                    return Long.parseLong(raw);
+                } catch (NumberFormatException e) {
+                    return -1L;
+                }
+            }
+            from = at + needle.length();
         }
     }
 }
