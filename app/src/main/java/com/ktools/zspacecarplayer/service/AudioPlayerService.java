@@ -874,19 +874,33 @@ public class AudioPlayerService extends Service {
     }
 
     /**
-     * 领先秒数：优先使用环形缓冲真实持有的有效字节数 / 所需字节率计算 (2026-10-14 精确化)。
-     * 避免因百分比整型相减的量化误差在 8MB 满窗背压时虚假算出 0s~1s 并触发伪卡顿提示。
-     * 若真实字节数或速率不可用，回退到高精度毫秒推算。
+     * 领先秒数 = 下载头领先播放头多少秒。
+     *
+     * <p>两条口径都算一遍，取<b>较小</b>的那个（2026-10-21 真车复盘）：
+     * <ul>
+     *   <li>按字节：{@code 窗口内字节 / 所需速率}。窗口是 {@code bufEnd - bufStart}，
+     *       <b>含已经读过的部分</b>——回读落在窗口中段时它会把已读数据也算成"待播"，
+     *       报出 226s 这种虚高值。它只是上限，不能单独当结论。</li>
+     *   <li>按进度：(percent - playedPct) × 时长。整型百分比在满窗背压时会量化成 0s，
+     *       所以也不能单独用。</li>
+     * </ul>
+     * 取小者：哪个口径说"快没了"就按它算，宁可保守地显示缓冲不足，也不要拿虚高的
+     * 领先量去放行预取抢带宽。
      */
-    private long computeLeadSeconds(int percent, int currentMs, int totalMs, long bufferedBytes, long requiredRate) {
+    private long computeLeadSeconds(int percent, int currentMs, int totalMs,
+                                    long bufferedBytes, long requiredRate) {
+        long byBytes = -1L;
         if (bufferedBytes > 0L && requiredRate > 0L) {
-            return (long) BufferingPolicy.calculateLeadSeconds(bufferedBytes, 0L, requiredRate);
+            byBytes = (long) BufferingPolicy.calculateLeadSeconds(bufferedBytes, 0L, requiredRate);
         }
-        if (percent < 0 || totalMs <= 0) return -1L;
-        long playedMs = Math.max(0, currentMs);
-        long downloadedMs = (long) percent * (long) totalMs / 100L;
-        long leadMs = Math.max(0L, downloadedMs - playedMs);
-        return leadMs / 1000L;
+        long byProgress = -1L;
+        if (percent >= 0 && totalMs > 0) {
+            long downloadedMs = (long) percent * (long) totalMs / 100L;
+            byProgress = Math.max(0L, downloadedMs - Math.max(0, currentMs)) / 1000L;
+        }
+        if (byBytes < 0L) return byProgress;
+        if (byProgress < 0L) return byBytes;
+        return Math.min(byBytes, byProgress);
     }
 
     /**

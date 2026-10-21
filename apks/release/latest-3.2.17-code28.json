@@ -1,0 +1,12 @@
+{
+  "versionCode": 28,
+  "versionName": "3.2.17",
+  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.2.17-code28-debug.apk",
+  "fileName": "ZSpaceCarPlayer-3.2.17-code28-debug.apk",
+  "sizeBytes": 3151140,
+  "sha256": "95e4a82314858d3f2cff25bf91e54007ed13dd6e8a8131f84ba97f016d8eabc5",
+  "notes": "修复饥饿误判导致预取反复作废，领先秒数改取两条口径较小值",
+  "minVersionCode": 1,
+  "mandatory": false,
+  "publishedAt": "2026-10-21"
+}

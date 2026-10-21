@@ -192,4 +192,26 @@ public class StreamStarvationTest {
         assertFalse("时钟回拨不认",
                 BufferedHttpSource.shouldKeepFillingWhileIdle(now, now + 1_000L, true, true, grace));
     }
+
+    /**
+     * 「对外报告正在挨饿」必须带持续时间门槛 (2026-10-21 真车复盘)。
+     *
+     * 现场：{@code lead=45s、buffering=false} 的健康状态里，预取每次刚发起就被
+     * {@code starving=true} 作废，下载线程刚要提速就被掐断。原因是原生解码器读得很细，
+     * 两块数据之间本来就会瞬时追到窗口尾，而旧实现只要 {@code starvedSinceMs} 非负就报饥饿。
+     */
+    @Test
+    public void transientCatchUpIsNotReportedAsStarving() {
+        long now = 500_000L;
+        assertFalse("读者手上有数据：不饿",
+                BufferedHttpSource.starvingVerdict(false, -1L, now));
+        assertFalse("刚追上窗口尾 1ms：只是正常衔接，不能报饿",
+                BufferedHttpSource.starvingVerdict(false, now, now));
+        assertFalse("持续 999ms 仍未到门槛",
+                BufferedHttpSource.starvingVerdict(false, now - 999L, now));
+        assertTrue("持续到门槛才算真的没数据可读",
+                BufferedHttpSource.starvingVerdict(false, now - BufferedHttpSource.STARVE_VISIBLE_MS, now));
+        assertTrue("已进 fatal 一律报饿",
+                BufferedHttpSource.starvingVerdict(true, -1L, now));
+    }
 }

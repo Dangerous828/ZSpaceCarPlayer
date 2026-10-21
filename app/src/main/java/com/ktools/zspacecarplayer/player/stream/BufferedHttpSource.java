@@ -63,6 +63,12 @@ public class BufferedHttpSource {
      */
     private static final long STARVE_WINDOW_MS = 20_000L;
     private static final long STARVE_LIMIT_MS = 18_000L;
+    /**
+     * 对外报告「正在挨饿」的最短持续时间（ms）。
+     * 低于这个长度只是解码器在两块数据之间瞬时追到窗口尾，不代表供给断了；
+     * 拿它当饥饿会让预取和提速被无谓打断（2026-10-21 真车复盘）。
+     */
+    static final long STARVE_VISIBLE_MS = 1_000L;
     /** 连续饥饿判定次数上限：前几次只强制重连续传（窗口不丢），超过才升级 fatal 让上层报错 */
     private static final int MAX_STARVE_STALLS = 2;
     private static final int CONNECT_TIMEOUT_MS = 10_000;
@@ -821,13 +827,37 @@ public class BufferedHttpSource {
     }
 
     /**
-     * 当前是否处于「饥饿 / 断流」：已进 fatal，或此刻有读者停在窗口尾等下载推进。
+     * 当前是否处于「饥饿 / 断流」：已进 fatal，或读者已经<b>持续</b>等不到数据。
      * 预取让位判定用它——当前曲一旦饥饿就立即暂停 / 放弃下一首预取（2026-09-12 缓冲/预取）。
+     *
+     * <p>必须带持续时间门槛（2026-10-21 真车复盘）：{@code starvedSinceMs} 只要读者追上
+     * {@code bufEnd} 就会被置位，而原生解码器读得很细，两块数据之间本来就会瞬时追到窗口尾。
+     * 旧实现只要该字段非负就报饥饿，于是出现「lead=45s、buffering=false 却 starving=true」
+     * 的自相矛盾现场：预取刚发起就被作废，下载线程刚要提速就被掐断，播放随之发卡。
+     * 只有持续到 {@link #STARVE_VISIBLE_MS} 才算真的没数据可读。
      */
     public boolean isStarving() {
         synchronized (lock) {
-            return fatalError != null || starvedSinceMs >= 0;
+            return starvingVerdict(fatalError != null, starvedSinceMs,
+                    SystemClock.elapsedRealtime());
         }
+    }
+
+    /**
+     * 「是否正在挨饿」的纯判定（JVM 可测；系统时钟在单测里恒为 0，不能直接读）。
+     *
+     * @param hasFatal       是否已进不可恢复错误
+     * @param starvedSinceMs 当前这段连续挨饿的起点；&lt;0 = 读者手上有数据
+     * @param nowMs          当前时刻
+     */
+    static boolean starvingVerdict(boolean hasFatal, long starvedSinceMs, long nowMs) {
+        if (hasFatal) {
+            return true;
+        }
+        if (starvedSinceMs < 0) {
+            return false;
+        }
+        return nowMs - starvedSinceMs >= STARVE_VISIBLE_MS;
     }
 
     /**
