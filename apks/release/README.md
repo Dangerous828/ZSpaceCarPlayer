@@ -630,7 +630,7 @@ Debug 签名与车机现用 OTA 包一致。`clean :app:testDebugUnitTest :app:a
 
 发布与验收：发布前将 `latest.json` 备份为 `latest.json.bak-20261023-vc33`，再原子切换 versionCode 34 清单。按清单 `apkUrl` 实下载 HTTP 200，3,156,430 B；本地归档、NAS 静态根、公网下载和清单 SHA-256 四方一致：`8e38e60aa83529f68944cc4cf3513a0364184153daae5553868e6cbe488088b1`。
 
-## vc35 = 3.2.24 — 包已验收，待 OTA 切换
+## vc35 = 3.2.24 — 已发布（2026-10-23）
 
 包：`ZSpaceCarPlayer-3.2.24-code35-debug.apk`，3,156,173 B，
 `sha256=6fb630bc470bd6cb958fc8827d4c299bc5570d874b850e758812d70556b9db69`。
@@ -638,3 +638,5 @@ Debug 签名与车机现用 OTA 包一致。`clean :app:testDebugUnitTest :app:a
 Debug 签名与车机现用 OTA 包一致。`clean :app:testDebugUnitTest :app:assembleDebug`：471 项测试 0 失败。
 
 本版不再生成无流派元数据歌曲的独立分类卡；这些歌曲仍在“全部歌曲”中，并通过真实文件夹分类访问。旧缓存里保存的“未分类”类别名会退回全库列表。
+
+发布与验收：发布前将线上 `latest.json` 备份为 `latest.json.bak-20261023-vc34`，再原子切换 versionCode 35 清单。按清单 `apkUrl` 实下载 HTTP 200，3,156,173 B；本地归档、NAS 静态根、公网下载和清单 SHA-256 四方一致：`6fb630bc470bd6cb958fc8827d4c299bc5570d874b850e758812d70556b9db69`。
