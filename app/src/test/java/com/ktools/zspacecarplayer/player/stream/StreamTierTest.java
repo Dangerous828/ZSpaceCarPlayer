@@ -14,27 +14,29 @@ import org.junit.Test;
 public class StreamTierTest {
 
     @Test
-    public void onlyTwoTiersAndNeitherIsAutomatic() {
-        assertEquals("默认必须是无损：降级是人的权利，不是默认行为",
-                StreamTier.LOSSLESS, StreamTier.DEFAULT);
-        assertEquals("无损 → 流畅", StreamTier.SMOOTH, StreamTier.next(StreamTier.LOSSLESS));
-        assertEquals("流畅 → 无损（两档循环，没有第三档『自动』）",
-                StreamTier.LOSSLESS, StreamTier.next(StreamTier.SMOOTH));
-        assertEquals("越界值一律钳回无损（旧版本残留/手改的偏好不能解锁不存在的路径）",
-                StreamTier.LOSSLESS, StreamTier.clamp(7));
+    public void threeManualTiersKeepExistingPreferenceValues() {
+        assertEquals("默认必须是无损", StreamTier.LOSSLESS, StreamTier.DEFAULT);
+        assertEquals("无损 → 高品", StreamTier.HIGH, StreamTier.next(StreamTier.LOSSLESS));
+        assertEquals("高品 → 流畅", StreamTier.SMOOTH, StreamTier.next(StreamTier.HIGH));
+        assertEquals("流畅 → 无损", StreamTier.LOSSLESS, StreamTier.next(StreamTier.SMOOTH));
+        assertEquals("旧版本偏好 1 仍代表流畅", StreamTier.SMOOTH, StreamTier.clamp(1));
+        assertEquals(StreamTier.HIGH, StreamTier.clamp(StreamTier.HIGH));
+        assertEquals("未知值回到无损", StreamTier.LOSSLESS, StreamTier.clamp(7));
         assertEquals(StreamTier.LOSSLESS, StreamTier.clamp(-3));
-        assertEquals(StreamTier.SMOOTH, StreamTier.clamp(StreamTier.SMOOTH));
     }
 
-    /** 文案里的码率必须是实测值。写 128 就是假广告，也不许出现"自动"这种承诺。 */
     @Test
-    public void labelsTellMeasuredBitrateNotTheRequestParam() {
-        assertFalse("流畅档文案不得谎报 128", StreamTier.describe(StreamTier.SMOOTH).contains("128"));
-        assertTrue("必须写实测的 256kbps", StreamTier.describe(StreamTier.SMOOTH).contains("256"));
+    public void labelsDescribeMeasuredBitratesAndNeverClaimAutomaticSwitching() {
+        assertFalse(StreamTier.describe(StreamTier.SMOOTH).contains("128"));
+        assertTrue("流畅必须写实测的 256kbps", StreamTier.describe(StreamTier.SMOOTH).contains("256"));
+        assertTrue("高品档必须标出 AAC 目标码率", StreamTier.describe(StreamTier.HIGH).contains("512kbps"));
+        assertTrue("高品档预估带宽按 512kbps 目标计算", StreamTier.describe(StreamTier.HIGH).contains("65KB/s"));
         assertTrue(StreamTier.describe(StreamTier.LOSSLESS).contains("100~151"));
         assertFalse(StreamTier.label(StreamTier.LOSSLESS).contains("自动"));
+        assertFalse(StreamTier.label(StreamTier.HIGH).contains("自动"));
         assertFalse(StreamTier.label(StreamTier.SMOOTH).contains("自动"));
         assertEquals("无损", StreamTier.label(StreamTier.LOSSLESS));
+        assertEquals("高品", StreamTier.label(StreamTier.HIGH));
         assertEquals("流畅", StreamTier.label(StreamTier.SMOOTH));
     }
 }

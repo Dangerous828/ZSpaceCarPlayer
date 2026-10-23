@@ -32,8 +32,10 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -61,7 +63,10 @@ public class JellyfinApiClient {
     private static final String CLIENT_NAME = "ZSpaceCarPlayer";
     private static final String DEVICE_NAME = "Geely-iMX6-Car";
     private static final String DEVICE_ID = "CAR-IMX6-001";
-    private static final String CLIENT_VERSION = "3.2.18";
+    private static final String CLIENT_VERSION = "3.2.23";
+    /** NAS 预转 AAC 库，和只读原音乐库位于不同根路径，防止用户曲库出现副本。 */
+    private static final String HIGH_QUALITY_ROOT = "/config/car-hq/";
+    private static final String MUSIC_ROOT = "/media/music/";
 
     /** 鉴权持久化统一走这里, Service 后台静默登录与 Activity 必须读写同一份凭据 */
     public static final String PREF_NAME = "zspace_car_player_prefs";
@@ -718,14 +723,33 @@ public class JellyfinApiClient {
                 + "&static=false&maxStreamingBitrate=" + DEGRADED_TARGET_BITRATE;
     }
 
+    public String getHighQualityStreamUrl(String itemId) {
+        if (itemId == null || itemId.isEmpty()) return "";
+        if (accessToken == null || accessToken.isEmpty()) return "";
+        return serverUrl + "/Audio/" + itemId + "/stream.m4a?api_key=" + accessToken + "&static=true";
+    }
+
     /**
-     * 按<b>车主手选的档位</b>取出播 URL (2026-10-08 T1 重审 L2)。
-     *
-     * <p>无损档一律沿用该曲入库时定下的那条（原件直传或服务端 FLAC），流畅档才换成转码 URL；
-     * 取不到时退回无损，绝不因为档位拼装失败而播不出声。预取与起播都走这里，两者必须同一条
-     * URL——否则预取命中不了，白下一次（见 {@code AudioPlayerService#resolvePlayUrl}）。
+     * 按车主手选的档位取 URL。高品档直接静态播放预转 AAC；副本尚未索引时安全回退到流畅档。
      */
     public String getStreamUrlForTier(String itemId, String cachedStreamUrl, int tier) {
+        return getStreamUrlForTier(itemId, cachedStreamUrl, tier, "");
+    }
+
+    public String getStreamUrlForTier(String itemId, String cachedStreamUrl, int tier,
+                                      String highQualityItemId) {
+        if (tier == com.ktools.zspacecarplayer.player.stream.StreamTier.HIGH) {
+            if (highQualityItemId != null && !highQualityItemId.isEmpty()) {
+                if (highQualityItemId.equals(itemId)) {
+                    return getStreamUrlForSong(itemId, cachedStreamUrl);
+                }
+                String highQuality = getHighQualityStreamUrl(highQualityItemId);
+                if (highQuality != null && highQuality.length() > 0) return highQuality;
+            }
+            // 转换/扫描未完成或当前未命中副本时，不冒险拉大码率原件。
+            String fallback = getDegradedStreamUrl(itemId);
+            if (fallback != null && fallback.length() > 0) return fallback;
+        }
         if (tier == com.ktools.zspacecarplayer.player.stream.StreamTier.SMOOTH) {
             String degraded = getDegradedStreamUrl(itemId);
             if (degraded != null && degraded.length() > 0) {
@@ -781,6 +805,8 @@ public class JellyfinApiClient {
             @Override
             public void run() {
                 final Map<String, SongItem> uniqueSongs = new LinkedHashMap<String, SongItem>();
+                final Map<String, SongItem> originalSongsByKey = new HashMap<String, SongItem>();
+                final Map<String, String> highQualityIdsByKey = new HashMap<String, String>();
                 int page = 0;
                 try {
                     int start = 0;
@@ -837,9 +863,27 @@ public class JellyfinApiClient {
                             if (items != null) {
                                 for (JsonElement el : items) {
                                     JsonObject itemObj = el.getAsJsonObject();
+                                    String itemPath = itemObj.has("Path") && !itemObj.get("Path").isJsonNull()
+                                            ? itemObj.get("Path").getAsString() : "";
+                                    String highKey = audioPairKey(itemPath, HIGH_QUALITY_ROOT);
+                                    if (highKey != null) {
+                                        if (itemObj.has("Id") && !itemObj.get("Id").isJsonNull()) {
+                                            highQualityIdsByKey.put(highKey, itemObj.get("Id").getAsString());
+                                        }
+                                        continue;
+                                    }
+
                                     SongItem song = parseSongItem(itemObj);
                                     if (song != null) {
                                         uniqueSongs.put(song.getId(), song);
+                                        String sourceKey = audioPairKey(itemPath, MUSIC_ROOT);
+                                        if (sourceKey != null) {
+                                            originalSongsByKey.put(sourceKey, song);
+                                            if (!isLosslessAudioPath(itemPath)) {
+                                                // 已经是有损/压缩格式的原曲直接作为高品档来源，无需重复转码。
+                                                song.setHighQualityItemId(song.getId());
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -854,6 +898,16 @@ public class JellyfinApiClient {
                         if (total < 0 && pageCount < PAGE_SIZE) break;
                     }
 
+                    int mappedHighQuality = 0;
+                    for (Map.Entry<String, String> entry : highQualityIdsByKey.entrySet()) {
+                        SongItem original = originalSongsByKey.get(entry.getKey());
+                        if (original != null) {
+                            original.setHighQualityItemId(entry.getValue());
+                            mappedHighQuality++;
+                        }
+                    }
+                    Log.i(TAG, "fetchMusicItems HQ mapping: copies=" + highQualityIdsByKey.size()
+                            + " matched=" + mappedHighQuality);
                     final List<SongItem> songList = new ArrayList<SongItem>(uniqueSongs.values());
                     Log.i(TAG, "fetchMusicItems done: songs=" + songList.size()
                             + " pages=" + page + " interactive=" + interactive);
@@ -923,6 +977,26 @@ public class JellyfinApiClient {
     /** 每次整轮刷新开始前清零。 */
     void resetSkippedVideoItems() {
         skippedVideoItems = 0;
+    }
+
+    /** 返回某个库根下音频路径的配对键；同名原曲与 AAC 副本仅扩展名不同。 */
+    static String audioPairKey(String path, String libraryRoot) {
+        if (path == null || libraryRoot == null) return null;
+        String normalized = path.replace('\\', '/');
+        String root = libraryRoot.replace('\\', '/');
+        if (!root.endsWith("/")) root += "/";
+        if (!normalized.startsWith(root)) return null;
+        String relative = normalized.substring(root.length());
+        int slash = relative.lastIndexOf('/');
+        int dot = relative.lastIndexOf('.');
+        if (dot <= slash + 1 || dot == relative.length() - 1) return null;
+        return relative.substring(0, dot).toLowerCase(Locale.US);
+    }
+
+    private static boolean isLosslessAudioPath(String path) {
+        if (path == null) return false;
+        String lower = path.toLowerCase(Locale.US);
+        return lower.endsWith(".flac") || lower.endsWith(".wav");
     }
 
     /** 包内可见: 传输方式裁定是否正确落到 SongItem 上, 由单测端到端钉住 (见 StreamTransportWiringTest) */

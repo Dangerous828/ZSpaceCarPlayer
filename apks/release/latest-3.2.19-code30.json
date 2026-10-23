@@ -1,0 +1,12 @@
+{
+  "versionCode": 30,
+  "versionName": "3.2.19",
+  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.2.19-code30-debug.apk",
+  "fileName": "ZSpaceCarPlayer-3.2.19-code30-debug.apk",
+  "sizeBytes": 3153441,
+  "sha256": "2f94096fac074c39f2c3e4d0be334a056bdb227c607c3369f645deb3cc936a62",
+  "notes": "断点恢复不再白扔已下载数据，首字节耐心放到8秒",
+  "minVersionCode": 1,
+  "mandatory": false,
+  "publishedAt": "2026-10-21"
+}

@@ -15,6 +15,22 @@ public class CategoryItem implements Serializable {
         this.songCount = songCount;
     }
 
+    /** 缺少流派元数据时用明确标签展示，不把它伪装成实体流派名。 */
+    public static String displayGenreName(String genre) {
+        if (genre == null || genre.trim().isEmpty() || "未分类".equals(genre.trim())) {
+            return "无流派标签";
+        }
+        return genre;
+    }
+
+    /** 按展示标题匹配原始流派值。 */
+    public static boolean matchesGenreName(String categoryName, String genre) {
+        if ("无流派标签".equals(categoryName) || "未分类".equals(categoryName)) {
+            return genre == null || genre.trim().isEmpty() || "未分类".equals(genre.trim());
+        }
+        return categoryName != null && categoryName.equals(genre);
+    }
+
     public String getId() {
         return id;
     }

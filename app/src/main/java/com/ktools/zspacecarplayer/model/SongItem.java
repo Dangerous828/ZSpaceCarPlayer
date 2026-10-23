@@ -11,6 +11,8 @@ public class SongItem implements Serializable {
     private String folderName;
     private long durationMs;
     private String streamUrl;
+    /** 512kbps AAC 高品档对应的 Jellyfin item id；没有副本时为空。 */
+    private String highQualityItemId = "";
     private boolean isFavorite;
     private int playCount;
 
@@ -80,6 +82,13 @@ public class SongItem implements Serializable {
         this.folderName = folderName;
     }
 
+    /** 是否是实际目录名；未分类占位值只表示 Jellyfin/缓存没有路径信息。 */
+    public static boolean hasConcreteFolderName(String folderName) {
+        if (folderName == null) return false;
+        String value = folderName.trim();
+        return !value.isEmpty() && !"未分类文件夹".equals(value) && !"未分类".equals(value);
+    }
+
     public long getDurationMs() {
         return durationMs;
     }
@@ -94,6 +103,14 @@ public class SongItem implements Serializable {
 
     public void setStreamUrl(String streamUrl) {
         this.streamUrl = streamUrl != null ? streamUrl : "";
+    }
+
+    public String getHighQualityItemId() {
+        return highQualityItemId != null ? highQualityItemId : "";
+    }
+
+    public void setHighQualityItemId(String itemId) {
+        this.highQualityItemId = itemId != null ? itemId : "";
     }
 
     public boolean isFavorite() {

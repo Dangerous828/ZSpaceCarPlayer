@@ -79,6 +79,13 @@ public class MediaButtonReceiver extends BroadcastReceiver {
                 return ACTION_NEXT;
             case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
                 return ACTION_PREVIOUS;
+            // 车机方向盘/面板上的左右键常常不映射成 MEDIA_NEXT/PREVIOUS，而是原样发方向键
+            // (2026-10-21 车主反馈「点左键打开了 QQ 音乐」)。这里一并认下，避免同一颗键
+            // 落到别的播放器手里。只在媒体键或前台窗口拦截时生效，不影响列表里的方向键导航。
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                return ACTION_NEXT;
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                return ACTION_PREVIOUS;
             default:
                 return null;
         }

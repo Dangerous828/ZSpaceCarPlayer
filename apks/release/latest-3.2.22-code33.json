@@ -1,0 +1,12 @@
+{
+  "versionCode": 33,
+  "versionName": "3.2.22",
+  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.2.22-code33-debug.apk",
+  "fileName": "ZSpaceCarPlayer-3.2.22-code33-debug.apk",
+  "sizeBytes": 3154141,
+  "sha256": "a70d4cc39d0af1a53cfa09bf10c33739174cfe9e3191313ea3b7fd7efbf982e5",
+  "notes": "断点恢复先读磁盘缓存，不再让已下载的内容白走网络",
+  "minVersionCode": 1,
+  "mandatory": false,
+  "publishedAt": "2026-10-21"
+}

@@ -6,6 +6,15 @@ import org.junit.Test;
 public class SongItemTest {
 
     @Test
+    public void uncategorizedFolderSentinelsAreNotConcreteFolders() {
+        Assert.assertFalse(SongItem.hasConcreteFolderName("未分类文件夹"));
+        Assert.assertFalse(SongItem.hasConcreteFolderName("未分类"));
+        Assert.assertFalse(SongItem.hasConcreteFolderName("  "));
+        Assert.assertFalse(SongItem.hasConcreteFolderName(null));
+        Assert.assertTrue(SongItem.hasConcreteFolderName("欧美经典音乐"));
+    }
+
+    @Test
     public void testSongItemEqualsAndHashCode() {
         SongItem song1 = new SongItem("id_101", "晴天", "周杰伦", "叶惠美", "流行", 269000, "url1");
         SongItem song2 = new SongItem("id_101", "晴天 (更新版)", "周杰伦", "叶惠美", "流行", 269000, "url2");

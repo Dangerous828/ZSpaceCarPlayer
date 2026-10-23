@@ -1,0 +1,12 @@
+{
+  "versionCode": 34,
+  "versionName": "3.2.23",
+  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.2.23-code34-debug.apk",
+  "fileName": "ZSpaceCarPlayer-3.2.23-code34-debug.apk",
+  "sizeBytes": 3156430,
+  "sha256": "8e38e60aa83529f68944cc4cf3513a0364184153daae5553868e6cbe488088b1",
+  "notes": "新增 512kbps AAC 高品档，无损原件保留",
+  "minVersionCode": 1,
+  "mandatory": false,
+  "publishedAt": "2026-10-23"
+}

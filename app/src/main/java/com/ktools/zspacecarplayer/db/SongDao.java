@@ -96,6 +96,7 @@ public class SongDao {
                         cv.put("folder_name", song.getFolderName());
                         cv.put("duration_ms", song.getDurationMs());
                         cv.put("stream_url", song.getStreamUrl());
+                        cv.put("high_quality_item_id", song.getHighQualityItemId());
                         cv.put("is_favorite", song.isFavorite() ? 1 : 0);
 
                         Integer existingPlayCount = playCountMap.get(song.getId());
@@ -309,7 +310,7 @@ public class SongDao {
         String album = TextRepair.repair(cursor.getString(cursor.getColumnIndexOrThrow("album")));
         String genre = TextRepair.repair(cursor.getString(cursor.getColumnIndexOrThrow("genre")));
 
-        String folderName = "未分类";
+        String folderName = "未分类文件夹";
         int folderIdx = cursor.getColumnIndex("folder_name");
         if (folderIdx != -1 && !cursor.isNull(folderIdx)) {
             folderName = TextRepair.repair(cursor.getString(folderIdx));
@@ -320,6 +321,10 @@ public class SongDao {
         boolean isFav = cursor.getInt(cursor.getColumnIndexOrThrow("is_favorite")) == 1;
 
         SongItem song = new SongItem(id, name, artist, album, genre, folderName, durationMs, streamUrl, isFav);
+        int highQualityIdx = cursor.getColumnIndex("high_quality_item_id");
+        if (highQualityIdx != -1 && !cursor.isNull(highQualityIdx)) {
+            song.setHighQualityItemId(cursor.getString(highQualityIdx));
+        }
         song.setPlayCount(cursor.getInt(cursor.getColumnIndexOrThrow("play_count")));
         return song;
     }

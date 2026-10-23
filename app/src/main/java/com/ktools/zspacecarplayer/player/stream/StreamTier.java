@@ -20,10 +20,12 @@ package com.ktools.zspacecarplayer.player.stream;
  */
 public final class StreamTier {
 
-    /** 原件直传：入库时定的那条 URL（无损 FLAC/WAV/mp3 原件），音质最好、要带宽最多。 */
+    /** 原件直传：无损 FLAC/WAV 原件，音质最好、要带宽最多。 */
     public static final int LOSSLESS = 0;
-    /** 流畅：服务端转码 mp3，实测固定 256kbps = 31.3KB/s。 */
+    /** 服务端转码 mp3，实测固定 256kbps = 31.3KB/s；持久化档位值 1 固定对应流畅。 */
     public static final int SMOOTH = 1;
+    /** NAS 预转 AAC-LC 512kbps，独立文件直传，约需 65KB/s。 */
+    public static final int HIGH = 2;
 
     /** 默认档：不动音质。降级是车主的权利，不是我们的默认行为。 */
     public static final int DEFAULT = LOSSLESS;
@@ -33,26 +35,33 @@ public final class StreamTier {
 
     /** 用户可见的档位名（设置页那颗 pill）。 */
     public static String label(int tier) {
-        return tier == SMOOTH ? "流畅" : "无损";
+        switch (clamp(tier)) {
+            case HIGH: return "高品";
+            case SMOOTH: return "流畅";
+            default: return "无损";
+        }
     }
 
-    /**
-     * 档位说明（设置页副标题）。数字全部来自实测：本库无损原件实测需 100~151KB/s
-     * （2026-10-07 Bad Romance 44,499,871B/294,661ms = 151KB/s），流畅档实测 31.3KB/s。
-     */
+    /** 档位说明（设置页副标题），数字按本库和样曲实测。 */
     public static String describe(int tier) {
-        return tier == SMOOTH
-                ? "服务端转码 256kbps，约需 32KB/s"
-                : "原始文件直传，本库实测需 100~151KB/s";
+        switch (clamp(tier)) {
+            case HIGH: return "AAC-LC 512kbps，约需 65KB/s";
+            case SMOOTH: return "服务端转码 256kbps，约需 32KB/s";
+            default: return "原始文件直传，本库实测需 100~151KB/s";
+        }
     }
 
-    /** 合法性钳制：SharedPreferences 里可能被写进越界值（旧版本残留/手改）。 */
+    /** 合法性钳制：外部或手动写入的持久化值可能超出有效范围。 */
     public static int clamp(int tier) {
-        return tier == SMOOTH ? SMOOTH : LOSSLESS;
+        return tier == HIGH ? HIGH : tier == SMOOTH ? SMOOTH : LOSSLESS;
     }
 
-    /** 循环切换：无损 → 流畅 → 无损。设置页一行放不下一个列表，沿用引擎/夜间档的循环式交互。 */
+    /** 循环切换：无损 → 高品 → 流畅 → 无损。 */
     public static int next(int tier) {
-        return clamp(tier) == SMOOTH ? LOSSLESS : SMOOTH;
+        switch (clamp(tier)) {
+            case LOSSLESS: return HIGH;
+            case HIGH: return SMOOTH;
+            default: return LOSSLESS;
+        }
     }
 }

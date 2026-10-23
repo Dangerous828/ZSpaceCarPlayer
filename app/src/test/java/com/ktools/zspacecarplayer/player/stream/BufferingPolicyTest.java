@@ -348,7 +348,12 @@ public class BufferingPolicyTest {
     public void zeroByteOpenDiesSoonerThanSlowOpen() {
         long first = BufferingPolicy.OPEN_FIRST_BYTE_MS;
         long stall = BufferingPolicy.OPEN_STALL_MS;
-        assertTrue("首字节耐心必须显著短于 stall 耐心，否则这次拆分是空改动", first * 3 < stall);
+        // 判据：首字节耐心必须明显短于「已有字节后的零增长耐心」。
+        // 原写法 first*3 < stall 在 2026-10-21 把 first 从 4s 放到 8s 后不再成立
+        // （弱网首字节 4~7s 是常态，4s 的门等于自己制造失败），但"更早失败"这条本意仍然成立，
+        // 所以改成"前者至少短 6 秒"——8s vs 15s 仍然明显更早放手。
+        assertTrue("首字节耐心必须明显短于 stall 耐心，否则这次拆分是空改动",
+                stall - first >= 6_000L);
         assertFalse(BufferingPolicy.openShouldAbort(false, first - 1, first - 1, false));
         assertTrue(BufferingPolicy.openShouldAbort(false, first, first, false));
         // 同一时刻"已经收到过字节"就不能按零字节判死：那是 2026-10-05 修回来的慢流保护

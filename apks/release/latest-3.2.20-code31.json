@@ -1,0 +1,12 @@
+{
+  "versionCode": 31,
+  "versionName": "3.2.20",
+  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.2.20-code31-debug.apk",
+  "fileName": "ZSpaceCarPlayer-3.2.20-code31-debug.apk",
+  "sizeBytes": 3153852,
+  "sha256": "d128c070afc0af5ffcdf40a9250891b8147b8d98f84d6e555bf8ae4cfd3c86fc",
+  "notes": "播放中夺回媒体键，左右键可切歌，不再被QQ音乐抢走",
+  "minVersionCode": 1,
+  "mandatory": false,
+  "publishedAt": "2026-10-21"
+}

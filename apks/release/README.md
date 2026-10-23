@@ -618,3 +618,12 @@ zip 填充 78,628 B（正常形状，不是那个 5.1MB 的增量假体积）。
 
 备份 `latest.json.bak-20261021-vc28`。公网第一轮命中 `versionCode=29`，实下载 3,153,201 B，
 下载件、本地归档、NAS 静态根、清单四处 SHA-256 一致。
+
+## vc34 = 3.2.23 — 包已验收，OTA 等待全库副本完成
+
+包：`ZSpaceCarPlayer-3.2.23-code34-debug.apk`，3,156,430 B，
+`sha256=8e38e60aa83529f68944cc4cf3513a0364184153daae5553868e6cbe488088b1`。
+`aapt2` 核验 `versionCode=34`、`versionName=3.2.23`、`minSdk=18`、`targetSdk=28`；zipalign 通过，
+Debug 签名与车机现用 OTA 包一致。`clean :app:testDebugUnitTest :app:assembleDebug`：471 项测试 0 失败。
+
+本版增加 AAC-LC 512kbps 的“高品”档；原 FLAC/WAV 保留，高品副本放在单独 Jellyfin 库，客户端按相对路径映射并从主歌单过滤副本。libfdk_aac 样曲实测 `bit_rate=512000`、44.1kHz 双声道，完整解码通过。Jellyfin 当前主音乐库 796 首中 794 首缺少 Genres/GenreItems 元数据；界面将其标为“无流派标签”，目录卡仍按实际父路径生成。608 个副本正在重编码为 512kbps；完成后刷新 Jellyfin、核对 item 数与映射率，再切换 OTA 清单。

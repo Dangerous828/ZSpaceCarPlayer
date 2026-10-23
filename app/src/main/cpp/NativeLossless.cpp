@@ -90,6 +90,15 @@ namespace {
     // 期间渲染线程冻结、与 close 3s 锁超时互相打架。
     const long long SEEK_STALL_MS = 8000;
     const long long SEEK_TOTAL_MS = 30000;
+    /**
+     * 抢 apiMutex 的等待上限 (2026-10-21)。
+     *
+     * 原来用 try_lock() 一次不成就返回失败，而渲染线程解码期间一直持有这把锁，
+     * 撞上的 seek 全部判死。真车据此退避 6 秒重试，用户听到"卡十几秒"，
+     * 但现场 target 与 at 只差 1ms——不是定位问题，是抢锁失败。
+     * 500ms 足够让一次 2048 帧的解码循环收尾，又不会让 seek 长期占住调用方。
+     */
+    const long long SEEK_LOCK_WAIT_MS = 500;
 
     // SEEK_CUR 前向小跳改为顺序读丢弃的上限。
     // 真车暴露：dr_flac open 时 onMeta=NULL，对 PICTURE（嵌入封面 MB 级）/PADDING
@@ -444,7 +453,16 @@ Java_com_ktools_zspacecarplayer_dsp_NativeLosslessDecoder_nativeSeekToFrame(
     NativeDecoder *dec = reinterpret_cast<NativeDecoder *>(handle);
     if (!dec || frameIndex < 0) return JNI_FALSE;
     std::unique_lock<std::timed_mutex> lk(dec->apiMutex, std::defer_lock);
-    if (!lk.try_lock()) return JNI_FALSE;
+    // 等一小会儿，而不是抢一次就放弃 (2026-10-21 真车复盘)。
+    // 渲染线程解码时一直持有这把锁，seek 一撞上就必然失败——现场
+    // "native seek failed: target=110852ms at=110851ms" 就是这样：
+    // 目标位置与当前位置只差 1ms，不是网络也不是定位问题，纯粹是抢锁失败。
+    // 失败后服务层要退避 6 秒再重试，用户听到的是"卡十几秒"。
+    if (!lk.try_lock_for(std::chrono::milliseconds(SEEK_LOCK_WAIT_MS))) {
+        LOGE("seek could not acquire apiMutex within %lldms, giving up",
+             (long long) SEEK_LOCK_WAIT_MS);
+        return JNI_FALSE;
+    }
     if (dec->bridge.aborted.load()) return JNI_FALSE;
     // 武装 seek 截止：期间任何读/seek 连续 SEEK_STALL_MS 拿不到字节就立即失败，杜绝网络
     // 挂死时二分 seek 拖住渲染线程直至 30s 断流检测才醒（阶段 0 自审预警项，真车显形）；

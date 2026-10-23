@@ -189,8 +189,12 @@ public final class BufferingPolicy {
      * 2026-10-06 真车实测到一种旧判据治不了的形态——一首只需 16 KB/s 的 128kbps MP3 也卡住，
      * 上报里是 {@code native open stalled no-progress=15004ms ... buffered=0B}，即 15 秒零字节。
      * 旧判据把"零字节"和"下得慢"用同一个 15s 处理，等于给最需要快速失败的形态最长的耐心。
+     *
+     * <p>2026-10-21 从 4s 放宽到 8s：真车 {@code ctx_upstreamTtfbMaxMs=3501}、上报里多次
+     * {@code native open no-first-byte=4091ms}——就差了 91ms 被掐掉，随后掉进重试退避，
+     * 用户听到的就是"点了不放/一直卡"。弱网首字节 4~7 秒是常态，4 秒的门等于自己制造失败。
      */
-    public static final long OPEN_FIRST_BYTE_MS = 4_000L;
+    public static final long OPEN_FIRST_BYTE_MS = 8_000L;
     /** 即便一直有进展也最多等这么久：解码线程只有一条，不能赌死。 */
     public static final long OPEN_HARD_CAP_MS = 45_000L;
 

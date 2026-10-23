@@ -472,6 +472,38 @@ public class AudioPlayerService extends Service {
      */
     private void reassertMediaButton() {
         registerMediaButton();
+        lastMediaButtonReassertAtMs = SystemClock.elapsedRealtime();
+    }
+
+    /** 播放期间定期夺回媒体键接收方的间隔；太频繁没必要，QQ 音乐也不会每 10 秒压一次。 */
+    private static final long MEDIA_BUTTON_RECLAIM_INTERVAL_MS = 10_000L;
+    private long lastMediaButtonReassertAtMs = 0L;
+
+    /**
+     * 播放中定期把媒体键接收方抢回来 (2026-10-21 车主反馈)。
+     *
+     * <p>现场：正在放歌时按车机左键，结果拉起了 QQ 音乐。上报 logcat 里只出现过
+     * {@code keyCode=87}（下一首），左键(21)一次都没有——说明那一下根本没派发到本应用。
+     *
+     * <p>Android 4.3 没有 MediaSession，物理键派给 Remote Control 栈顶，而 QQ 音乐在后台
+     * 活跃时会周期性刷新自己的接收方注册把本应用压下去。原来只在播放状态变化时重注册
+     * （见 {@link #reassertMediaButton}），<b>播放中不重注册</b>，所以只要 QQ 音乐刷一次，
+     * 之后所有按键都归它，直到本应用下次切歌。
+     */
+    private void reclaimMediaButtonIfStolen() {
+        if (audioManager == null) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastMediaButtonReassertAtMs < MEDIA_BUTTON_RECLAIM_INTERVAL_MS) {
+            return;
+        }
+        try {
+            registerMediaButton();
+            lastMediaButtonReassertAtMs = now;
+        } catch (RuntimeException e) {
+            Log.w(TAG, "reclaim media button failed", e);
+        }
     }
 
     /**
@@ -653,6 +685,7 @@ public class AudioPlayerService extends Service {
                     // 均为只读 + 自愈式调用，不影响上面的进度 / 断点 / 看门狗治理。
                     maybeReportBuffering(currentMs, totalMs);
                     maybePrefetchNext(currentMs, totalMs);
+                    reclaimMediaButtonIfStolen();
                 } else if (watchdogAction() == PlaybackStateMachine.WatchdogAction.REBUILD_STREAM
                         && !playbackState.isPreparing()) {
                     // 假播放兜底: onError 重试链耗尽或长时间无网络后播放器已死,
@@ -960,7 +993,7 @@ public class AudioPlayerService extends Service {
                 starving, prefillInProgress, already)) {
             return;
         }
-        String nextUrl = resolvePlayUrl(JellyfinApiClient.getInstance(), next.getId(), next.getStreamUrl());
+        String nextUrl = resolvePlayUrl(JellyfinApiClient.getInstance(), next);
         if (nextUrl == null || nextUrl.length() == 0) return;
         proxy.prefetch(nextUrl);
         prefetchedNextSongId = next.getId();
@@ -1098,17 +1131,22 @@ public class AudioPlayerService extends Service {
     }
 
     /**
-     * 起播/预取实际用的 URL：无损档沿用该曲入库时定下的传输方式，流畅档才换成服务端转码
-     * （实测 256kbps，见 {@link com.ktools.zspacecarplayer.player.stream.StreamTier}）。
-     * 档位由车主在设置页手选，<b>没有任何自动切换路径</b>（自动降档已被否决）。
+     * 起播/预取实际用的 URL：无损档沿用原件/服务端 FLAC，高品档使用已映射的 AAC 副本，流畅档使用
+     * 服务端 MP3 转码（实测 256kbps）。档位由车主手选，<b>没有任何自动切换路径</b>。
      *
      * <p>只影响**下一首**：中途换 URL 一定断音。代价说清楚——若档位恰好在"预取之后、消费之前"翻转，
      * 作废会打空、那次预取白做（由 {@code MAX_SOURCES} 淘汰兜住），不会播错内容。
      */
-    private String resolvePlayUrl(JellyfinApiClient client, String itemId, String cachedStreamUrl) {
+    private String resolvePlayUrl(JellyfinApiClient client, SongItem song) {
+        String itemId = song != null ? song.getId() : "";
+        if (itemId == null || itemId.isEmpty()) return "";
         int tier = getStreamTier();
-        String url = client.getStreamUrlForTier(itemId, cachedStreamUrl, tier);
-        if (tier == StreamTier.SMOOTH) {
+        String url = client.getStreamUrlForTier(itemId, song.getStreamUrl(), tier,
+                song.getHighQualityItemId());
+        if (tier == StreamTier.HIGH) {
+            CrashMonitor.breadcrumb("play", "start on high tier id=" + itemId
+                    + " mapped=" + !song.getHighQualityItemId().isEmpty());
+        } else if (tier == StreamTier.SMOOTH) {
             CrashMonitor.breadcrumb("play", "start on smooth tier (user picked) id=" + itemId
                     + " est=" + rateGovernor.getLastWindowBytesPerSec() + "B/s");
         }
@@ -1127,11 +1165,11 @@ public class AudioPlayerService extends Service {
             for (int i = 0; i < playlist.size(); i++) {
                 SongItem s = playlist.get(i);
                 if (s != null && songId.equals(s.getId())) {
-                    return resolvePlayUrl(client, songId, s.getStreamUrl());
+                    return resolvePlayUrl(client, s);
                 }
             }
         }
-        return client.getStreamUrl(songId, true);
+        return client.getStreamUrlForTier(songId, null, getStreamTier(), "");
     }
 
     private void startForegroundServiceNotification(String title, String content) {
@@ -1344,7 +1382,7 @@ public class AudioPlayerService extends Service {
                     bindPlayerCallbacks(generation);
                     gainEnvelope.setImmediate(0.0f);
                     // 传输方式由该曲入库时的码率裁定决定（多声道无损走服务端下混），此处只现取 token
-                    String urlToPlay = resolvePlayUrl(client, song.getId(), song.getStreamUrl());
+                    String urlToPlay = resolvePlayUrl(client, song);
                     CrashMonitor.putContext("streamUrl", urlToPlay);
                     // 缓冲 / 预取 (2026-09-12)：记录当前曲远端 URL 供 percent 查询与预取命中；
                     // 作废与新一首无关的旧预取源；重新武装起播门槛态

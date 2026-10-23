@@ -1,5 +1,6 @@
 package com.ktools.zspacecarplayer.net;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
@@ -64,6 +65,17 @@ public class LibraryAudioFilterTest {
                 + "\"MediaStreams\":[{\"Type\":\"Video\",\"Codec\":\"h264\"},{\"Type\":\"Audio\",\"Codec\":\"aac\"}]}]");
         assertNull("带视频流的必须被拒", api.parseSongItem(mp4));
         assertTrue("被滤掉的条数要能读出来，UI 才有话可说", api.getSkippedVideoItems() >= 1);
+    }
+
+    @Test
+    public void highQualityCopyPairsByRelativePathAcrossSeparateLibraries() {
+        String source = JellyfinApiClient.audioPairKey(
+                "/media/music/日语神曲/Rage your dream - m_o_v_e.flac", "/media/music/");
+        String copy = JellyfinApiClient.audioPairKey(
+                "/config/car-hq/日语神曲/Rage your dream - m_o_v_e.m4a", "/config/car-hq/");
+        assertEquals(source, copy);
+        assertNull(JellyfinApiClient.audioPairKey(
+                "/config/car-hq/日语神曲/other.m4a", "/media/music/"));
     }
 
     @Test

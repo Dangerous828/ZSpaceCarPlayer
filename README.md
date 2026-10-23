@@ -66,18 +66,19 @@
 ### 3.1 账号鉴权与 Header 构造
 * **请求 Header 规范：**
   ```http
-  X-Emby-Authorization: MediaBrowser Client="ZSpaceCarPlayer", Device="Geely-iMX6-Car", DeviceId="CAR-IMX6-001", Version="2.3.0", Token="{accessToken}"
+  X-Emby-Authorization: MediaBrowser Client="ZSpaceCarPlayer", Device="Geely-iMX6-Car", DeviceId="CAR-IMX6-001", Version="{appVersion}", Token="{accessToken}"
   ```
 * **登录接口：** `POST /Users/AuthenticateByName`
 * **红心点赞接口：** `POST /Users/{userId}/FavoriteItems/{itemId}` 与 `DELETE`
   * **离线取舍：** 点赞请求失败时仅写入本地 SQLite；下次媒体库刷新成功后会以服务器收藏状态覆盖本地，离线期间新增的红心可能丢失。
 
 ### 3.2 媒体库曲目检索
-* **接口：** `GET /Users/{userId}/Items?IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources,ParentId,Genres,GenreItems&SortBy=SortName&SortOrder=Ascending&StartIndex={n}&Limit=500`
+* **接口：** `GET /Users/{userId}/Items?IncludeItemTypes=Audio&Recursive=true&Fields=MediaSources,ParentId,Path,Genres,GenreItems&SortBy=SortName&SortOrder=Ascending&StartIndex={n}&Limit=500`
 * **分页：** 客户端按 500 条/页循环拉取直至取完，避免一次性解析超大 JSON 卡死老车机；`Genres`/`GenreItems` 字段供中间流派 Tag 栏使用。
 
 ### 3.3 高清封面与 LRC 动态歌词
-* **无损直连串流：** `{serverUrl}/Audio/{itemId}/stream.mp3?api_key={accessToken}&static=true`（无损 Direct Stream）。
+* **三档手选串流：** 无损档沿用原件/服务端 FLAC；高品档播放 Jellyfin `车载高品` 独立库中的 AAC-LC 512kbps 副本（约 65KB/s），副本按相对路径映射回原曲且不进入主歌单；流畅档使用服务端 MP3 转码（实测 256kbps）。
+* **高品直传地址：** `{serverUrl}/Audio/{hqItemId}/stream.m4a?api_key={accessToken}&static=true`；曲库扫描字段带 `Path`，用于匹配 `/media/music` 与 `/config/car-hq` 下的同名文件。
 * **双端点歌词兼容：** 优先 `/Lyrics/{id}`，失败自动回退 `/Audio/{id}/Lyrics`。
 
 ---

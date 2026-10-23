@@ -195,7 +195,6 @@ public class StreamStarvationTest {
 
     /**
      * 「对外报告正在挨饿」必须带持续时间门槛 (2026-10-21 真车复盘)。
-     *
      * 现场：{@code lead=45s、buffering=false} 的健康状态里，预取每次刚发起就被
      * {@code starving=true} 作废，下载线程刚要提速就被掐断。原因是原生解码器读得很细，
      * 两块数据之间本来就会瞬时追到窗口尾，而旧实现只要 {@code starvedSinceMs} 非负就报饥饿。
@@ -213,5 +212,46 @@ public class StreamStarvationTest {
                 BufferedHttpSource.starvingVerdict(false, now - BufferedHttpSource.STARVE_VISIBLE_MS, now));
         assertTrue("已进 fatal 一律报饿",
                 BufferedHttpSource.starvingVerdict(true, -1L, now));
+    }
+
+    /**
+     * 断点恢复时的前向跳读不能一律清窗重连 (2026-10-21 真车复盘)。
+     *
+     * 现场：{@code slow native seek 10823ms}、{@code discarded=381500B}、{@code upstream conns=3}。
+     * dr_flac 二分找帧位置时跳了几 MB，超过 256KB 就被判成重定位——清窗、断连、重下，
+     * 已经到手的数据白扔。顺序下载本来会把这段补齐。
+     */
+    @Test
+    public void forwardSeekWithinDownloadBudgetWaitsInsteadOfReconnecting() {
+        long bufStart = 0L, bufEnd = 4_000_000L;
+        // 实测 200KB/s 的链路：12 秒能补 2.4MB
+        long budget = BufferedHttpSource.forwardGapWaitBudget(200_000L);
+        assertEquals("预算 = 12s × 实测速率", 200_000L * 12L, budget);
+        // 跳 1MB：在预算内，等顺序下载
+        assertEquals(BufferedHttpSource.PLACE_WAIT, BufferedHttpSource.readPlacementAction(
+                bufEnd + 1_000_000L, bufStart, bufEnd, false, true, budget));
+        // 跳 5MB：超出预算，真重定位
+        assertEquals(BufferedHttpSource.PLACE_RESET, BufferedHttpSource.readPlacementAction(
+                bufEnd + 5_000_000L, bufStart, bufEnd, false, true, budget));
+        // 速率未知时退回保守值，不准傻等一个巨大缺口
+        assertEquals(BufferedHttpSource.FORWARD_GAP_WAIT_MAX_BYTES,
+                BufferedHttpSource.forwardGapWaitBudget(-1L));
+        // 极高速率也要被天花板夹住
+        assertEquals(BufferedHttpSource.FORWARD_GAP_WAIT_CEILING_BYTES,
+                BufferedHttpSource.forwardGapWaitBudget(10_000_000L));
+    }
+
+    /**
+     * 首字节耐心必须大于弱网常态首字节耗时 (2026-10-21)。
+     *
+     * 现场 {@code ctx_upstreamTtfbMaxMs=3501}，而 {@code native open no-first-byte=4091ms}
+     * 就差了 91ms 被掐掉，随后进重试退避——用户看到的是"点了不放"。
+     */
+    @Test
+    public void firstBytePatienceCoversSlowTtfb() {
+        assertTrue("4~7 秒首字节是弱网常态，不能被当失败",
+                BufferingPolicy.OPEN_FIRST_BYTE_MS >= 8_000L);
+        assertTrue("但仍要远短于「有进展后零增长」的门",
+                BufferingPolicy.OPEN_FIRST_BYTE_MS < BufferingPolicy.OPEN_STALL_MS);
     }
 }

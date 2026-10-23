@@ -1112,10 +1112,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
     /**
      * 音质档位行 (2026-10-08 T1 基准重审 L2)。三条硬约束：
-     * ① <b>只有手选</b>，两档循环（无损 → 流畅），没有"自动"这一档——自动降档已被车主否决；
+     * ① <b>只有手选</b>，三档循环（无损 → 高品 → 流畅），没有"自动"这一档——自动降档已被车主否决；
      * ② 只影响<b>下一首</b>，正在播的不动（中途换 URL 必断音）；
-     * ③ 副标题与 Toast 里的码率必须是<b>服务端实测值</b>（256kbps/约 32KB/s），
-     *    不许写请求参数上的 128——那台 Jellyfin 忽略码率参数，写 128 就是假广告。
+     * ③ 副标题与 Toast 里的码率必须是<b>实测值</b>：高品 AAC-LC 512kbps（约 65KB/s）、
+     *    流畅档 256kbps（约 32KB/s）；不许把服务端忽略的 128kbps 请求值当成结果。
      */
     private void setupTierToggle() {
         if (layoutSettingsPage == null) return;
@@ -1604,7 +1604,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
         for (SongItem song : songs) {
             String folder = song.getFolderName();
-            if (folder != null && !folder.trim().isEmpty() && !"未分类文件夹".equals(folder)) {
+            if (SongItem.hasConcreteFolderName(folder)) {
                 String folderTag = "📁 " + folder;
                 Integer fCount = folderCountMap.get(folderTag);
                 folderCountMap.put(folderTag, fCount == null ? 1 : fCount + 1);
@@ -1625,7 +1625,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
         // 再放音乐流派卡片
         for (Map.Entry<String, Integer> entry : categoryCountMap.entrySet()) {
-            list.add(new CategoryItem(entry.getKey(), entry.getKey(), entry.getValue()));
+            list.add(new CategoryItem(entry.getKey(),
+                    CategoryItem.displayGenreName(entry.getKey()), entry.getValue()));
         }
 
         return list;
@@ -1662,7 +1663,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 if (targetFolder.equals(song.getFolderName())) {
                     result.add(song);
                 }
-            } else if (categoryName.equals(song.getGenre())) {
+            } else if (CategoryItem.matchesGenreName(categoryName, song.getGenre())) {
                 result.add(song);
             }
         }
@@ -2236,7 +2237,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
     /**
      * 从歌曲自身反推所属歌单标题 (与 buildCategories 的归类规则一致):
-     * 文件夹优先, 无文件夹用流派 (含「未分类」卡片), 都没有返回 null。
+     * 文件夹优先, 无文件夹用流派 (缺失流派显示「无流派标签」), 都没有返回 null。
      */
     private String inferPlaylistTitleFor(SongItem song) {
         String folder = song.getFolderName();
@@ -2245,7 +2246,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
         }
         String g = song.getGenre();
         if (g != null && !g.trim().isEmpty()) {
-            return g;
+            return CategoryItem.displayGenreName(g);
         }
         return null;
     }
@@ -2824,7 +2825,40 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             // DOWN 与 UP 都要吞掉, 否则系统会收到不成对的 UP 而补做静音动作
             return true;
         }
+        // 车机左右键切歌 (2026-10-21 车主反馈「点左键打开了 QQ 音乐」)。
+        // 只在**本页可见且正在播放**时拦截：列表里方向键仍是正常的焦点导航，
+        // 不能为了切歌把整个页面的方向键吃掉。
+        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+            boolean playing = isBound && playerService != null && playerService.isPlaying();
+            if (playing && !isFinishing()) {
+                if (event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0) {
+                    Log.i(TAG, "Dpad skip key intercepted, keyCode=" + keyCode);
+                    handleDpadSkip(keyCode == KeyEvent.KEYCODE_DPAD_RIGHT);
+                }
+                return true;
+            }
+        }
         return super.dispatchKeyEvent(event);
+    }
+
+    /** 左右键切上一首/下一首。服务未绑定时退回 startService，与媒体键同一条 action。 */
+    private void handleDpadSkip(boolean next) {
+        String action = next ? MediaButtonReceiver.ACTION_NEXT : MediaButtonReceiver.ACTION_PREVIOUS;
+        if (isBound && playerService != null) {
+            if (next) {
+                playerService.playNext();
+            } else {
+                playerService.playPrevious();
+            }
+            return;
+        }
+        Intent intent = new Intent(this, AudioPlayerService.class);
+        intent.setAction(action);
+        try {
+            startService(intent);
+        } catch (Exception e) {
+            Log.w(TAG, "dpad skip failed, service not startable", e);
+        }
     }
 
     /** 静音键 → 暂停/播放切换。服务未绑定时退回 startService, 与媒体键走同一条 action。 */

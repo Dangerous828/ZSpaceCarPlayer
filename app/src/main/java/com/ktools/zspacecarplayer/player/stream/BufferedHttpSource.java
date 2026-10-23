@@ -129,6 +129,11 @@ public class BufferedHttpSource {
     private long upstreamConnections = 0L;
     /** 因重定位/Range 被忽略而丢掉或白重下的字节数。 */
     private long discardedBytes = 0L;
+    /**
+     * 本流首次发起下载的时刻，用来把 {@link #socketBytes} 换算成实测速率
+     * （{@link #forwardGapBudgetLocked} 按这个速率决定"值不值得等顺序下载追上"）。
+     */
+    private long downloadStartAtMs = 0L;
     /** 最近一次上游请求的首字节耗时 (ms)；-1 = 还没有完成过请求。见 {@link #getTtfbStats()}。 */
     private long lastTtfbMs = -1L;
     private long ttfbMaxMs = 0L;
@@ -336,7 +341,7 @@ public class BufferedHttpSource {
                     throw new IOException("buffered source closed");
                 }
                 int placement = readPlacementAction(position, bufStart, bufEnd, eof,
-                        StreamTuning.forwardGapWaitEnabled());
+                        StreamTuning.forwardGapWaitEnabled(), forwardGapBudgetLocked());
                 if (placement == PLACE_IN_WINDOW) {
                     int off = (int) (position % capacity);
                     int avail = (int) (bufEnd - position);
@@ -348,16 +353,26 @@ public class BufferedHttpSource {
                 if (placement == PLACE_EOF) {
                     return -1;
                 }
+                // 窗外/窗口边界的读，一律先查磁盘缓存 (2026-10-21 真车复盘)。
+                //
+                // 原来只在 PLACE_RESET 分支查盘，而**断点恢复走的是新建源**：窗口是空的，
+                // 读位置落在 bufEnd 之后，判定是 PLACE_WAIT —— 于是一直等网络，盘上明明
+                // 有整首歌也不读。现场：这首歌 32MB 已落盘（stored=32694001B），
+                // 恢复播放却只从盘上读到 401408B，剩下全靠 74KB/s 的链路硬扛，
+                // 而这首歌要 133KB/s，lead 一路掉到 0。
+                //
+                // 先查盘不改变正确性：区间表只认确实写成功且连续的范围，跨洞一律不服务。
+                if (placement != PLACE_IN_WINDOW && disk != null && disk.has(position, length)) {
+                    int fromDisk = disk.readInto(position, dest, destOffset, length);
+                    if (fromDisk > 0) {
+                        noteReaderFedLocked(SystemClock.elapsedRealtime());
+                        return fromDisk;
+                    }
+                }
                 if (placement == PLACE_RESET) {
                     // 窗外优先查盘 (A2)：回拖、重播同一首、以及 FLAC 跳读回落到的老位置，
                     // 只要在盘上就地给出去，一条上游连接都不建——省掉的正是那 0.8~1.4 秒。
                     // 只服务"区间表确认连续"的范围，跨洞一律不读。
-                    if (disk != null && disk.has(position, length)) {
-                        int fromDisk = disk.readInto(position, dest, destOffset, length);
-                        if (fromDisk > 0) {
-                            return fromDisk;
-                        }
-                    }
                     // 落在窗口之外（真重定位 / 回读越过已回收区 / 前向缺口过大）：重定位下载
                     requestResetLocked(position);
                     continue;
@@ -407,9 +422,61 @@ public class BufferedHttpSource {
     static final int PLACE_EOF = 3;
     /** 前向缺口在这么多个字节内时等下载追上，而不是重连（约 1 秒可补上）。 */
     static final long FORWARD_GAP_WAIT_MAX_BYTES = 256L * 1024L;
+    /**
+     * 顺序下载正在跑、且缺口小于「约 n 秒的下载量」时，等它追上而不是清窗重连
+     * (2026-10-21 真车复盘)。
+     *
+     * <p>现场：断点恢复时 dr_flac 要二分查找帧位置，跳了几 MB，每次都被判成重定位——
+     * 清窗 + 断连 + 重下，实测一次 seek 花掉 10.8 秒、白扔 381KB
+     * ({@code discarded=381500B, upstream conns=3})。而顺序下载本来就会把这段补齐，
+     * 清窗等于把已经到手的数据扔掉再重买。
+     *
+     * <p>阈值按「下载线程还能跑多快」算：只要缺口不超过 {@code 12 秒 × 本曲所需速率}，
+     * 等它补更便宜。上限 {@link #FORWARD_GAP_WAIT_CEILING_BYTES} 防止弱网下无限等。
+     */
+    static final long FORWARD_GAP_WAIT_SECONDS = 12L;
+    static final long FORWARD_GAP_WAIT_CEILING_BYTES = 4L * 1024L * 1024L;
+
+    /**
+     * 顺序下载能追上的前向缺口（字节）。纯函数，便于单测。
+     *
+     * @param measuredBytesPerSec 实测下载速率；&lt;=0 表示还没量出来，退回保守值
+     *                            {@link #FORWARD_GAP_WAIT_MAX_BYTES}——速率未知时傻等一个
+     *                            大缺口，就是回到"卡几十秒才动"的老问题
+     */
+    static long forwardGapWaitBudget(long measuredBytesPerSec) {
+        if (measuredBytesPerSec <= 0L) {
+            return FORWARD_GAP_WAIT_MAX_BYTES;
+        }
+        long byRate = measuredBytesPerSec * FORWARD_GAP_WAIT_SECONDS;
+        return Math.min(Math.max(byRate, FORWARD_GAP_WAIT_MAX_BYTES), FORWARD_GAP_WAIT_CEILING_BYTES);
+    }
+
+    /**
+     * 本次允许等顺序下载追上的前向缺口（字节）。调用方须持 {@code lock}。
+     *
+     * <p>用<b>实测下载速率</b>而不是标称码率：这条流自己跑多快，只有它自己的字节账最清楚。
+     * 还没量出速率（刚起播）时退回保守的 {@link #FORWARD_GAP_WAIT_MAX_BYTES}，
+     * 免得弱网下一上来就傻等一个大缺口。
+     */
+    private long forwardGapBudgetLocked() {
+        long elapsed = SystemClock.elapsedRealtime() - downloadStartAtMs;
+        long measured = (elapsed > 1000L && socketBytes > 0L)
+                ? socketBytes * 1000L / elapsed : -1L;
+        return forwardGapWaitBudget(measured);
+    }
 
     static int readPlacementAction(long position, long bufStart, long bufEnd, boolean eof,
                                    boolean forwardGapWait) {
+        return readPlacementAction(position, bufStart, bufEnd, eof, forwardGapWait,
+                FORWARD_GAP_WAIT_MAX_BYTES);
+    }
+
+    /**
+     * @param forwardGapMaxBytes 本次允许等下载追上的前向缺口上限（见 {@link #forwardGapWaitBudget}）
+     */
+    static int readPlacementAction(long position, long bufStart, long bufEnd, boolean eof,
+                                   boolean forwardGapWait, long forwardGapMaxBytes) {
         if (position >= bufStart && position < bufEnd) {
             return PLACE_IN_WINDOW;
         }
@@ -420,7 +487,7 @@ public class BufferedHttpSource {
             return PLACE_WAIT;
         }
         if (forwardGapWait && position > bufEnd
-                && position - bufEnd <= FORWARD_GAP_WAIT_MAX_BYTES) {
+                && position - bufEnd <= forwardGapMaxBytes) {
             return PLACE_WAIT;
         }
         return PLACE_RESET;
@@ -983,6 +1050,11 @@ public class BufferedHttpSource {
         // 重新武装卡死基准：休眠期间 lastProgressAtMs 停在很久以前，不刷新会让
         // 新读者的第一次 readAt 被误判成「已断流 30s」而立刻进入 fatal
         lastProgressAtMs = SystemClock.elapsedRealtime();
+        if (downloadStartAtMs == 0L) {
+            // 实测速率的计时起点只定一次：跨重连累加 socketBytes，速率才不会因为
+            // 每次重连都从 0 重新计时而失真（forwardGapBudgetLocked 用它）
+            downloadStartAtMs = lastProgressAtMs;
+        }
         downloaderThread.start();
     }
 
