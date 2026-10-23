@@ -1,0 +1,12 @@
+{
+  "versionCode": 35,
+  "versionName": "3.2.24",
+  "apkUrl": "https://web.kentonnie.top/zspace/update/ZSpaceCarPlayer-3.2.24-code35-debug.apk",
+  "fileName": "ZSpaceCarPlayer-3.2.24-code35-debug.apk",
+  "sizeBytes": 3156173,
+  "sha256": "6fb630bc470bd6cb958fc8827d4c299bc5570d874b850e758812d70556b9db69",
+  "notes": "无流派歌曲只按真实文件夹归类",
+  "minVersionCode": 1,
+  "mandatory": false,
+  "publishedAt": "2026-10-23"
+}

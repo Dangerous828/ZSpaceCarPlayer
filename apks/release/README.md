@@ -629,3 +629,12 @@ Debug 签名与车机现用 OTA 包一致。`clean :app:testDebugUnitTest :app:a
 本版增加 AAC-LC 512kbps 的“高品”档；原 FLAC/WAV 保留，高品副本放在单独 Jellyfin 库，客户端按相对路径映射并从主歌单过滤副本。libfdk_aac 样曲实测 `bit_rate=512000`、44.1kHz 双声道，完整解码通过；Jellyfin 静态流返回 `206 audio/mp4`，Range 总长度 17,446,855 B。Jellyfin 扫描完成后共 1,401 个音频 item：主音乐库 796、高品库 605；可见 FLAC/WAV 与高品副本 605/605 匹配，3 首隐藏备份未被索引，主歌单无副本重复。主库 794 首缺少 Genres/GenreItems 元数据，界面将其标为“无流派标签”，目录卡按实际父路径生成。全库转码日志为 `total=608 ok=608 fail=0 skip=0 outbytes=9446889864`。
 
 发布与验收：发布前将 `latest.json` 备份为 `latest.json.bak-20261023-vc33`，再原子切换 versionCode 34 清单。按清单 `apkUrl` 实下载 HTTP 200，3,156,430 B；本地归档、NAS 静态根、公网下载和清单 SHA-256 四方一致：`8e38e60aa83529f68944cc4cf3513a0364184153daae5553868e6cbe488088b1`。
+
+## vc35 = 3.2.24 — 包已验收，待 OTA 切换
+
+包：`ZSpaceCarPlayer-3.2.24-code35-debug.apk`，3,156,173 B，
+`sha256=6fb630bc470bd6cb958fc8827d4c299bc5570d874b850e758812d70556b9db69`。
+`aapt2` 核验 `versionCode=35`、`versionName=3.2.24`、`minSdk=18`、`targetSdk=28`；zipalign 通过，
+Debug 签名与车机现用 OTA 包一致。`clean :app:testDebugUnitTest :app:assembleDebug`：471 项测试 0 失败。
+
+本版不再生成无流派元数据歌曲的独立分类卡；这些歌曲仍在“全部歌曲”中，并通过真实文件夹分类访问。旧缓存里保存的“未分类”类别名会退回全库列表。

@@ -1611,11 +1611,10 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
             }
 
             String g = song.getGenre();
-            if (g == null || g.trim().isEmpty()) {
-                g = "未分类";
+            if (CategoryItem.hasConcreteGenreName(g)) {
+                Integer count = categoryCountMap.get(g);
+                categoryCountMap.put(g, count == null ? 1 : count + 1);
             }
-            Integer count = categoryCountMap.get(g);
-            categoryCountMap.put(g, count == null ? 1 : count + 1);
         }
 
         // 再放文件夹分类卡片
@@ -1625,8 +1624,7 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
 
         // 再放音乐流派卡片
         for (Map.Entry<String, Integer> entry : categoryCountMap.entrySet()) {
-            list.add(new CategoryItem(entry.getKey(),
-                    CategoryItem.displayGenreName(entry.getKey()), entry.getValue()));
+            list.add(new CategoryItem(entry.getKey(), entry.getKey(), entry.getValue()));
         }
 
         return list;
@@ -1663,7 +1661,8 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
                 if (targetFolder.equals(song.getFolderName())) {
                     result.add(song);
                 }
-            } else if (CategoryItem.matchesGenreName(categoryName, song.getGenre())) {
+            } else if (CategoryItem.hasConcreteGenreName(categoryName)
+                    && categoryName.equals(song.getGenre())) {
                 result.add(song);
             }
         }
@@ -2236,19 +2235,15 @@ public class MainActivity extends AppCompatActivity implements AudioPlayerServic
     }
 
     /**
-     * 从歌曲自身反推所属歌单标题 (与 buildCategories 的归类规则一致):
-     * 文件夹优先, 无文件夹用流派 (缺失流派显示「无流派标签」), 都没有返回 null。
+     * 从歌曲自身反推所属歌单：实际文件夹优先，否则使用真实流派；缺失文件夹和流派时返回 null。
      */
     private String inferPlaylistTitleFor(SongItem song) {
         String folder = song.getFolderName();
-        if (folder != null && !folder.trim().isEmpty() && !"未分类文件夹".equals(folder)) {
+        if (SongItem.hasConcreteFolderName(folder)) {
             return "📁 " + folder;
         }
-        String g = song.getGenre();
-        if (g != null && !g.trim().isEmpty()) {
-            return CategoryItem.displayGenreName(g);
-        }
-        return null;
+        String genre = song.getGenre();
+        return CategoryItem.hasConcreteGenreName(genre) ? genre : null;
     }
 
     /**

@@ -63,7 +63,7 @@ public class JellyfinApiClient {
     private static final String CLIENT_NAME = "ZSpaceCarPlayer";
     private static final String DEVICE_NAME = "Geely-iMX6-Car";
     private static final String DEVICE_ID = "CAR-IMX6-001";
-    private static final String CLIENT_VERSION = "3.2.23";
+    private static final String CLIENT_VERSION = "3.2.24";
     /** NAS 预转 AAC 库，和只读原音乐库位于不同根路径，防止用户曲库出现副本。 */
     private static final String HIGH_QUALITY_ROOT = "/config/car-hq/";
     private static final String MUSIC_ROOT = "/media/music/";
